@@ -1,0 +1,15 @@
+name = "pixer-eleven"
+main = "src/index.js"
+compatibility_date = "2026-05-02"
+
+# Secrets se ponen con: npx wrangler secret put NOMBRE
+# - ELEVENLABS_KEY  (obligatoria)
+# - XAI_KEY         (opcional, para futuras llamadas a Grok)
+
+[observability]
+enabled = true
+
+# KV para signage de Admira XP
+[[kv_namespaces]]
+binding = "SIGNAGE_KV"
+id = "013098f4df534234994ae04b8c1929a5"
