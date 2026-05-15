@@ -12,6 +12,8 @@
 const ALLOWED_ORIGINS = [
   'https://csilvasantin.github.io',
   'https://ainimation.studio',
+  'https://admira.studio',
+  'https://www.admira.studio',
   'http://localhost:8765',
   'http://127.0.0.1:8765',
 ];
@@ -560,6 +562,178 @@ async function signageClearHandler(req, env) {
   return json({ ok: true, cleared: index.length });
 }
 
+// ─── Stock público (R2 + KV para metadata) ─────────────────────────
+// R2 guarda blobs grandes (audio/video). KV guarda metadata en stock:meta:{id}.
+// Un índice LIFO stock_index lista los IDs ordenados por createdAt desc.
+const STOCK_INDEX = 'stock_index';
+const STOCK_MAX_ITEMS = 500;
+const STOCK_TYPES = ['audio', 'music', 'image', 'video'];
+const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function stockPublishHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!env.SIGNAGE_KV)   return json({ error: 'kv-not-bound' }, { status: 500 });
+
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail } = body;
+
+  if (!type || !STOCK_TYPES.includes(type)) {
+    return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
+  }
+  if (!motor || typeof motor !== 'string') return json({ error: 'missing-motor' }, { status: 400 });
+  if (!base64 && !sourceUrl) return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
+
+  const ts = Date.now();
+  const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+
+  let bytes, finalMime;
+  try {
+    if (base64) {
+      bytes = b64ToBytes(base64);
+      finalMime = mime || 'application/octet-stream';
+    } else {
+      const r = await fetch(sourceUrl);
+      if (!r.ok) return json({ error: 'sourceUrl-fetch-failed', status: r.status }, { status: 502 });
+      const buf = await r.arrayBuffer();
+      bytes = new Uint8Array(buf);
+      finalMime = mime || r.headers.get('Content-Type') || 'application/octet-stream';
+    }
+  } catch (e) {
+    return json({ error: 'decode-failed', detail: String(e) }, { status: 400 });
+  }
+
+  // Hard cap defensivo (R2 admite mucho más, pero protege de payloads accidentales)
+  if (bytes.length > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
+
+  const ext = (() => {
+    const map = {
+      'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm',
+      'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+      'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+    };
+    return map[finalMime] || 'bin';
+  })();
+
+  const key = `stock/${id}/asset.${ext}`;
+  await env.STOCK_BUCKET.put(key, bytes, {
+    httpMetadata: { contentType: finalMime, cacheControl: 'public, max-age=31536000, immutable' },
+    customMetadata: { motor, type, id },
+  });
+
+  const publicUrl = `${WORKER_PUBLIC_BASE}/stock/asset/${id}`;
+  const meta = {
+    id,
+    type,
+    motor: String(motor).slice(0, 80),
+    prompt: String(prompt || '').slice(0, 1000),
+    costEst: costEst ? String(costEst).slice(0, 80) : null,
+    mime: finalMime,
+    size: bytes.length,
+    thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
+    url: publicUrl,
+    key,
+    createdAt: new Date(ts).toISOString(),
+  };
+  await env.SIGNAGE_KV.put(`stock:meta:${id}`, JSON.stringify(meta));
+
+  // Índice LIFO con cap
+  let index = [];
+  try { index = JSON.parse(await env.SIGNAGE_KV.get(STOCK_INDEX)) || []; } catch {}
+  index.unshift(id);
+  if (index.length > STOCK_MAX_ITEMS) {
+    const dropped = index.slice(STOCK_MAX_ITEMS);
+    index = index.slice(0, STOCK_MAX_ITEMS);
+    // Limpieza best-effort de los que caen del índice
+    for (const dId of dropped) {
+      try {
+        const raw = await env.SIGNAGE_KV.get(`stock:meta:${dId}`);
+        if (raw) {
+          const m = JSON.parse(raw);
+          if (m.key) await env.STOCK_BUCKET.delete(m.key);
+        }
+        await env.SIGNAGE_KV.delete(`stock:meta:${dId}`);
+      } catch {}
+    }
+  }
+  await env.SIGNAGE_KV.put(STOCK_INDEX, JSON.stringify(index));
+
+  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt });
+}
+
+async function stockListHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const typeFilter = url.searchParams.get('type') || '';
+  const motorFilter = url.searchParams.get('motor') || '';
+  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
+  let index = [];
+  try { index = JSON.parse(await env.SIGNAGE_KV.get(STOCK_INDEX)) || []; } catch {}
+
+  const items = [];
+  for (const id of index) {
+    if (items.length >= limit) break;
+    let raw;
+    try { raw = await env.SIGNAGE_KV.get(`stock:meta:${id}`); } catch {}
+    if (!raw) continue;
+    let meta;
+    try { meta = JSON.parse(raw); } catch { continue; }
+    if (typeFilter && meta.type !== typeFilter) continue;
+    if (motorFilter && meta.motor !== motorFilter) continue;
+    items.push(meta);
+  }
+  return json({ items, total: index.length });
+}
+
+async function stockAssetHandler(req, env, id) {
+  if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
+  if (!env.SIGNAGE_KV)   return new Response('kv-not-bound', { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return new Response('bad-id', { status: 400 });
+
+  const raw = await env.SIGNAGE_KV.get(`stock:meta:${id}`);
+  if (!raw) return new Response('not-found', { status: 404 });
+  let meta;
+  try { meta = JSON.parse(raw); } catch { return new Response('bad-meta', { status: 500 }); }
+
+  const range = req.headers.get('Range') || undefined;
+  const obj = range
+    ? await env.STOCK_BUCKET.get(meta.key, { range: parseRange(range, meta.size) })
+    : await env.STOCK_BUCKET.get(meta.key);
+  if (!obj) return new Response('asset-gone', { status: 404 });
+
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Content-Type', meta.mime || headers.get('Content-Type') || 'application/octet-stream');
+  if (obj.range) {
+    const { offset, length } = obj.range;
+    const end = offset + length - 1;
+    headers.set('Content-Range', `bytes ${offset}-${end}/${meta.size}`);
+    headers.set('Content-Length', String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(meta.size));
+  return new Response(obj.body, { status: 200, headers });
+}
+
+function parseRange(range, size) {
+  // "bytes=START-END" o "bytes=START-"
+  const m = String(range).match(/^bytes=(\d+)-(\d*)$/);
+  if (!m) return undefined;
+  const offset = parseInt(m[1], 10);
+  const end = m[2] ? parseInt(m[2], 10) : size - 1;
+  const length = Math.max(0, Math.min(size, end + 1) - offset);
+  if (length === 0) return undefined;
+  return { offset, length };
+}
+
 // ─── Router ────────────────────────────────────────────────────────
 export default {
   async fetch(req, env) {
@@ -571,7 +745,7 @@ export default {
     let res;
     try {
       if (path === '/healthz') {
-        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY });
+        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
       } else if (path === '/xai/image' && req.method === 'POST') {
@@ -612,6 +786,13 @@ export default {
         res = await signageHeartbeatHandler(req, env);
       } else if (path === '/signage/screens' && req.method === 'GET') {
         res = await signageScreensHandler(req, env);
+      } else if (path === '/stock/publish' && req.method === 'POST') {
+        res = await stockPublishHandler(req, env);
+      } else if (path === '/stock/list' && req.method === 'GET') {
+        res = await stockListHandler(req, env, url);
+      } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
+        const id = path.slice('/stock/asset/'.length);
+        res = await stockAssetHandler(req, env, id);
       } else {
         res = json({ error: 'not-found', path }, { status: 404 });
       }

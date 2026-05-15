@@ -9,7 +9,13 @@ compatibility_date = "2026-05-02"
 [observability]
 enabled = true
 
-# KV para signage de Admira XP
+# KV para signage de Admira XP (también usado por stock con prefijos stock:meta:* y stock_index)
 [[kv_namespaces]]
 binding = "SIGNAGE_KV"
 id = "013098f4df534234994ae04b8c1929a5"
+
+# R2 para Stock público (blobs de audio/música/imágenes/video)
+# Crear con: npx wrangler r2 bucket create pixer-stock
+[[r2_buckets]]
+binding = "STOCK_BUCKET"
+bucket_name = "pixer-stock"
