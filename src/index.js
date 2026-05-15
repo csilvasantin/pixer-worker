@@ -39,6 +39,60 @@ function json(body, init = {}) {
   });
 }
 
+// ─── Telegram notifications (@AdmiraXPBot → chat TELEGRAM_CHAT_ID) ──
+// Real-time alerts en cada llamada relevante para vigilar gasto y uso.
+// Fire-and-forget vía ctx.waitUntil — no añade latencia al response.
+function escHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function sendTelegram(env, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: env.TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+  } catch {}
+}
+
+function notify(ctx, env, text) {
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(sendTelegram(env, text));
+  else sendTelegram(env, text).catch(() => {});
+}
+
+// Rutas que NO notificamos para evitar spam (polling, lecturas cacheadas)
+const NOTIFY_SKIP_EXACT = new Set([
+  '/healthz',
+  '/signage/heartbeat',
+  '/signage/feed',
+  '/signage/screens',
+  '/stock/list',
+  '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
+  '/veo/download',
+]);
+const NOTIFY_SKIP_PREFIX = [
+  '/signage/asset/',
+  '/signage/ack/',
+  '/stock/asset/',
+  '/veo/status/',
+  '/xai/video/', // GET polling
+];
+
+function shouldNotify(path, method, status) {
+  if (status >= 500) return true; // errores siempre
+  if (NOTIFY_SKIP_EXACT.has(path)) return false;
+  if (NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p))) return false;
+  if (method === 'GET') return false; // resto de GETs son lecturas baratas
+  return true;
+}
+
 // ─── ElevenLabs ────────────────────────────────────────────────────
 async function ttsHandler(req, env) {
   if (!env.ELEVENLABS_KEY) return json({ error: 'server-missing-key', service: 'elevenlabs' }, { status: 500 });
@@ -577,7 +631,7 @@ function b64ToBytes(b64) {
   return out;
 }
 
-async function stockPublishHandler(req, env) {
+async function stockPublishHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!env.SIGNAGE_KV)   return json({ error: 'kv-not-bound' }, { status: 500 });
 
@@ -665,6 +719,14 @@ async function stockPublishHandler(req, env) {
   }
   await env.SIGNAGE_KV.put(STOCK_INDEX, JSON.stringify(index));
 
+  // Notificación rica: incluye motor, tipo, tamaño y URL pública del asset
+  const mb = (bytes.length / 1024 / 1024).toFixed(2);
+  const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
+  const text = `📦 <b>STOCK PUBLISH</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
+               `· ${mb} MB · ${escHtml(meta.mime)}\n` +
+               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}`;
+  notify(ctx, env, text);
+
   return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt });
 }
 
@@ -736,12 +798,14 @@ function parseRange(range, size) {
 
 // ─── Router ────────────────────────────────────────────────────────
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(req) });
     }
     const url = new URL(req.url);
     const path = url.pathname;
+    const t0 = Date.now();
+    const origin = req.headers.get('Origin') || req.headers.get('Referer') || 'direct';
     let res;
     try {
       if (path === '/healthz') {
@@ -787,7 +851,7 @@ export default {
       } else if (path === '/signage/screens' && req.method === 'GET') {
         res = await signageScreensHandler(req, env);
       } else if (path === '/stock/publish' && req.method === 'POST') {
-        res = await stockPublishHandler(req, env);
+        res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
@@ -798,6 +862,24 @@ export default {
       }
     } catch (e) {
       res = json({ error: 'worker-exception', message: String(e) }, { status: 500 });
+    }
+    const ms = Date.now() - t0;
+    const status = res.status;
+    if (shouldNotify(path, req.method, status)) {
+      const emoji = status >= 500 ? '🚨' : status >= 400 ? '⚠️' : '✅';
+      let extra = '';
+      if (status >= 400) {
+        // Para errores intenta extraer mensaje del body sin consumir el response
+        try {
+          const cloned = res.clone();
+          const text = await cloned.text();
+          extra = `\n<code>${escHtml(text.slice(0, 300))}</code>`;
+        } catch {}
+      }
+      const msg = `${emoji} <b>${escHtml(req.method)} ${escHtml(path)}</b>\n` +
+                  `· ${status} · ${ms}ms\n` +
+                  `· from <code>${escHtml(origin)}</code>${extra}`;
+      notify(ctx, env, msg);
     }
     const cors = corsHeaders(req);
     Object.entries(cors).forEach(([k, v]) => res.headers.set(k, v));
