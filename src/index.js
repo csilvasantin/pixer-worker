@@ -67,6 +67,9 @@ function notify(ctx, env, text) {
   else sendTelegram(env, text).catch(() => {});
 }
 
+// Diagnóstico síncrono: intenta enviar un mensaje a Telegram y devuelve la
+// respuesta cruda de la API. Útil para detectar token mal, chat_id mal, o
+// bot no iniciado por el usuario destino.
 // Rutas que NO notificamos para evitar spam (polling, lecturas cacheadas)
 const NOTIFY_SKIP_EXACT = new Set([
   '/healthz',
