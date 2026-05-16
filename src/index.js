@@ -616,11 +616,13 @@ async function signageClearHandler(req, env) {
   return json({ ok: true, cleared: index.length });
 }
 
-// ─── Stock público (R2 + KV para metadata) ─────────────────────────
-// R2 guarda blobs grandes (audio/video). KV guarda metadata en stock:meta:{id}.
-// Un índice LIFO stock_index lista los IDs ordenados por createdAt desc.
-const STOCK_INDEX = 'stock_index';
-const STOCK_MAX_ITEMS = 500;
+// ─── Stock público (R2-only, sin KV) ───────────────────────────────
+// Cada asset se guarda como 2 objetos en R2:
+//   stock/{id}/asset.{ext} — el blob
+//   stock/{id}/meta.json   — metadata (type, motor, prompt, costEst, mime,
+//                            size, thumbnail, url, createdAt)
+// Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
+// Sin KV → sin límite de 1000 writes/día en Workers Free.
 const STOCK_TYPES = ['audio', 'music', 'image', 'video'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
@@ -631,9 +633,17 @@ function b64ToBytes(b64) {
   return out;
 }
 
+function extForMime(mime) {
+  const map = {
+    'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm',
+    'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+  };
+  return map[mime] || 'bin';
+}
+
 async function stockPublishHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
-  if (!env.SIGNAGE_KV)   return json({ error: 'kv-not-bound' }, { status: 500 });
 
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -664,25 +674,18 @@ async function stockPublishHandler(req, env, ctx) {
     return json({ error: 'decode-failed', detail: String(e) }, { status: 400 });
   }
 
-  // Hard cap defensivo (R2 admite mucho más, pero protege de payloads accidentales)
   if (bytes.length > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
 
-  const ext = (() => {
-    const map = {
-      'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm',
-      'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
-      'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
-    };
-    return map[finalMime] || 'bin';
-  })();
+  const ext = extForMime(finalMime);
+  const assetKey = `stock/${id}/asset.${ext}`;
+  const metaKey  = `stock/${id}/meta.json`;
+  const publicUrl = `${WORKER_PUBLIC_BASE}/stock/asset/${id}`;
 
-  const key = `stock/${id}/asset.${ext}`;
-  await env.STOCK_BUCKET.put(key, bytes, {
+  await env.STOCK_BUCKET.put(assetKey, bytes, {
     httpMetadata: { contentType: finalMime, cacheControl: 'public, max-age=31536000, immutable' },
     customMetadata: { motor, type, id },
   });
 
-  const publicUrl = `${WORKER_PUBLIC_BASE}/stock/asset/${id}`;
   const meta = {
     id,
     type,
@@ -690,36 +693,18 @@ async function stockPublishHandler(req, env, ctx) {
     prompt: String(prompt || '').slice(0, 1000),
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
+    ext,
     size: bytes.length,
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
     url: publicUrl,
-    key,
+    assetKey,
     createdAt: new Date(ts).toISOString(),
   };
-  await env.SIGNAGE_KV.put(`stock:meta:${id}`, JSON.stringify(meta));
+  await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
 
-  // Índice LIFO con cap
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(STOCK_INDEX)) || []; } catch {}
-  index.unshift(id);
-  if (index.length > STOCK_MAX_ITEMS) {
-    const dropped = index.slice(STOCK_MAX_ITEMS);
-    index = index.slice(0, STOCK_MAX_ITEMS);
-    // Limpieza best-effort de los que caen del índice
-    for (const dId of dropped) {
-      try {
-        const raw = await env.SIGNAGE_KV.get(`stock:meta:${dId}`);
-        if (raw) {
-          const m = JSON.parse(raw);
-          if (m.key) await env.STOCK_BUCKET.delete(m.key);
-        }
-        await env.SIGNAGE_KV.delete(`stock:meta:${dId}`);
-      } catch {}
-    }
-  }
-  await env.SIGNAGE_KV.put(STOCK_INDEX, JSON.stringify(index));
-
-  // Notificación rica: incluye motor, tipo, tamaño y URL pública del asset
+  // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt
   const mb = (bytes.length / 1024 / 1024).toFixed(2);
   const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
   const text = `📦 <b>STOCK PUBLISH</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
@@ -731,42 +716,52 @@ async function stockPublishHandler(req, env, ctx) {
 }
 
 async function stockListHandler(req, env, url) {
-  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const typeFilter = url.searchParams.get('type') || '';
   const motorFilter = url.searchParams.get('motor') || '';
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(STOCK_INDEX)) || []; } catch {}
 
-  const items = [];
-  for (const id of index) {
-    if (items.length >= limit) break;
-    let raw;
-    try { raw = await env.SIGNAGE_KV.get(`stock:meta:${id}`); } catch {}
-    if (!raw) continue;
-    let meta;
-    try { meta = JSON.parse(raw); } catch { continue; }
-    if (typeFilter && meta.type !== typeFilter) continue;
-    if (motorFilter && meta.motor !== motorFilter) continue;
-    items.push(meta);
-  }
-  return json({ items, total: index.length });
+  // List todos los meta.json bajo stock/. R2 devuelve hasta 1000/request.
+  let allMetaKeys = [];
+  let cursor;
+  do {
+    const result = await env.STOCK_BUCKET.list({ prefix: 'stock/', limit: 1000, cursor });
+    for (const o of result.objects) {
+      if (o.key.endsWith('/meta.json')) allMetaKeys.push(o.key);
+    }
+    cursor = result.truncated ? result.cursor : null;
+  } while (cursor);
+
+  // Fetch en paralelo (R2 GETs son Class B, baratísimas)
+  const metas = (await Promise.all(allMetaKeys.map(async k => {
+    try {
+      const obj = await env.STOCK_BUCKET.get(k);
+      if (!obj) return null;
+      return await obj.json();
+    } catch { return null; }
+  }))).filter(Boolean);
+
+  let filtered = metas;
+  if (typeFilter)  filtered = filtered.filter(m => m.type === typeFilter);
+  if (motorFilter) filtered = filtered.filter(m => m.motor === motorFilter);
+  filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  const items = filtered.slice(0, limit);
+  return json({ items, total: filtered.length });
 }
 
 async function stockAssetHandler(req, env, id) {
   if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
-  if (!env.SIGNAGE_KV)   return new Response('kv-not-bound', { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return new Response('bad-id', { status: 400 });
 
-  const raw = await env.SIGNAGE_KV.get(`stock:meta:${id}`);
-  if (!raw) return new Response('not-found', { status: 404 });
+  const metaObj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+  if (!metaObj) return new Response('not-found', { status: 404 });
   let meta;
-  try { meta = JSON.parse(raw); } catch { return new Response('bad-meta', { status: 500 }); }
+  try { meta = await metaObj.json(); } catch { return new Response('bad-meta', { status: 500 }); }
 
   const range = req.headers.get('Range') || undefined;
   const obj = range
-    ? await env.STOCK_BUCKET.get(meta.key, { range: parseRange(range, meta.size) })
-    : await env.STOCK_BUCKET.get(meta.key);
+    ? await env.STOCK_BUCKET.get(meta.assetKey, { range: parseRange(range, meta.size) })
+    : await env.STOCK_BUCKET.get(meta.assetKey);
   if (!obj) return new Response('asset-gone', { status: 404 });
 
   const headers = new Headers();
