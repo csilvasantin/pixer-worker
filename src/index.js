@@ -554,20 +554,27 @@ async function signageHeartbeatHandler(req, env) {
     user_agent: (req.headers.get('User-Agent') || '').slice(0, 200),
     feed_count: parseInt(body.feed_count, 10) || 0,
     showing_id: body.showing_id || null,
-    role: (body.role || 'signage').toString().slice(0, 40),    // 'signage' | 'xtore-game' | ...
+    role: (body.role || 'signage').toString().slice(0, 40),
     version: (body.version || '').toString().slice(0, 40),
   };
-  await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
-
-  // Mantén un índice de screens conocidos
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
-  if (!index.includes(screen)) {
-    index.push(screen);
-    if (index.length > 100) index = index.slice(-100);
-    await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+  // Silenciar errores de KV (límite diario en Workers Free): el heartbeat es
+  // telemetría no crítica; mejor perder algún ping que reventar el worker y
+  // spammear Telegram con un error cada pocos segundos. El cliente recibe 200
+  // y el sistema de signage sigue funcionando — solo se desactualiza el badge
+  // de "screens online" hasta que KV vuelva a aceptar writes (cada 00:00 UTC).
+  try {
+    await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
+    let index = [];
+    try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
+    if (!index.includes(screen)) {
+      index.push(screen);
+      if (index.length > 100) index = index.slice(-100);
+      await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+    }
+    return json({ ok: true, last_seen: now });
+  } catch (e) {
+    return json({ ok: true, last_seen: now, throttled: true, reason: String(e).slice(0, 120) });
   }
-  return json({ ok: true, last_seen: now });
 }
 
 async function signageScreensHandler(req, env) {
