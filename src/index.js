@@ -78,6 +78,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/screens',
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
+  '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
   '/veo/download',
 ]);
 const NOTIFY_SKIP_PREFIX = [
@@ -626,6 +627,52 @@ async function signageClearHandler(req, env) {
   return json({ ok: true, cleared: index.length });
 }
 
+// ─── /notify — endpoint para la rutina "actualización" ──────────────
+// POST /notify { secret: NOTIFY_KEY, text: "<html>" }
+//   → 200 { ok: true } y envía el text al chat TELEGRAM_CHAT_ID en HTML.
+// Auth simple por secret en body (NOTIFY_KEY). Pensado para que mi rutina
+// de release dispare un mensaje clickable con el link al deploy. NO está
+// en la lista de notificación del interceptor para no duplicar.
+async function notifyHandler(req, env, ctx) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
+    return json({ error: 'telegram-not-configured' }, { status: 500 });
+  }
+  if (!env.NOTIFY_KEY) {
+    return json({ error: 'NOTIFY_KEY-not-set' }, { status: 500 });
+  }
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!body.secret || body.secret !== env.NOTIFY_KEY) {
+    return json({ error: 'unauthorized' }, { status: 401 });
+  }
+  if (!body.text || typeof body.text !== 'string') {
+    return json({ error: 'missing-text' }, { status: 400 });
+  }
+  if (body.text.length > 4000) {
+    return json({ error: 'text-too-long', max: 4000 }, { status: 413 });
+  }
+  // Envío síncrono (no waitUntil) para devolver el status real de Telegram.
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: env.TELEGRAM_CHAT_ID,
+        text: body.text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: !!body.disable_preview,
+      }),
+    });
+    const tgBody = await r.json();
+    if (!r.ok || !tgBody.ok) {
+      return json({ error: 'telegram-failed', status: r.status, telegram: tgBody.description || null }, { status: 502 });
+    }
+    return json({ ok: true, message_id: tgBody.result && tgBody.result.message_id });
+  } catch (e) {
+    return json({ error: 'fetch-failed', detail: String(e) }, { status: 500 });
+  }
+}
+
 // ─── Stock público (R2-only, sin KV) ───────────────────────────────
 // Cada asset se guarda como 2 objetos en R2:
 //   stock/{id}/asset.{ext} — el blob
@@ -855,6 +902,8 @@ export default {
         res = await signageHeartbeatHandler(req, env);
       } else if (path === '/signage/screens' && req.method === 'GET') {
         res = await signageScreensHandler(req, env);
+      } else if (path === '/notify' && req.method === 'POST') {
+        res = await notifyHandler(req, env, ctx);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
