@@ -704,7 +704,7 @@ async function stockPublishHandler(req, env, ctx) {
 
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail } = body;
+  const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment } = body;
 
   if (!type || !STOCK_TYPES.includes(type)) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
@@ -748,6 +748,7 @@ async function stockPublishHandler(req, env, ctx) {
     type,
     motor: String(motor).slice(0, 80),
     prompt: String(prompt || '').slice(0, 1000),
+    comment: comment ? String(comment).slice(0, 2000) : null,
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
     ext,
