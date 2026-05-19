@@ -676,6 +676,73 @@ async function notifyHandler(req, env, ctx) {
   }
 }
 
+// ─── Autoclasificación: pide a Gemini 3 tags cortas según metadata ──
+const TAG_SUGGESTIONS = [
+  'música', 'videoclip', 'cine', 'serie', 'documental', 'tráiler',
+  'tutorial', 'cómo se hace', 'humor', 'meme', 'noticias', 'reportaje',
+  'entrevista', 'charla', 'conferencia', 'podcast',
+  'deporte', 'naturaleza', 'animales', 'tecnología', 'ia',
+  'marketing', 'publicidad', 'negocio', 'emprendimiento', 'finanzas',
+  'motivacional', 'crecimiento personal', 'autoayuda',
+  'cocina', 'receta', 'gastronomía',
+  'arte', 'diseño', 'animación', 'videojuego', 'gaming',
+  'ciencia', 'educación', 'historia', 'política',
+  'viaje', 'lugares', 'reseña', 'opinión',
+  'familia', 'lifestyle', 'salud', 'fitness', 'moda', 'belleza',
+  'evento', 'demo de producto', 'making-of', 'idea', 'inspiración'
+];
+
+async function generateAutoTags(env, info) {
+  if (!env.GEMINI_API_KEY) return [];
+  const { title = '', prompt = '', comment = '', type = '', motor = '' } = info || {};
+  if (!title && !prompt && !comment) return [];
+
+  const ask =
+    'Eres un clasificador de contenido multimedia. Asigna EXACTAMENTE 3 etiquetas ' +
+    'cortas (1-2 palabras, minúsculas, sin emojis) que describan el contenido para ' +
+    'que el usuario pueda buscarlo luego en su biblioteca.\n\n' +
+    'Devuelve solo JSON válido con el formato: {"tags":["tag1","tag2","tag3"]}\n\n' +
+    'Etiquetas sugeridas (puedes usar otras si encajan mejor): ' +
+    TAG_SUGGESTIONS.join(', ') + '.\n\n' +
+    'Datos del asset:\n' +
+    `- Tipo: ${type}\n` +
+    `- Motor: ${motor}\n` +
+    `- Título: ${title}\n` +
+    `- URL o prompt original: ${String(prompt).slice(0, 400)}\n` +
+    `- Nota del usuario: ${String(comment).slice(0, 400)}\n`;
+
+  try {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: ask }] }],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: 'application/json',
+        },
+      }),
+    });
+    if (!r.ok) return [];
+    const d = await r.json();
+    const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    let parsed = null;
+    try { parsed = JSON.parse(text); }
+    catch {
+      const m = text.match(/\{[\s\S]*?"tags"[\s\S]*?\}/);
+      if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
+    }
+    const raw = Array.isArray(parsed?.tags) ? parsed.tags : [];
+    return raw
+      .map(t => String(t).toLowerCase().trim().replace(/^[#·.\s]+|[#·.\s]+$/g, '').slice(0, 30))
+      .filter(t => t && t.length <= 30)
+      .slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
 // ─── Stock stats (consumo y reproducciones) ────────────────────────
 // Plays se guardan en R2: stats/plays.json = { total, byDay: { 'YYYY-MM-DD': N } }
 // Imports se calculan sobre la marcha listando R2 (no contador).
@@ -805,7 +872,8 @@ async function stockPublishHandler(req, env, ctx) {
 
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment } = body;
+  const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
+  let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
 
   if (!type || !STOCK_TYPES.includes(type)) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
@@ -844,12 +912,22 @@ async function stockPublishHandler(req, env, ctx) {
     customMetadata: { motor, type, id },
   });
 
+  // Si el frontend no manda tags, las generamos con Gemini (sincronizado:
+  // bloqueante de ~1-2s pero da auto-organización de la biblioteca).
+  if (!tags || tags.length === 0) {
+    try {
+      tags = await generateAutoTags(env, { title, prompt, comment, type, motor });
+    } catch { tags = []; }
+  }
+
   const meta = {
     id,
     type,
     motor: String(motor).slice(0, 80),
     prompt: String(prompt || '').slice(0, 1000),
+    title: title ? String(title).slice(0, 300) : null,
     comment: comment ? String(comment).slice(0, 2000) : null,
+    tags: tags || [],
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
     ext,
@@ -868,9 +946,12 @@ async function stockPublishHandler(req, env, ctx) {
   const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
   const commentSnip = meta.comment ? `\n📝 <i>${escHtml(String(meta.comment).slice(0, 140))}${meta.comment.length > 140 ? '…' : ''}</i>` : '';
   const footer = await buildStatsFooter(env);
+  const tagsSnip = (meta.tags && meta.tags.length)
+    ? `\n🏷 ${meta.tags.map(t => '<code>#' + escHtml(t) + '</code>').join(' ')}`
+    : '';
   const text = `📦 <b>STOCK PUBLISH</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
                `· ${mbStr} MB · ${escHtml(meta.mime)}\n` +
-               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}` +
+               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}${tagsSnip}` +
                footer;
   notify(ctx, env, text);
 
