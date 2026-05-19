@@ -79,12 +79,15 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
+  // (los prefijos /stock/track/ y /stock/asset/ van en NOTIFY_SKIP_PREFIX abajo)
   '/veo/download',
 ]);
 const NOTIFY_SKIP_PREFIX = [
   '/signage/asset/',
   '/signage/ack/',
   '/stock/asset/',
+  '/stock/track/', // notificado dentro del handler con stats agregados
+  '/stock/',       // DELETE notifica dentro del handler
   '/veo/status/',
   '/xai/video/', // GET polling
 ];
@@ -673,6 +676,104 @@ async function notifyHandler(req, env, ctx) {
   }
 }
 
+// ─── Stock stats (consumo y reproducciones) ────────────────────────
+// Plays se guardan en R2: stats/plays.json = { total, byDay: { 'YYYY-MM-DD': N } }
+// Imports se calculan sobre la marcha listando R2 (no contador).
+function todayISO() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+async function readPlays(env) {
+  try {
+    const obj = await env.STOCK_BUCKET.get('stats/plays.json');
+    if (!obj) return { total: 0, byDay: {} };
+    const d = await obj.json();
+    return { total: d.total || 0, byDay: d.byDay || {} };
+  } catch {
+    return { total: 0, byDay: {} };
+  }
+}
+
+async function bumpPlay(env) {
+  const cur = await readPlays(env);
+  const day = todayISO();
+  cur.total = (cur.total || 0) + 1;
+  cur.byDay[day] = (cur.byDay[day] || 0) + 1;
+  await env.STOCK_BUCKET.put('stats/plays.json', JSON.stringify(cur), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' },
+  });
+  return { total: cur.total, today: cur.byDay[day] };
+}
+
+async function getImportsStats(env) {
+  // Suma sobre todos los meta.json
+  let total = 0, today = 0, bytesTotal = 0, bytesToday = 0;
+  const todayPrefix = todayISO();
+  try {
+    let cursor;
+    do {
+      const r = await env.STOCK_BUCKET.list({ prefix: 'stock/', limit: 1000, cursor });
+      const metaKeys = r.objects.filter(o => o.key.endsWith('/meta.json'));
+      const metas = await Promise.all(metaKeys.map(async k => {
+        try { const o = await env.STOCK_BUCKET.get(k.key); return o ? await o.json() : null; }
+        catch { return null; }
+      }));
+      for (const m of metas) {
+        if (!m) continue;
+        total += 1;
+        bytesTotal += m.size || 0;
+        if (m.createdAt && m.createdAt.startsWith(todayPrefix)) {
+          today += 1;
+          bytesToday += m.size || 0;
+        }
+      }
+      cursor = r.truncated ? r.cursor : null;
+    } while (cursor);
+  } catch {}
+  return { total, today, bytesTotal, bytesToday };
+}
+
+function mb(n) { return (n / 1024 / 1024).toFixed(2) + ' MB'; }
+
+async function buildStatsFooter(env) {
+  const [imp, plays] = await Promise.all([getImportsStats(env), readPlays(env)]);
+  const day = todayISO();
+  const playsToday = plays.byDay[day] || 0;
+  return (
+    `\n────────\n` +
+    `📦 Imports hoy: <b>${imp.today}</b> · ${mb(imp.bytesToday)}` +
+    `   |   total: <b>${imp.total}</b> · ${mb(imp.bytesTotal)}\n` +
+    `▶ Plays hoy: <b>${playsToday}</b>   |   total: <b>${plays.total}</b>`
+  );
+}
+
+// POST /stock/track/:id?event=play  → cuenta una reproducción y notifica
+async function stockTrackHandler(req, env, ctx, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  const url = new URL(req.url);
+  const event = url.searchParams.get('event') || 'play';
+  if (event !== 'play') return json({ error: 'unknown-event' }, { status: 400 });
+
+  // Lee la meta para enriquecer la notificación
+  let meta = null;
+  try {
+    const obj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+    if (obj) meta = await obj.json();
+  } catch {}
+  if (!meta) return json({ error: 'asset-not-found' }, { status: 404 });
+
+  const after = await bumpPlay(env);
+  const footer = await buildStatsFooter(env);
+  const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(String(meta.prompt).slice(0, 100))}${meta.prompt.length > 100 ? '…' : ''}</i>` : '';
+  const text =
+    `▶ <b>STOCK PLAY</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor || '')}</code>\n` +
+    `· id <code>${escHtml(id)}</code> · ${mb(meta.size || 0)}${promptSnip}` +
+    footer;
+  notify(ctx, env, text);
+  return json({ ok: true, today: after.today, total: after.total });
+}
+
 // ─── Stock público (R2-only, sin KV) ───────────────────────────────
 // Cada asset se guarda como 2 objetos en R2:
 //   stock/{id}/asset.{ext} — el blob
@@ -762,12 +863,15 @@ async function stockPublishHandler(req, env, ctx) {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
 
-  // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt
-  const mb = (bytes.length / 1024 / 1024).toFixed(2);
+  // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
+  const mbStr = (bytes.length / 1024 / 1024).toFixed(2);
   const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
+  const commentSnip = meta.comment ? `\n📝 <i>${escHtml(String(meta.comment).slice(0, 140))}${meta.comment.length > 140 ? '…' : ''}</i>` : '';
+  const footer = await buildStatsFooter(env);
   const text = `📦 <b>STOCK PUBLISH</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
-               `· ${mb} MB · ${escHtml(meta.mime)}\n` +
-               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}`;
+               `· ${mbStr} MB · ${escHtml(meta.mime)}\n` +
+               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}` +
+               footer;
   notify(ctx, env, text);
 
   return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt });
@@ -946,6 +1050,9 @@ export default {
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
+      } else if (path.startsWith('/stock/track/') && req.method === 'POST') {
+        const id = path.slice('/stock/track/'.length);
+        res = await stockTrackHandler(req, env, ctx, id);
       } else if (path.startsWith('/stock/') && req.method === 'DELETE') {
         const id = path.slice('/stock/'.length);
         res = await stockDeleteHandler(req, env, ctx, id);
