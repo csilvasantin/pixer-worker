@@ -806,6 +806,40 @@ async function stockListHandler(req, env, url) {
   return json({ items, total: filtered.length });
 }
 
+// DELETE /stock/:id — borra los 2 objetos R2 (asset + meta) de un item.
+// Sin auth (admira.studio es admin-only por convención del dominio).
+async function stockDeleteHandler(req, env, ctx, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+
+  const metaKey = `stock/${id}/meta.json`;
+  const metaObj = await env.STOCK_BUCKET.get(metaKey);
+  if (!metaObj) return json({ error: 'not-found' }, { status: 404 });
+
+  let meta = null;
+  try { meta = await metaObj.json(); } catch {}
+
+  const keysToDelete = [metaKey];
+  if (meta && meta.assetKey) keysToDelete.push(meta.assetKey);
+
+  // Limpieza defensiva: lista el prefijo stock/{id}/ por si quedan huérfanos.
+  try {
+    const listed = await env.STOCK_BUCKET.list({ prefix: `stock/${id}/`, limit: 50 });
+    for (const o of listed.objects) {
+      if (!keysToDelete.includes(o.key)) keysToDelete.push(o.key);
+    }
+  } catch {}
+
+  await Promise.all(keysToDelete.map(k => env.STOCK_BUCKET.delete(k)));
+
+  if (meta) {
+    const text = `🗑 <b>STOCK DELETE</b> · ${escHtml(meta.type || 'unknown')} · <code>${escHtml(meta.motor || '')}</code>\n· id <code>${escHtml(id)}</code>`;
+    notify(ctx, env, text);
+  }
+
+  return json({ ok: true, id, deleted: keysToDelete.length });
+}
+
 async function stockAssetHandler(req, env, id) {
   if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return new Response('bad-id', { status: 400 });
@@ -911,6 +945,9 @@ export default {
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
+      } else if (path.startsWith('/stock/') && req.method === 'DELETE') {
+        const id = path.slice('/stock/'.length);
+        res = await stockDeleteHandler(req, env, ctx, id);
       } else {
         res = json({ error: 'not-found', path }, { status: 404 });
       }
