@@ -992,6 +992,44 @@ async function stockListHandler(req, env, url) {
   return json({ items, total: filtered.length });
 }
 
+// POST /stock/:id/tags — sobrescribe meta.tags con la lista del body { tags: [...] }
+async function stockEditTagsHandler(req, env, ctx, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!Array.isArray(body.tags)) return json({ error: 'missing-tags-array' }, { status: 400 });
+
+  const cleaned = body.tags
+    .map(t => String(t).toLowerCase().trim().replace(/^[#·.\s]+|[#·.\s]+$/g, ''))
+    .filter(t => t && t.length <= 30)
+    .slice(0, 8); // máximo 8 etiquetas
+
+  const metaKey = `stock/${id}/meta.json`;
+  const obj = await env.STOCK_BUCKET.get(metaKey);
+  if (!obj) return json({ error: 'not-found' }, { status: 404 });
+  let meta;
+  try { meta = await obj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
+
+  const before = Array.isArray(meta.tags) ? meta.tags.slice() : [];
+  meta.tags = cleaned;
+  await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
+
+  // Notify (silencioso si los tags no han cambiado)
+  const changed = JSON.stringify(before) !== JSON.stringify(cleaned);
+  if (changed) {
+    const tagsHtml = cleaned.length
+      ? cleaned.map(t => '<code>#' + escHtml(t) + '</code>').join(' ')
+      : '<i>(sin etiquetas)</i>';
+    notify(ctx, env, `✏️ <b>STOCK EDIT TAGS</b> · ${escHtml(meta.type || '')} · <code>${escHtml(id)}</code>\n🏷 ${tagsHtml}`);
+  }
+
+  return json({ ok: true, id, tags: cleaned });
+}
+
 // DELETE /stock/:id — borra los 2 objetos R2 (asset + meta) de un item.
 // Sin auth (admira.studio es admin-only por convención del dominio).
 async function stockDeleteHandler(req, env, ctx, id) {
@@ -1134,6 +1172,9 @@ export default {
       } else if (path.startsWith('/stock/track/') && req.method === 'POST') {
         const id = path.slice('/stock/track/'.length);
         res = await stockTrackHandler(req, env, ctx, id);
+      } else if (path.match(/^\/stock\/[^/]+\/tags$/) && req.method === 'POST') {
+        const id = path.split('/')[2];
+        res = await stockEditTagsHandler(req, env, ctx, id);
       } else if (path.startsWith('/stock/') && req.method === 'DELETE') {
         const id = path.slice('/stock/'.length);
         res = await stockDeleteHandler(req, env, ctx, id);
