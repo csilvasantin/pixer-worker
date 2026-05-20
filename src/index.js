@@ -82,6 +82,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
+  '/telegram/webhook', // webhook entrante de Telegram (import por URL) — responde él mismo
+  '/telegram/setup',
   // (los prefijos /stock/track/ y /stock/asset/ van en NOTIFY_SKIP_PREFIX abajo)
   '/veo/download',
 ]);
@@ -679,6 +681,81 @@ async function notifyHandler(req, env, ctx) {
   }
 }
 
+// ─── Telegram: importar a Stock enviando una URL a @AdmiraXPBot ──────
+// Flujo: Telegram → /telegram/webhook → respondemos "importando" y disparamos
+// la descarga en el proxy del Mac Mini (/admira/tube/import-to-stock). El proxy
+// descarga con yt-dlp y publica en /stock/publish, que ya notifica el resultado.
+// El token del bot nunca sale del worker.
+const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/admira';
+async function tgSend(env, chatId, html) {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+  } catch {}
+}
+async function telegramWebhookHandler(req, env, ctx) {
+  // Verificación del secret de Telegram (cabecera fijada en setWebhook)
+  const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
+  if (!env.TELEGRAM_WEBHOOK_SECRET || secret !== env.TELEGRAM_WEBHOOK_SECRET) {
+    return json({ ok: true }); // 200 para que Telegram no reintente; ignoramos
+  }
+  let update;
+  try { update = await req.json(); } catch { return json({ ok: true }); }
+  const msg = update.message || update.edited_message;
+  if (!msg) return json({ ok: true });
+  const chatId = String((msg.chat && msg.chat.id) || '');
+  if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
+  const text = (msg.text || msg.caption || '').trim();
+  if (!text) return json({ ok: true });
+  const m = text.match(/https?:\/\/[^\s]+/i);
+  if (!m) {
+    ctx.waitUntil(tgSend(env, chatId, '📥 Envíame una <b>URL</b> (YouTube, Vimeo, X, TikTok, Instagram, LinkedIn) y la importo a Stock.\nAñade la palabra <b>audio</b> para bajar solo el mp3.'));
+    return json({ ok: true });
+  }
+  const link = m[0].replace(/[).,]+$/, '');
+  const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
+  const comment = text.replace(m[0], '').replace(/\b(audio|mp3)\b/ig, '').trim() || null;
+  let host = '';
+  try { host = new URL(link).hostname; } catch {}
+  const base = env.ADMIRA_TUBE_BASE || ADMIRA_TUBE_BASE_DEFAULT;
+  ctx.waitUntil((async () => {
+    await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
+    try {
+      const r = await fetch(base + '/tube/import-to-stock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: link, format: fmt, comment }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${r.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+      }
+      // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
+    } catch (e) {
+      await tgSend(env, chatId, `🚨 No pude contactar el proxy del Mac Mini (¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>`);
+    }
+  })());
+  return json({ ok: true });
+}
+// Registra el webhook en Telegram. GET /telegram/setup?key=NOTIFY_KEY (one-time).
+async function telegramSetupHandler(req, env, url) {
+  if (!env.TELEGRAM_BOT_TOKEN) return json({ error: 'no-token' }, { status: 500 });
+  if (!env.NOTIFY_KEY || (url.searchParams.get('key') || '') !== env.NOTIFY_KEY) return json({ error: 'unauthorized' }, { status: 401 });
+  if (!env.TELEGRAM_WEBHOOK_SECRET) return json({ error: 'no-webhook-secret (wrangler secret put TELEGRAM_WEBHOOK_SECRET)' }, { status: 500 });
+  const hookUrl = `${url.origin}/telegram/webhook`;
+  const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: hookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET, allowed_updates: ['message', 'edited_message'], drop_pending_updates: true }),
+  });
+  const b = await r.json().catch(() => ({}));
+  return json({ ok: b.ok === true, webhook: hookUrl, telegram: b });
+}
+
 // ─── Autoclasificación: pide a Gemini 3 tags cortas según metadata ──
 const TAG_SUGGESTIONS = [
   'música', 'videoclip', 'cine', 'serie', 'documental', 'tráiler',
@@ -1165,6 +1242,10 @@ export default {
         res = await signageScreensHandler(req, env);
       } else if (path === '/notify' && req.method === 'POST') {
         res = await notifyHandler(req, env, ctx);
+      } else if (path === '/telegram/webhook' && req.method === 'POST') {
+        res = await telegramWebhookHandler(req, env, ctx);
+      } else if (path === '/telegram/setup' && req.method === 'GET') {
+        res = await telegramSetupHandler(req, env, url);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
