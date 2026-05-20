@@ -11,7 +11,10 @@
 
 const ALLOWED_ORIGINS = [
   'https://csilvasantin.github.io',
+  'http://ainimation.studio',
   'https://ainimation.studio',
+  'http://www.ainimation.studio',
+  'https://www.ainimation.studio',
   'https://admira.studio',
   'https://www.admira.studio',
   'http://localhost:8765',
