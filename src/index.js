@@ -473,80 +473,85 @@ async function veoDownloadHandler(req, env, url) {
   });
 }
 
-// ─── Signage (KV) — bridge Pixer.ai → AdmiraXP ─────────────────────
-// Items se guardan como JSON en KV con key item:<ts>. Index en key 'index' (lista de ts).
-const SIGNAGE_INDEX = 'signage_index';
+// ─── Signage (R2) — bridge Pixer.ai → AdmiraXP ─────────────────────
+// Migrado de KV a R2 (2026-05-22): el plan Workers Free limita KV a 1000
+// writes/día y el heartbeat del gemelo lo agotaba → /signage/push devolvía
+// 500 "KV put() limit exceeded". Ahora el feed es un único objeto R2
+// `signage/index.json` (array LIFO de items, cap 50) y los assets base64 van
+// a `signage/asset/{id}`. El feed se lee con UNA sola lectura R2 (clave: lo
+// pollea el gemelo y admira.app cada 5s). Heartbeat/screens siguen en KV
+// (telemetría no crítica que ya degrada en silencio si KV está al límite).
+const SIGNAGE_INDEX_KEY = 'signage/index.json';
+const SIGNAGE_ASSET_PREFIX = 'signage/asset/';
 const SIGNAGE_MAX_ITEMS = 50;
-const SIGNAGE_TTL = 7 * 24 * 3600; // 7 días
+const SIGNAGE_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
+
+async function signageReadIndex(env) {
+  try {
+    const o = await env.STOCK_BUCKET.get(SIGNAGE_INDEX_KEY);
+    if (!o) return [];
+    const a = await o.json();
+    return Array.isArray(a) ? a : [];
+  } catch { return []; }
+}
+async function signageWriteIndex(env, arr) {
+  await env.STOCK_BUCKET.put(SIGNAGE_INDEX_KEY, JSON.stringify(arr), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'no-cache' },
+  });
+}
 
 async function signagePushHandler(req, env) {
-  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { kind, src, title, mime, base64 } = body;
   if (!kind || !['image', 'video', 'audio', 'text'].includes(kind)) return json({ error: 'bad-kind' }, { status: 400 });
   if (!src && !base64) return json({ error: 'missing-src-or-base64' }, { status: 400 });
-  // Tamaño máximo 24 MB de payload
   if (base64 && base64.length > 25 * 1024 * 1024) return json({ error: 'too-big', max_b64: 25 * 1024 * 1024 }, { status: 413 });
 
   const ts = Date.now();
   const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
   const item = {
-    id,
-    ts,
-    kind,
+    id, ts, kind,
     title: (title || '').slice(0, 200),
-    src: src || null,           // URL externa cuando exista
+    src: src || null,
     mime: mime || null,
     hasBase64: !!base64,
+    acked_at: null,
+    screen: null,
   };
   if (base64) {
-    await env.SIGNAGE_KV.put(`asset:${id}`, base64, { expirationTtl: SIGNAGE_TTL });
+    await env.STOCK_BUCKET.put(`${SIGNAGE_ASSET_PREFIX}${id}`, b64ToBytes(base64), {
+      httpMetadata: { contentType: mime || 'application/octet-stream', cacheControl: 'public, max-age=86400' },
+    });
   }
-  await env.SIGNAGE_KV.put(`item:${id}`, JSON.stringify(item), { expirationTtl: SIGNAGE_TTL });
+  const idx = await signageReadIndex(env);
+  idx.unshift(item);
+  await signageWriteIndex(env, idx.slice(0, SIGNAGE_MAX_ITEMS));
 
-  // Actualiza índice (LIFO, max 50)
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(SIGNAGE_INDEX)) || []; } catch {}
-  index.unshift(id);
-  if (index.length > SIGNAGE_MAX_ITEMS) index = index.slice(0, SIGNAGE_MAX_ITEMS);
-  await env.SIGNAGE_KV.put(SIGNAGE_INDEX, JSON.stringify(index));
-
-  return json({ ok: true, id, url: `https://pixer-eleven.csilvasantin.workers.dev/signage/asset/${id}` });
+  return json({ ok: true, id, url: `${SIGNAGE_BASE}/signage/asset/${id}` });
 }
 
 async function signageFeedHandler(req, env, url) {
-  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '20', 10)));
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(SIGNAGE_INDEX)) || []; } catch {}
-  const ids = index.slice(0, limit);
-  const items = await Promise.all(ids.map(async id => {
-    try {
-      const raw = await env.SIGNAGE_KV.get(`item:${id}`);
-      if (!raw) return null;
-      const item = JSON.parse(raw);
-      // Si tiene base64 expone URL del worker, si no, src directa
-      if (item.hasBase64) item.url = `https://pixer-eleven.csilvasantin.workers.dev/signage/asset/${id}`;
-      else item.url = item.src;
-      return item;
-    } catch { return null; }
+  const idx = await signageReadIndex(env);
+  const items = idx.slice(0, limit).map(item => ({
+    ...item,
+    url: item.hasBase64 ? `${SIGNAGE_BASE}/signage/asset/${item.id}` : item.src,
   }));
-  return json({ items: items.filter(Boolean) });
+  return json({ items });
 }
 
 async function signageAssetHandler(req, env, id) {
-  if (!env.SIGNAGE_KV) return new Response('kv-not-bound', { status: 500 });
+  if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return new Response('bad-id', { status: 400 });
-  const itemRaw = await env.SIGNAGE_KV.get(`item:${id}`);
-  if (!itemRaw) return new Response('not-found', { status: 404 });
-  const item = JSON.parse(itemRaw);
-  const b64 = await env.SIGNAGE_KV.get(`asset:${id}`);
-  if (!b64) return new Response('asset-gone', { status: 404 });
-  const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-  return new Response(bin, {
+  const obj = await env.STOCK_BUCKET.get(`${SIGNAGE_ASSET_PREFIX}${id}`);
+  if (!obj) return new Response('asset-gone', { status: 404 });
+  const ct = (obj.httpMetadata && obj.httpMetadata.contentType) || 'application/octet-stream';
+  return new Response(obj.body, {
     status: 200,
-    headers: { 'Content-Type': item.mime || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' },
+    headers: { 'Content-Type': ct, 'Cache-Control': 'public, max-age=86400' },
   });
 }
 
@@ -615,29 +620,26 @@ async function signageScreensHandler(req, env) {
 }
 
 async function signageAckHandler(req, env, id) {
-  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
-  const raw = await env.SIGNAGE_KV.get(`item:${id}`);
-  if (!raw) return json({ error: 'not-found' }, { status: 404 });
-  const item = JSON.parse(raw);
-  item.acked_at = Date.now();
   let body = {};
   try { body = await req.json(); } catch {}
+  const idx = await signageReadIndex(env);
+  const item = idx.find(it => it && it.id === id);
+  if (!item) return json({ error: 'not-found' }, { status: 404 });
+  item.acked_at = Date.now();
   if (body.screen) item.screen = String(body.screen).slice(0, 60);
-  await env.SIGNAGE_KV.put(`item:${id}`, JSON.stringify(item), { expirationTtl: SIGNAGE_TTL });
+  await signageWriteIndex(env, idx);
   return json({ ok: true, id, acked_at: item.acked_at, screen: item.screen || null });
 }
 
 async function signageClearHandler(req, env) {
-  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
-  let index = [];
-  try { index = JSON.parse(await env.SIGNAGE_KV.get(SIGNAGE_INDEX)) || []; } catch {}
-  await Promise.all(index.flatMap(id => [
-    env.SIGNAGE_KV.delete(`item:${id}`),
-    env.SIGNAGE_KV.delete(`asset:${id}`),
-  ]));
-  await env.SIGNAGE_KV.delete(SIGNAGE_INDEX);
-  return json({ ok: true, cleared: index.length });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  const idx = await signageReadIndex(env);
+  await Promise.all(idx.filter(it => it && it.hasBase64).map(it =>
+    env.STOCK_BUCKET.delete(`${SIGNAGE_ASSET_PREFIX}${it.id}`).catch(() => {})));
+  await env.STOCK_BUCKET.delete(SIGNAGE_INDEX_KEY);
+  return json({ ok: true, cleared: idx.length });
 }
 
 // ─── /signage/now — puntero "ahora reproduciendo" por pantalla ──────
