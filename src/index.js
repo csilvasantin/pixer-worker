@@ -17,6 +17,8 @@ const ALLOWED_ORIGINS = [
   'https://www.ainimation.studio',
   'https://admira.studio',
   'https://www.admira.studio',
+  'https://admira.app',
+  'https://www.admira.app',
   'http://localhost:8765',
   'http://127.0.0.1:8765',
 ];
