@@ -79,6 +79,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/heartbeat',
   '/signage/feed',
   '/signage/screens',
+  '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
@@ -633,6 +634,40 @@ async function signageClearHandler(req, env) {
   ]));
   await env.SIGNAGE_KV.delete(SIGNAGE_INDEX);
   return json({ ok: true, cleared: index.length });
+}
+
+// ─── /signage/now — puntero "ahora reproduciendo" por pantalla ──────
+// Canal ligero para espejar en vivo una pantalla del juego (p. ej. el
+// escaparate del digital twin) en una pantalla física: el juego hace POST con
+// {screen, item} cada vez que cambia el contenido, y el receptor (pantalla.html)
+// hace GET ?screen= y reproduce lo mismo. Un único valor por pantalla, TTL corto;
+// el emisor lo refresca cada ~20s.
+const SIGNAGE_NOW_TTL = 120; // 2 min sin refresco → el puntero caduca
+
+async function signageNowGetHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  if (!/^[a-z0-9_-]+$/i.test(screen)) return json({ error: 'bad-screen' }, { status: 400 });
+  let item = null;
+  try { item = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
+  return json({ ok: true, screen, item: item || null });
+}
+
+async function signageNowPostHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(body.screen || '').slice(0, 60);
+  if (!/^[a-z0-9_-]+$/i.test(screen)) return json({ error: 'bad-screen' }, { status: 400 });
+  const item = (body.item && typeof body.item === 'object') ? body.item : null;
+  const raw = JSON.stringify(item || {});
+  if (raw.length > 8000) return json({ error: 'too-big', max: 8000 }, { status: 413 });
+  try {
+    await env.SIGNAGE_KV.put(`now:${screen}`, raw, { expirationTtl: SIGNAGE_NOW_TTL });
+  } catch (e) {
+    return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
+  }
+  return json({ ok: true, screen });
 }
 
 // ─── /notify — endpoint para la rutina "actualización" ──────────────
@@ -1240,6 +1275,10 @@ export default {
         res = await signageHeartbeatHandler(req, env);
       } else if (path === '/signage/screens' && req.method === 'GET') {
         res = await signageScreensHandler(req, env);
+      } else if (path === '/signage/now' && req.method === 'GET') {
+        res = await signageNowGetHandler(req, env, url);
+      } else if (path === '/signage/now' && req.method === 'POST') {
+        res = await signageNowPostHandler(req, env);
       } else if (path === '/notify' && req.method === 'POST') {
         res = await notifyHandler(req, env, ctx);
       } else if (path === '/telegram/webhook' && req.method === 'POST') {
