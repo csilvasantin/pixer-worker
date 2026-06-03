@@ -590,6 +590,18 @@ async function reserveKvWrite(env, now) {
   let used = 0;
   try { used = parseInt(await env.SIGNAGE_KV.get(key), 10) || 0; } catch {}
   if (used >= cap) return false;
+  // Aviso de uso al 80% del tope diario (una sola vez al día) vía Telegram.
+  // Es el "alerta de uso": Carlos se entera ANTES de que el cortacircuitos
+  // pause las escrituras, por si hay que subir el tope o investigar un runaway.
+  if (used >= cap * 0.8) {
+    const wkey = 'kvbudget-warned:' + new Date(now).toISOString().slice(0, 10);
+    try {
+      if (!(await env.SIGNAGE_KV.get(wkey))) {
+        await env.SIGNAGE_KV.put(wkey, '1', { expirationTtl: 172800 });
+        sendTelegram(env, `⚠️ <b>KV writes al 80%</b> — ${used}/${cap} hoy (tope diario del cortacircuitos). Al llegar a ${cap} se pausan hasta el reset (00:00 UTC). Si es por escala real, sube <code>KV_DAILY_WRITE_CAP</code>; si no, revisa qué dispara escrituras.`).catch(() => {});
+      }
+    } catch {}
+  }
   try { await env.SIGNAGE_KV.put(key, String(used + 2), { expirationTtl: 172800 }); } catch {}
   return true;
 }
