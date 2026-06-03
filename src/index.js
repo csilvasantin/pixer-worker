@@ -504,10 +504,15 @@ async function signagePushHandler(req, env) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const { kind, src, title, mime, base64 } = body;
+  const { kind, src, title, mime, base64, target } = body;
   if (!kind || !['image', 'video', 'audio', 'text'].includes(kind)) return json({ error: 'bad-kind' }, { status: 400 });
   if (!src && !base64) return json({ error: 'missing-src-or-base64' }, { status: 400 });
   if (base64 && base64.length > 25 * 1024 * 1024) return json({ error: 'too-big', max_b64: 25 * 1024 * 1024 }, { status: 413 });
+
+  // Targeting por pantalla (opcional): si viene `target`, el item solo lo verá
+  // esa pantalla (vía /signage/feed?screen=). Sin target = broadcast a todas.
+  const tgt = target ? String(target).slice(0, 60) : null;
+  if (tgt && !/^[a-z0-9_-]+$/i.test(tgt)) return json({ error: 'bad-target' }, { status: 400 });
 
   const ts = Date.now();
   const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
@@ -519,6 +524,7 @@ async function signagePushHandler(req, env) {
     hasBase64: !!base64,
     acked_at: null,
     screen: null,
+    target: tgt,
   };
   if (base64) {
     await env.STOCK_BUCKET.put(`${SIGNAGE_ASSET_PREFIX}${id}`, b64ToBytes(base64), {
@@ -535,8 +541,12 @@ async function signagePushHandler(req, env) {
 async function signageFeedHandler(req, env, url) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '20', 10)));
+  const screen = (url.searchParams.get('screen') || '').slice(0, 60);
   const idx = await signageReadIndex(env);
-  const items = idx.slice(0, limit).map(item => ({
+  // Targeting por pantalla: un item con `target` solo lo ve esa pantalla; sin
+  // target = broadcast (lo ven todas, retrocompatible). Sin ?screen= no filtra.
+  const matching = screen ? idx.filter(it => !it.target || it.target === screen) : idx;
+  const items = matching.slice(0, limit).map(item => ({
     ...item,
     url: item.hasBase64 ? `${SIGNAGE_BASE}/signage/asset/${item.id}` : item.src,
   }));
@@ -557,7 +567,32 @@ async function signageAssetHandler(req, env, id) {
 
 // Heartbeat: cada signage.html abierto pinga periódicamente para que sepamos qué pantallas están vivas.
 const SCREENS_INDEX = 'signage_screens_index';
-const SCREEN_TTL = 5 * 60; // 5 min sin pings → considera la pantalla muerta
+const SCREEN_TTL = 10 * 60;        // 10 min sin pings → pantalla muerta (holgura sobre el refresco)
+const HB_REFRESH_MS = 90 * 1000;   // si nada cambió, reescribe screen: como mucho cada 90s
+const SCREEN_ONLINE_MS = 6 * 60 * 1000; // "online" si se vio hace < 6 min (cubre heartbeat lento del juego a 5min)
+
+// ─── Cortacircuitos de escrituras KV (control de coste) ──────────────
+// Cloudflare Workers Paid factura overage de KV sin tope duro. Este guard
+// cuenta las escrituras KV del día (UTC) y, al alcanzar el tope, deja de
+// escribir hasta el día siguiente → imposible pasar del millón/mes incluido
+// sin aprobación. Normal operando ≈ <2k/día, muy por debajo. El contador es
+// en sí una escritura, por eso cada write lógico cuenta como 2 (dato+contador).
+// Kill-switch instantáneo: var KV_WRITES_OFF=1 (wrangler) corta todo write KV.
+const KV_DAILY_WRITE_CAP_DEFAULT = 25000; // físicas/día → ~750k/mes < 1M incluido
+function utcDayKey(now) { return 'kvbudget:' + new Date(now).toISOString().slice(0, 10); }
+// Reserva presupuesto para UN write lógico (= 2 físicos: el dato + este contador).
+// Devuelve true si se puede escribir; false si kill-switch o tope alcanzado.
+async function reserveKvWrite(env, now) {
+  if (String(env.KV_WRITES_OFF || '') === '1') return false;
+  if (!env.SIGNAGE_KV) return false;
+  const cap = parseInt(env.KV_DAILY_WRITE_CAP, 10) || KV_DAILY_WRITE_CAP_DEFAULT;
+  const key = utcDayKey(now);
+  let used = 0;
+  try { used = parseInt(await env.SIGNAGE_KV.get(key), 10) || 0; } catch {}
+  if (used >= cap) return false;
+  try { await env.SIGNAGE_KV.put(key, String(used + 2), { expirationTtl: 172800 }); } catch {}
+  return true;
+}
 
 async function signageHeartbeatHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -582,13 +617,28 @@ async function signageHeartbeatHandler(req, env) {
   // y el sistema de signage sigue funcionando — solo se desactualiza el badge
   // de "screens online" hasta que KV vuelva a aceptar writes (cada 00:00 UTC).
   try {
+    // Detección de cambio: solo reescribe si el contenido relevante cambió
+    // (showing_id/role/version) o si pasó la ventana de refresco (90s). Así,
+    // aunque el cliente pingue cada 20s, KV se escribe como mucho ~1 vez/90s.
+    let prev = null;
+    try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
+    const changed = !prev || prev.showing_id !== data.showing_id ||
+                    prev.role !== data.role || prev.version !== data.version;
+    const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
+    if (!changed && !stale) {
+      return json({ ok: true, last_seen: prev.last_seen, throttled: 'unchanged' });
+    }
+    if (!(await reserveKvWrite(env, now))) {
+      return json({ ok: true, last_seen: now, throttled: 'budget' });
+    }
     await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
+    // Índice de pantallas: solo se escribe al aparecer una pantalla nueva (raro).
     let index = [];
     try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
     if (!index.includes(screen)) {
       index.push(screen);
       if (index.length > 100) index = index.slice(-100);
-      await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+      if (await reserveKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
     }
     return json({ ok: true, last_seen: now });
   } catch (e) {
@@ -606,7 +656,7 @@ async function signageScreensHandler(req, env) {
       const raw = await env.SIGNAGE_KV.get(`screen:${s}`);
       if (!raw) return null; // expirado
       const data = JSON.parse(raw);
-      data.online = (now - data.last_seen) < 30000; // 30s = online, más = stale
+      data.online = (now - data.last_seen) < SCREEN_ONLINE_MS; // online si visto < 6 min
       data.age_seconds = Math.floor((now - data.last_seen) / 1000);
       return data;
     } catch { return null; }
@@ -646,16 +696,28 @@ async function signageClearHandler(req, env) {
 // Canal ligero para espejar en vivo una pantalla del juego (p. ej. el
 // escaparate del digital twin) en una pantalla física: el juego hace POST con
 // {screen, item} cada vez que cambia el contenido, y el receptor (pantalla.html)
-// hace GET ?screen= y reproduce lo mismo. Un único valor por pantalla, TTL corto;
-// el emisor lo refresca cada ~20s.
-const SIGNAGE_NOW_TTL = 120; // 2 min sin refresco → el puntero caduca
+// hace GET ?screen= y reproduce lo mismo. Un único valor por pantalla.
+// El emisor postea en cada cambio + keepalive; el worker deduplica para no
+// reescribir KV salvo cambio real o refresco antes de caducar (ver POST).
+const SIGNAGE_NOW_TTL = 180;        // 3 min sin escritura → el puntero caduca
+const NOW_REFRESH_MS = 90 * 1000;   // si el item no cambió, reescribe como mucho cada 90s
+
+// Firma estable del item ignorando el campo volátil `ts` (que cambia en cada
+// keepalive aunque el contenido sea el mismo).
+function nowItemSig(item) {
+  if (!item || typeof item !== 'object') return '';
+  const it = { ...item }; delete it.ts;
+  return JSON.stringify(it);
+}
 
 async function signageNowGetHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
   if (!/^[a-z0-9_-]+$/i.test(screen)) return json({ error: 'bad-screen' }, { status: 400 });
-  let item = null;
-  try { item = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
+  let stored = null;
+  try { stored = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
+  // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
+  const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
   return json({ ok: true, screen, item: item || null });
 }
 
@@ -666,10 +728,22 @@ async function signageNowPostHandler(req, env) {
   const screen = String(body.screen || '').slice(0, 60);
   if (!/^[a-z0-9_-]+$/i.test(screen)) return json({ error: 'bad-screen' }, { status: 400 });
   const item = (body.item && typeof body.item === 'object') ? body.item : null;
-  const raw = JSON.stringify(item || {});
-  if (raw.length > 8000) return json({ error: 'too-big', max: 8000 }, { status: 413 });
+  const sig = nowItemSig(item);
+  if (sig.length > 8000) return json({ error: 'too-big', max: 8000 }, { status: 413 });
+  const now = Date.now();
+  // Detección de cambio: si el item es igual al guardado y se escribió hace
+  // <90s, no reescribimos (el keepalive cada 20s no cuesta KV). Solo escribe
+  // en cambio real o para refrescar el TTL antes de que caduque.
+  let prev = null;
+  try { prev = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
+  if (prev && prev.__w !== undefined && prev.__sig === sig && (now - prev.__w) < NOW_REFRESH_MS) {
+    return json({ ok: true, screen, throttled: 'unchanged' });
+  }
+  if (!(await reserveKvWrite(env, now))) {
+    return json({ ok: true, screen, throttled: 'budget' });
+  }
   try {
-    await env.SIGNAGE_KV.put(`now:${screen}`, raw, { expirationTtl: SIGNAGE_NOW_TTL });
+    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig }), { expirationTtl: SIGNAGE_NOW_TTL });
   } catch (e) {
     return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
   }
@@ -813,17 +887,29 @@ const TAG_SUGGESTIONS = [
   'evento', 'demo de producto', 'making-of', 'idea', 'inspiración'
 ];
 
-async function generateAutoTags(env, info) {
-  if (!env.GEMINI_API_KEY) return [];
+// Taxonomía de segmentación para publicidad dirigida (la consume /targetPublicity
+// en el gemelo): audience = público objetivo · category = función publicitaria.
+const STOCK_AUDIENCES = ['f', 'm', 'all'];
+const STOCK_CATEGORIES = ['atraer', 'producto', 'promo', 'marca'];
+
+// Clasificación automática con Gemini: 3 tags + audiencia + categoría de retail.
+// Devuelve siempre un objeto {tags, audience, category} con defaults seguros.
+async function generateAutoMeta(env, info) {
+  const empty = { tags: [], audience: 'all', category: 'producto' };
+  if (!env.GEMINI_API_KEY) return empty;
   const { title = '', prompt = '', comment = '', type = '', motor = '' } = info || {};
-  if (!title && !prompt && !comment) return [];
+  if (!title && !prompt && !comment) return empty;
 
   const ask =
-    'Eres un clasificador de contenido multimedia. Asigna EXACTAMENTE 3 etiquetas ' +
-    'cortas (1-2 palabras, minúsculas, sin emojis) que describan el contenido para ' +
-    'que el usuario pueda buscarlo luego en su biblioteca.\n\n' +
-    'Devuelve solo JSON válido con el formato: {"tags":["tag1","tag2","tag3"]}\n\n' +
-    'Etiquetas sugeridas (puedes usar otras si encajan mejor): ' +
+    'Eres un clasificador de creatividades para cartelería digital (DOOH) de retail. ' +
+    'Devuelve SOLO JSON válido con este formato EXACTO:\n' +
+    '{"tags":["t1","t2","t3"],"audience":"f|m|all","category":"atraer|producto|promo|marca"}\n\n' +
+    'Reglas:\n' +
+    '- tags: EXACTAMENTE 3 etiquetas cortas (1-2 palabras, minúsculas, sin emojis) para buscar el asset.\n' +
+    '- audience: público objetivo principal. "f"=mujeres, "m"=hombres, "all"=neutro/mixto. Ante la duda, "all".\n' +
+    '- category: función publicitaria. "atraer"=gancho/oferta para captar a quien pasa o entra a una tienda vacía; ' +
+    '"producto"=muestra un producto concreto; "promo"=promoción/descuento/2x1; "marca"=branding/imagen premium.\n\n' +
+    'Etiquetas sugeridas para tags (usa otras si encajan mejor): ' +
     TAG_SUGGESTIONS.join(', ') + '.\n\n' +
     'Datos del asset:\n' +
     `- Tipo: ${type}\n` +
@@ -845,22 +931,25 @@ async function generateAutoTags(env, info) {
         },
       }),
     });
-    if (!r.ok) return [];
+    if (!r.ok) return empty;
     const d = await r.json();
     const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     let parsed = null;
     try { parsed = JSON.parse(text); }
     catch {
-      const m = text.match(/\{[\s\S]*?"tags"[\s\S]*?\}/);
+      const m = text.match(/\{[\s\S]*\}/);
       if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
     }
-    const raw = Array.isArray(parsed?.tags) ? parsed.tags : [];
-    return raw
+    if (!parsed) return empty;
+    const tags = (Array.isArray(parsed.tags) ? parsed.tags : [])
       .map(t => String(t).toLowerCase().trim().replace(/^[#·.\s]+|[#·.\s]+$/g, '').slice(0, 30))
       .filter(t => t && t.length <= 30)
       .slice(0, 3);
+    const audience = STOCK_AUDIENCES.includes(parsed.audience) ? parsed.audience : 'all';
+    const category = STOCK_CATEGORIES.includes(parsed.category) ? parsed.category : 'producto';
+    return { tags, audience, category };
   } catch {
-    return [];
+    return empty;
   }
 }
 
@@ -1033,13 +1122,17 @@ async function stockPublishHandler(req, env, ctx) {
     customMetadata: { motor, type, id },
   });
 
-  // Si el frontend no manda tags, las generamos con Gemini (sincronizado:
-  // bloqueante de ~1-2s pero da auto-organización de la biblioteca).
-  if (!tags || tags.length === 0) {
-    try {
-      tags = await generateAutoTags(env, { title, prompt, comment, type, motor });
-    } catch { tags = []; }
-  }
+  // Clasificación automática con Gemini (sincronizada, ~1-2s): tags para la
+  // biblioteca + audience/category para publicidad dirigida (/targetPublicity).
+  // Se llama siempre (audience/category nunca llegan del frontend); las tags
+  // solo se sobrescriben si el frontend no mandó ninguna.
+  let audience = 'all', category = 'producto';
+  try {
+    const auto = await generateAutoMeta(env, { title, prompt, comment, type, motor });
+    if (!tags || tags.length === 0) tags = auto.tags;
+    audience = auto.audience;
+    category = auto.category;
+  } catch { if (!tags) tags = []; }
 
   const meta = {
     id,
@@ -1049,6 +1142,8 @@ async function stockPublishHandler(req, env, ctx) {
     title: title ? String(title).slice(0, 300) : null,
     comment: comment ? String(comment).slice(0, 2000) : null,
     tags: tags || [],
+    audience,
+    category,
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
     ext,
@@ -1113,6 +1208,58 @@ async function stockListHandler(req, env, url) {
   return json({ items, total: filtered.length });
 }
 
+// POST /stock/recategorize { secret, limit?, force? }
+// Backfill de audience/category (vía Gemini) en items de Stock que aún no los
+// tienen. Procesa en lotes pequeños para no agotar los subrequests del Worker
+// (cada item actualizado = 1 read + 1 Gemini + 1 write). Llamar repetidamente
+// hasta que updated=0. Con force=true reclasifica también los ya hechos.
+async function stockRecategorizeHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body = {};
+  try { body = await req.json(); } catch {}
+  if (!env.NOTIFY_KEY || body.secret !== env.NOTIFY_KEY) return json({ error: 'unauthorized' }, { status: 401 });
+  const limit = Math.max(1, Math.min(12, parseInt(body.limit, 10) || 6));
+  const force = !!body.force;
+  const maxRead = limit * 6; // techo de lecturas por llamada (seguridad subrequests)
+
+  let keys = [];
+  let cursor;
+  do {
+    const result = await env.STOCK_BUCKET.list({ prefix: 'stock/', limit: 1000, cursor });
+    for (const o of result.objects) if (o.key.endsWith('/meta.json')) keys.push(o.key);
+    cursor = result.truncated ? result.cursor : null;
+  } while (cursor);
+
+  let read = 0, updated = 0;
+  const done = [];
+  for (const k of keys) {
+    if (updated >= limit || read >= maxRead) break;
+    let meta;
+    try { const o = await env.STOCK_BUCKET.get(k); if (!o) continue; meta = await o.json(); } catch { continue; }
+    read++;
+    const has = meta && STOCK_AUDIENCES.includes(meta.audience) && STOCK_CATEGORIES.includes(meta.category);
+    if (has && !force) continue;
+    const auto = await generateAutoMeta(env, {
+      title: meta.title || '', prompt: meta.prompt || '', comment: meta.comment || '',
+      type: meta.type || '', motor: meta.motor || '',
+    });
+    meta.audience = auto.audience;
+    meta.category = auto.category;
+    if ((!Array.isArray(meta.tags) || !meta.tags.length) && auto.tags.length) meta.tags = auto.tags;
+    try {
+      await env.STOCK_BUCKET.put(k, JSON.stringify(meta), {
+        httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+      });
+      updated++;
+      done.push({ id: meta.id, audience: meta.audience, category: meta.category });
+    } catch {}
+  }
+  return json({
+    ok: true, total: keys.length, read, updated, batchLimit: limit, done,
+    hint: updated >= limit ? 'Vuelve a llamar para el siguiente lote' : 'Backfill probablemente completo',
+  });
+}
+
 // POST /stock/:id/tags — sobrescribe meta.tags con la lista del body { tags: [...] }
 async function stockEditTagsHandler(req, env, ctx, id) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
@@ -1135,6 +1282,9 @@ async function stockEditTagsHandler(req, env, ctx, id) {
 
   const before = Array.isArray(meta.tags) ? meta.tags.slice() : [];
   meta.tags = cleaned;
+  // Override manual opcional de la segmentación (si el body los trae y son válidos).
+  if (STOCK_AUDIENCES.includes(body.audience)) meta.audience = body.audience;
+  if (STOCK_CATEGORIES.includes(body.category)) meta.category = body.category;
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
@@ -1295,6 +1445,8 @@ export default {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/stock/recategorize' && req.method === 'POST') {
+        res = await stockRecategorizeHandler(req, env);
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
