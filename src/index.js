@@ -567,6 +567,33 @@ async function signageAssetHandler(req, env, id) {
   });
 }
 
+// ─── /signage/media/<key> — sirve vídeo/imagen HD desde R2 con Range ──
+// Para hospedar la videoteca HD (variantes 720p/480p…) fuera de git/Pages.
+// Soporta Range (206) para que el <video> haga seek y empiece sin descargar todo.
+async function signageMediaHandler(req, env, key) {
+  if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
+  if (!/^[A-Za-z0-9._/-]+$/.test(key) || key.includes('..')) return new Response('bad-key', { status: 400 });
+  const object = await env.STOCK_BUCKET.get(`media/${key}`, { range: req.headers, onlyIf: req.headers });
+  if (object === null) return new Response('not-found', { status: 404 });
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set('etag', object.httpEtag);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Cache-Control', 'public, max-age=604800');
+  if (object.range) {
+    let offset = 0, end = object.size - 1;
+    if (object.range.offset != null) offset = object.range.offset;
+    if (object.range.length != null) end = offset + object.range.length - 1;
+    else if (object.range.suffix != null) { offset = object.size - object.range.suffix; end = object.size - 1; }
+    headers.set('Content-Range', `bytes ${offset}-${end}/${object.size}`);
+    headers.set('Content-Length', String(end - offset + 1));
+  } else {
+    headers.set('Content-Length', String(object.size));
+  }
+  const status = object.body ? (req.headers.get('range') ? 206 : 200) : 304;
+  return new Response(object.body, { status, headers });
+}
+
 // Heartbeat: cada signage.html abierto pinga periódicamente para que sepamos qué pantallas están vivas.
 const SCREENS_INDEX = 'signage_screens_index';
 const SCREEN_TTL = 10 * 60;        // 10 min sin pings → pantalla muerta (holgura sobre el refresco)
@@ -1436,6 +1463,9 @@ export default {
       } else if (path.startsWith('/signage/asset/') && req.method === 'GET') {
         const id = path.slice('/signage/asset/'.length);
         res = await signageAssetHandler(req, env, id);
+      } else if (path.startsWith('/signage/media/') && (req.method === 'GET' || req.method === 'HEAD')) {
+        const key = decodeURIComponent(path.slice('/signage/media/'.length));
+        res = await signageMediaHandler(req, env, key);
       } else if (path === '/signage/clear' && req.method === 'POST') {
         res = await signageClearHandler(req, env);
       } else if (path.startsWith('/signage/ack/') && req.method === 'POST') {
