@@ -17,6 +17,10 @@ const ALLOWED_ORIGINS = [
   'https://www.ainimation.studio',
   'https://admira.studio',
   'https://www.admira.studio',
+  'https://pixeria.com',
+  'https://www.pixeria.com',
+  'https://xpaceos.com',
+  'https://www.xpaceos.com',
   'https://admira.app',
   'https://www.admira.app',
   'https://admira.live',
@@ -1099,7 +1103,7 @@ async function stockTrackHandler(req, env, ctx, id) {
 //                            size, thumbnail, url, createdAt)
 // Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
 // Sin KV → sin límite de 1000 writes/día en Workers Free.
-const STOCK_TYPES = ['audio', 'music', 'image', 'video', 'animation'];
+const STOCK_TYPES = ['audio', 'music', 'image', 'video', 'animation', 'furni'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 function b64ToBytes(b64) {
@@ -1124,6 +1128,11 @@ async function stockPublishHandler(req, env, ctx) {
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
+  // Metadatos de mobiliario (type 'furni'): huella en tiles [w,d] y alto en px.
+  const fp = (Array.isArray(body.fp) && body.fp.length === 2)
+    ? [Math.max(1, Math.min(6, +body.fp[0] || 1)), Math.max(1, Math.min(6, +body.fp[1] || 1))]
+    : null;
+  const ph = (body.ph != null && isFinite(+body.ph)) ? Math.max(8, Math.min(400, +body.ph)) : null;
   let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
 
   if (!type || !STOCK_TYPES.includes(type)) {
@@ -1192,6 +1201,8 @@ async function stockPublishHandler(req, env, ctx) {
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
     url: publicUrl,
     assetKey,
+    fp,
+    ph,
     createdAt: new Date(ts).toISOString(),
   };
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
@@ -1396,6 +1407,10 @@ async function stockAssetHandler(req, env, id) {
   headers.set('Cache-Control', 'public, max-age=31536000, immutable');
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Content-Type', meta.mime || headers.get('Content-Type') || 'application/octet-stream');
+  // CORS en el asset: el gemelo dibuja sprites de mobiliario con
+  // crossOrigin='anonymous' (canvas sin "tainted"), así que el blob debe
+  // exponer Access-Control-Allow-Origin para el origen del juego.
+  for (const [k, v] of Object.entries(corsHeaders(req))) headers.set(k, v);
   if (obj.range) {
     const { offset, length } = obj.range;
     const end = offset + length - 1;
