@@ -106,6 +106,7 @@ const NOTIFY_SKIP_PREFIX = [
   '/stock/',       // DELETE notifica dentro del handler
   '/veo/status/',
   '/xai/video/', // GET polling
+  '/agora/',     // coordinación multi-agente: housekeeping de alta frecuencia, no notificar
 ];
 
 function shouldNotify(path, method, status) {
@@ -843,10 +844,12 @@ async function notifyHandler(req, env, ctx) {
 
 // ─── Telegram: importar a Stock enviando una URL a @AdmiraXPBot ──────
 // Flujo: Telegram → /telegram/webhook → respondemos "importando" y disparamos
-// la descarga en el proxy del Mac Mini (/admira/tube/import-to-stock). El proxy
+// la descarga en el proxy del Mac Mini (Tailscale Funnel /pixtube → 127.0.0.1:8420,
+// que quita el prefijo y entrega /tube/import-to-stock al servicio). El proxy
 // descarga con yt-dlp y publica en /stock/publish, que ya notifica el resultado.
 // El token del bot nunca sale del worker.
-const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/admira';
+// Se puede sobreescribir con el secret ADMIRA_TUBE_BASE (sin redesplegar código).
+const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/pixtube';
 async function tgSend(env, chatId, html) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
   try {
@@ -873,7 +876,11 @@ async function telegramWebhookHandler(req, env, ctx) {
   if (!text) return json({ ok: true });
   const m = text.match(/https?:\/\/[^\s]+/i);
   if (!m) {
-    ctx.waitUntil(tgSend(env, chatId, '📥 Envíame una <b>URL</b> (YouTube, Vimeo, X, TikTok, Instagram, LinkedIn) y la importo a Stock.\nAñade la palabra <b>audio</b> para bajar solo el mp3.'));
+    // Sin URL → es un mensaje del grupo para los agentes: lo encolamos en los
+    // buzones de Agora (lo recogen el cmd-poller —p.ej. "apaga monitores"— y
+    // `agora inbox`). No auto-respondemos para no ensuciar el chat.
+    const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
+    ctx.waitUntil(agoraEnqueueInbox(env, text, who, chatId).catch(() => {}));
     return json({ ok: true });
   }
   const link = m[0].replace(/[).,]+$/, '');
@@ -1489,6 +1496,137 @@ async function ideaHandler(req, env) {
   return json({ reply, model });
 }
 
+// ─── Agora — coordinación multi-agente (reconstruido 2026-06-09) ──────
+// Backend del CLI ~/.local/bin/agora. Storage en SIGNAGE_KV (prefijo "agora:").
+// Auth: ?key= (GET) o body.key (POST) === env.AGORA_SYNC_KEY (la .synckey de 32
+// chars del grid). Todas las rutas /agora/* están EXCLUIDAS del espejo a Telegram
+// (ver NOTIFY_SKIP_PREFIX) — son housekeeping de alta frecuencia, no se notifican.
+const AGORA_IDENTITIES = ['Claude·admira', 'Codex·admira', 'Claude·gmail', 'Codex·gmail'];
+const AGORA_AWAKE_MS = 5 * 60 * 1000; // visto < 5 min = despierto
+const AGORA_FEED_CAP = 200;           // últimos N items del feed compartido
+const AGORA_QUEUE_CAP = 100;          // tope por buzón/cola
+
+function agoraAuth(env, key) {
+  return !!env.AGORA_SYNC_KEY && key === env.AGORA_SYNC_KEY;
+}
+async function agoraKvGet(env, key, fallback) {
+  try { const v = await env.SIGNAGE_KV.get(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+async function agoraKvPut(env, key, value, now) {
+  if (!(await reserveKvWrite(env, now))) return false;
+  try { await env.SIGNAGE_KV.put(key, JSON.stringify(value)); return true; }
+  catch { return false; }
+}
+
+// POST /agora/presence {key,identity,host,tokens?,reqs?}  ·  GET /agora/presence?key=
+async function agoraPresenceHandler(req, env, url) {
+  const now = Date.now();
+  if (req.method === 'POST') {
+    let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+    if (!b.identity) return json({ error: 'missing-identity' }, { status: 400 });
+    const map = await agoraKvGet(env, 'agora:presence', {});
+    map[b.identity] = { ts: now, host: b.host || '', tokens: b.tokens || 0, reqs: b.reqs || 0 };
+    await agoraKvPut(env, 'agora:presence', map, now);
+    return json({ ok: true });
+  }
+  if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+  const map = await agoraKvGet(env, 'agora:presence', {});
+  const agents = Object.entries(map).map(([identity, p]) => ({
+    identity, ts: p.ts || 0, awake: (now - (p.ts || 0)) < AGORA_AWAKE_MS,
+    host: p.host || '', tokens: p.tokens || 0, reqs: p.reqs || 0,
+  }));
+  return json({ agents });
+}
+
+// POST /agora/feed {key,from,text,kind?,url?,host?}  ·  GET /agora/feed?key=&limit=
+async function agoraFeedHandler(req, env, url) {
+  const now = Date.now();
+  if (req.method === 'POST') {
+    let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+    const feed = await agoraKvGet(env, 'agora:feed', []);
+    feed.push({ ts: now, from: b.from || '?', text: String(b.text || '').slice(0, 2000), kind: b.kind || 'msg', url: b.url || undefined, host: b.host || undefined });
+    await agoraKvPut(env, 'agora:feed', feed.slice(-AGORA_FEED_CAP), now);
+    return json({ ok: true });
+  }
+  if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+  const limit = Math.max(1, Math.min(AGORA_FEED_CAP, parseInt(url.searchParams.get('limit'), 10) || 30));
+  const feed = await agoraKvGet(env, 'agora:feed', []);
+  return json({ items: feed.slice(-limit) });
+}
+
+// POST /agora/config {key,config}  ·  GET /agora/config?key=
+async function agoraConfigHandler(req, env, url) {
+  const now = Date.now();
+  if (req.method === 'POST') {
+    let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+    const blob = JSON.stringify(b.config || {});
+    await agoraKvPut(env, 'agora:config', { config: b.config || {}, ts: now }, now);
+    return json({ ok: true, bytes: blob.length });
+  }
+  if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+  const stored = await agoraKvGet(env, 'agora:config', null);
+  return json({ config: stored ? stored.config : null });
+}
+
+// GET /agora/inbox?key=&id=&consume=   ·   GET /agora/tasks?key=&id=&consume=
+async function agoraQueueHandler(req, env, url, kind) {
+  const now = Date.now();
+  if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+  const id = url.searchParams.get('id') || '';
+  if (!id) return json({ error: 'missing-id' }, { status: 400 });
+  const kkey = `agora:${kind}:${id}`;
+  const items = await agoraKvGet(env, kkey, []);
+  if (url.searchParams.get('consume') === '1' && items.length) {
+    await agoraKvPut(env, kkey, [], now);
+  }
+  return json({ items });
+}
+
+// POST /agora/analyze {key,imageUrl,prompt,provider}  → visión (Gemini Flash)
+async function agoraAnalyzeHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+  if (!b.imageUrl) return json({ ok: false, detail: 'missing-imageUrl' }, { status: 400 });
+  if (!env.GEMINI_API_KEY) return json({ ok: false, detail: 'no-gemini-key' });
+  const prompt = b.prompt || 'Analiza esta imagen de forma concisa.';
+  try {
+    const ir = await fetch(b.imageUrl);
+    if (!ir.ok) return json({ ok: false, detail: `image-fetch ${ir.status}` });
+    const mime = ir.headers.get('content-type') || 'image/jpeg';
+    const buf = new Uint8Array(await ir.arrayBuffer());
+    let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    const gr = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: mime, data: btoa(bin) } }] }] }),
+    });
+    const gd = await gr.json().catch(() => ({}));
+    if (!gr.ok) return json({ ok: false, detail: `gemini ${gr.status}: ${JSON.stringify(gd).slice(0, 200)}` });
+    const parts = (((gd.candidates || [])[0] || {}).content || {}).parts || [];
+    const text = parts.map(p => p.text).filter(Boolean).join('');
+    return json({ ok: true, text, model: 'gemini-2.5-flash' });
+  } catch (e) {
+    return json({ ok: false, detail: String(e).slice(0, 200) });
+  }
+}
+
+// Encola un mensaje del grupo de Telegram en el buzón de TODAS las identidades
+// (lo recoge el cmd-poller y `agora inbox`). Mismo ts en las 4 → el poller dedup
+// por high-water mark y dispara una sola vez. Best-effort.
+async function agoraEnqueueInbox(env, text, who, chat) {
+  const now = Date.now();
+  for (const id of AGORA_IDENTITIES) {
+    const kkey = `agora:inbox:${id}`;
+    const items = await agoraKvGet(env, kkey, []);
+    items.push({ ts: now, who: who || 'humano', text: String(text || '').slice(0, 1000), chat: chat != null ? chat : undefined });
+    await agoraKvPut(env, kkey, items.slice(-AGORA_QUEUE_CAP), now);
+  }
+}
+
 export default {
   async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') {
@@ -1517,6 +1655,18 @@ export default {
         res = await geminiHandler(req, env);
       } else if (path === '/idea' && req.method === 'POST') {
         res = await ideaHandler(req, env);
+      } else if (path === '/agora/presence') {
+        res = await agoraPresenceHandler(req, env, url);
+      } else if (path === '/agora/feed') {
+        res = await agoraFeedHandler(req, env, url);
+      } else if (path === '/agora/config') {
+        res = await agoraConfigHandler(req, env, url);
+      } else if (path === '/agora/inbox' && req.method === 'GET') {
+        res = await agoraQueueHandler(req, env, url, 'inbox');
+      } else if (path === '/agora/tasks' && req.method === 'GET') {
+        res = await agoraQueueHandler(req, env, url, 'tasks');
+      } else if (path === '/agora/analyze' && req.method === 'POST') {
+        res = await agoraAnalyzeHandler(req, env);
       } else if (path === '/lyria3/generate' && req.method === 'POST') {
         res = await lyria3Handler(req, env);
       } else if (path === '/imagen/generate' && req.method === 'POST') {
