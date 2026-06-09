@@ -1434,6 +1434,61 @@ function parseRange(range, size) {
 }
 
 // ─── Router ────────────────────────────────────────────────────────
+// ─── /idea — chat con Nemotron Ultra 3 (OpenRouter, OpenAI-compatible) ──
+// POST /idea { messages: [{role:'user'|'assistant', content}] } → { reply, model }
+// Secret:  OPENROUTER_KEY   ·   Var opcional: NEMOTRON_MODEL
+const IDEA_SYSTEM =
+  'Eres Nemotron Ultra 3, el asistente de ideas de Pixeria (pixeria.com), la referencia en ' +
+  'creación de contenido con IA del grupo Admira. Ayudas a dar forma a ideas y resolver dudas sobre ' +
+  'crear, dirigir y publicar contenido con IA: modelos (vídeo, imagen, voz, música), prompts, pipelines, ' +
+  'costes, derechos, distribución y signage en pantallas (Pixer Feed). Responde en el idioma del usuario ' +
+  '(por defecto español), claro, concreto y con criterio práctico, sin humo. Si algo cae fuera de tu ámbito, ' +
+  'dilo brevemente y reconduce hacia la idea.';
+
+async function ideaHandler(req, env) {
+  if (!env.OPENROUTER_KEY) return json({ error: 'server-missing-key', service: 'openrouter' }, { status: 500 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const incoming = Array.isArray(body.messages) ? body.messages : [];
+  const msgs = incoming
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+    .slice(-20)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) }));
+  if (!msgs.length) return json({ error: 'no-messages' }, { status: 400 });
+
+  const model = env.NEMOTRON_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
+  let r;
+  try {
+    r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.OPENROUTER_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://www.pixeria.com',
+        'X-Title': 'Pixeria Idea',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: IDEA_SYSTEM }, ...msgs],
+        temperature: 0.7,
+        max_tokens: 1200,
+      }),
+    });
+  } catch (e) {
+    return json({ error: 'upstream-fetch-failed', message: String(e) }, { status: 502 });
+  }
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.text()).slice(0, 400); } catch {}
+    return json({ error: 'upstream-error', status: r.status, detail }, { status: 502 });
+  }
+  let data;
+  try { data = await r.json(); } catch { return json({ error: 'bad-upstream-json' }, { status: 502 }); }
+  const reply = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!reply) return json({ error: 'empty-reply' }, { status: 502 });
+  return json({ reply, model });
+}
+
 export default {
   async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') {
@@ -1446,7 +1501,7 @@ export default {
     let res;
     try {
       if (path === '/healthz') {
-        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
+        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
       } else if (path === '/xai/image' && req.method === 'POST') {
@@ -1460,6 +1515,8 @@ export default {
         res = await lyriaHandler(req, env);
       } else if (path === '/llm/lyrics' && req.method === 'POST') {
         res = await geminiHandler(req, env);
+      } else if (path === '/idea' && req.method === 'POST') {
+        res = await ideaHandler(req, env);
       } else if (path === '/lyria3/generate' && req.method === 'POST') {
         res = await lyria3Handler(req, env);
       } else if (path === '/imagen/generate' && req.method === 'POST') {
