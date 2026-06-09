@@ -1172,7 +1172,10 @@ async function stockPublishHandler(req, env, ctx) {
   const ext = extForMime(finalMime);
   const assetKey = `stock/${id}/asset.${ext}`;
   const metaKey  = `stock/${id}/meta.json`;
-  const publicUrl = `${WORKER_PUBLIC_BASE}/stock/asset/${id}`;
+  // URL pública con el origen de la petición (no el hardcodeado): el listado
+  // la reescribe igualmente, pero así la notificación Telegram y la respuesta
+  // del publish ya salen por un dominio no bloqueado.
+  const publicUrl = `${new URL(req.url).origin}/stock/asset/${id}`;
 
   await env.STOCK_BUCKET.put(assetKey, bytes, {
     httpMetadata: { contentType: finalMime, cacheControl: 'public, max-age=31536000, immutable' },
@@ -1215,6 +1218,9 @@ async function stockPublishHandler(req, env, ctx) {
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+
+  // Regenera el índice estático sin retrasar la respuesta del publish
+  ctx.waitUntil(rebuildStockIndex(env));
 
   // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
   const mbStr = (bytes.length / 1024 / 1024).toFixed(2);
@@ -1263,8 +1269,59 @@ async function stockListHandler(req, env, url) {
   if (typeFilter)  filtered = filtered.filter(m => m.type === typeFilter);
   if (motorFilter) filtered = filtered.filter(m => m.motor === motorFilter);
   filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  const items = filtered.slice(0, limit);
+  // URLs host-agnósticas: las metas guardan la URL del host con el que se
+  // publicaron (workers.dev, bloqueado por ISPs ES desde jun 2026). Se
+  // reescriben al origen de ESTA petición para que el asset salga por el
+  // mismo dominio por el que entró el listado (p.ej. pixer-api.pages.dev).
+  const origin = new URL(req.url).origin;
+  const items = filtered.slice(0, limit).map(m => ({
+    ...m,
+    url: m.assetKey ? `${origin}/stock/asset/${m.id}` : m.url,
+    thumbnail: m.thumbnail ? m.thumbnail.replace(WORKER_PUBLIC_BASE, origin) : m.thumbnail,
+  }));
   return json({ items, total: filtered.length });
+}
+
+// ─── Índice estático de Stock en R2 (anti-bloqueo workers.dev) ─────
+// Los ISP españoles bloquean el rango de IPs de *.workers.dev y *.pages.dev
+// (188.114.96.0/22, bloqueos LaLiga), pero NO el de r2.dev. La galería
+// pública (pixeria.com/stock.html) lee el listado y los blobs DIRECTAMENTE
+// del bucket público para no depender del worker:
+//   listado → {R2_PUB}/stock/index.json   (este archivo, max-age=60)
+//   blobs   → {R2_PUB}/stock/{id}/asset.{ext}  (immutable, Range nativo)
+// El índice se regenera tras cada mutación (publish/delete/tags/recategorize)
+// y con un cron de respaldo cada 10 min por si alguna escritura se pierde.
+const STOCK_PUBLIC_R2 = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev';
+
+async function rebuildStockIndex(env) {
+  if (!env.STOCK_BUCKET) return;
+  let keys = [];
+  let cursor;
+  do {
+    const result = await env.STOCK_BUCKET.list({ prefix: 'stock/', limit: 1000, cursor });
+    for (const o of result.objects) if (o.key.endsWith('/meta.json')) keys.push(o.key);
+    cursor = result.truncated ? result.cursor : null;
+  } while (cursor);
+
+  const metas = (await Promise.all(keys.map(async k => {
+    try {
+      const obj = await env.STOCK_BUCKET.get(k);
+      if (!obj) return null;
+      return await obj.json();
+    } catch { return null; }
+  }))).filter(Boolean);
+
+  metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  const items = metas.map(m => ({
+    ...m,
+    url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}` : m.url,
+    // thumbnail se deja tal cual: son data-URIs o URLs externas; si alguno
+    // apuntase a workers.dev el <video> cae a preload de metadata sin póster.
+  }));
+
+  await env.STOCK_BUCKET.put('stock/index.json', JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=60' },
+  });
 }
 
 // POST /stock/recategorize { secret, limit?, force? }
@@ -1347,6 +1404,7 @@ async function stockEditTagsHandler(req, env, ctx, id) {
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+  ctx.waitUntil(rebuildStockIndex(env));
 
   // Notify (silencioso si los tags no han cambiado)
   const changed = JSON.stringify(before) !== JSON.stringify(cleaned);
@@ -1385,6 +1443,7 @@ async function stockDeleteHandler(req, env, ctx, id) {
   } catch {}
 
   await Promise.all(keysToDelete.map(k => env.STOCK_BUCKET.delete(k)));
+  ctx.waitUntil(rebuildStockIndex(env));
 
   if (meta) {
     const text = `🗑 <b>STOCK DELETE</b> · ${escHtml(meta.type || 'unknown')} · <code>${escHtml(meta.motor || '')}</code>\n· id <code>${escHtml(id)}</code>`;
@@ -1628,6 +1687,13 @@ async function agoraEnqueueInbox(env, text, who, chat) {
 }
 
 export default {
+  // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
+  // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
+  // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(rebuildStockIndex(env));
+  },
+
   async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(req) });

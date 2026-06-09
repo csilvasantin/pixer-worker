@@ -9,6 +9,12 @@ compatibility_date = "2026-05-02"
 [observability]
 enabled = true
 
+# Cron de respaldo: regenera stock/index.json (índice estático servido por
+# r2.dev, que esquiva el bloqueo ISP de workers.dev). Las mutaciones también
+# lo regeneran al vuelo; esto cubre escrituras perdidas.
+[triggers]
+crons = ["*/10 * * * *"]
+
 # KV para signage de Admira XP (también usado por stock con prefijos stock:meta:* y stock_index)
 [[kv_namespaces]]
 binding = "SIGNAGE_KV"
