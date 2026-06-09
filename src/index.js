@@ -1438,7 +1438,7 @@ function parseRange(range, size) {
 // POST /idea { messages: [{role:'user'|'assistant', content}] } → { reply, model }
 // Secret:  OPENROUTER_KEY   ·   Var opcional: NEMOTRON_MODEL
 const IDEA_SYSTEM =
-  'Eres Nemotron Ultra 3, el asistente de ideas de Pixeria (pixeria.com), la referencia en ' +
+  'Eres Nemotron, el asistente de ideas de Pixeria (pixeria.com), la referencia en ' +
   'creación de contenido con IA del grupo Admira. Ayudas a dar forma a ideas y resolver dudas sobre ' +
   'crear, dirigir y publicar contenido con IA: modelos (vídeo, imagen, voz, música), prompts, pipelines, ' +
   'costes, derechos, distribución y signage en pantallas (Pixer Feed). Responde en el idioma del usuario ' +
@@ -1456,7 +1456,7 @@ async function ideaHandler(req, env) {
     .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) }));
   if (!msgs.length) return json({ error: 'no-messages' }, { status: 400 });
 
-  const model = env.NEMOTRON_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free';
+  const model = env.NEMOTRON_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
   let r;
   try {
     r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
