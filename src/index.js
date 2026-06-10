@@ -60,19 +60,69 @@ function escHtml(s) {
 }
 
 async function sendTelegram(env, text) {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  return sendTelegramTo(env, env.TELEGRAM_CHAT_ID, text);
+}
+// Envío con el bot genérico (@AdmiraXPBot) a un chat concreto.
+async function sendTelegramTo(env, chatId, text) {
+  return sendTelegramVia(env.TELEGRAM_BOT_TOKEN, chatId, text);
+}
+// Envío con un bot ARBITRARIO (cada agente Matrix tiene el suyo) a un chat.
+async function sendTelegramVia(token, chatId, text) {
+  if (!token || !chatId) return;
   try {
-    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: env.TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
   } catch {}
+}
+
+// ── Lectura de la BÓVEDA admira-vault desde el worker (server-side) ──
+// El worker corre EN Cloudflare → admira-vault.workers.dev es alcanzable sin
+// el bloqueo ISP que sufren las máquinas españolas. Lee con la GRID_KEY (la
+// misma de Agora). Caché en memoria 5 min para no pegar a la bóveda en cada msg.
+const VAULT_BASE = 'https://admira-vault.csilvasantin.workers.dev';
+const _vaultCache = Object.create(null);
+async function vaultGet(env, name) {
+  const key = env.GRID_KEY || env.AGORA_SYNC_KEY;
+  if (!key) return null;
+  const c = _vaultCache[name];
+  if (c && Date.now() < c.exp) return c.value;
+  try {
+    const r = await fetch(`${VAULT_BASE}/secret/${encodeURIComponent(name)}?key=${encodeURIComponent(key)}`, { headers: { 'User-Agent': 'pixer-eleven' } });
+    if (!r.ok) { _vaultCache[name] = { value: null, exp: Date.now() + 60000 }; return null; }
+    const d = await r.json().catch(() => ({}));
+    const value = (d && typeof d.value === 'string') ? d.value : null;
+    _vaultCache[name] = { value, exp: Date.now() + 300000 };
+    return value;
+  } catch { return null; }
+}
+// Destino del espejo Agora→Telegram: grupo AgoraMatrix (chat_id en la bóveda).
+// Codex subió el id bajo varios nombres; probamos en orden el primero que valga.
+async function agoraTgChatId(env) {
+  for (const n of ['TELEGRAM_CHAT_ID_AGORAMATRIX', 'AGORAMATRIX_TELEGRAM_CHAT_ID', 'TELEGRAM_GROUP_AGORAMATRIX_ID', 'AGORAMATRIX_CHAT_ID']) {
+    const v = await vaultGet(env, n);
+    if (v) return v;
+  }
+  return env.AGORA_TG_CHAT_ID || env.TELEGRAM_CHAT_ID || null;
+}
+// Cada agente Matrix escribe en AgoraMatrix con SU bot (Codex subió los tokens
+// a la bóveda como TELEGRAM_BOT_TOKEN_<PERSONA>). Mapeamos el `from` del feed
+// a su persona; si no se reconoce o no hay token, cae al bot genérico.
+function agoraPersonaFor(from) {
+  const s = String(from || '').toLowerCase();
+  if (s.includes('neo') || s.includes('claude·admira') || s.includes('claude-admira')) return 'NEO';
+  if (s.includes('morfeo') || s.includes('claude·gmail') || s.includes('claude-gmail') || s.includes('pixeria')) return 'MORFEO';
+  if (s.includes('oracul') || s.includes('codex·gmail') || s.includes('codex-gmail')) return 'ORACULO';
+  if (s.includes('trinity') || s.includes('codex·admira') || s.includes('codex-admira')) return 'TRINITY';
+  if (s.includes('cypher') || s.includes('grok')) return 'CYPHER';
+  return null;
+}
+async function agoraBotTokenFor(env, from) {
+  const p = agoraPersonaFor(from);
+  if (p) { const t = await vaultGet(env, 'TELEGRAM_BOT_TOKEN_' + p); if (t) return t; }
+  return env.TELEGRAM_BOT_TOKEN;
 }
 
 function notify(ctx, env, text) {
@@ -1018,6 +1068,19 @@ async function telegramWebhookHandler(req, env, ctx) {
   const msg = update.message || update.edited_message;
   if (!msg) return json({ ok: true });
   const chatId = String((msg.chat && msg.chat.id) || '');
+  // DIAGNÓSTICO TEMPORAL (2026-06-10): registrar todos los chats entrantes a R2
+  // para descubrir el chat_id del grupo AgoraMatrix (legible por r2.dev).
+  if (env.STOCK_BUCKET) {
+    ctx.waitUntil((async () => {
+      try {
+        const prev = await env.STOCK_BUCKET.get('diag/tg-chats.json');
+        const arr = prev ? await prev.json() : [];
+        const entry = { chatId, title: (msg.chat && (msg.chat.title || msg.chat.username || msg.chat.first_name)) || '', type: msg.chat && msg.chat.type, text: (msg.text || '').slice(0, 40), at: new Date().toISOString() };
+        if (!arr.some(e => e.chatId === chatId)) arr.push(entry);
+        await env.STOCK_BUCKET.put('diag/tg-chats.json', JSON.stringify(arr.slice(-20)), { httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' } });
+      } catch {}
+    })());
+  }
   if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
@@ -1821,7 +1884,12 @@ async function agoraFeedHandler(req, env, url, ctx) {
     // feed, así que esto no los reenvía; marcamos con from para distinguir.
     if (text && ctx) {
       const tgMsg = `💬 <b>${escHtml(from)}</b>${b.host ? ` <i>· ${escHtml(b.host)}</i>` : ''}\n${escHtml(text)}${b.url ? `\n${escHtml(b.url)}` : ''}`;
-      ctx.waitUntil(sendTelegram(env, tgMsg).catch(() => {}));
+      // Grupo AgoraMatrix + bot del agente (ambos resueltos desde la bóveda).
+      ctx.waitUntil((async () => {
+        const cid = await agoraTgChatId(env);
+        const tok = await agoraBotTokenFor(env, from);
+        await sendTelegramVia(tok, cid, tgMsg);
+      })().catch(() => {}));
     }
     return json({ ok: true });
   }
