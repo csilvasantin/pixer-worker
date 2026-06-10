@@ -1803,14 +1803,26 @@ async function agoraPresenceHandler(req, env, url) {
 }
 
 // POST /agora/feed {key,from,text,kind?,url?,host?}  ·  GET /agora/feed?key=&limit=
-async function agoraFeedHandler(req, env, url) {
+async function agoraFeedHandler(req, env, url, ctx) {
   const now = Date.now();
   if (req.method === 'POST') {
     let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
     if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+    const from = b.from || '?';
+    const text = String(b.text || '').slice(0, 2000);
     const feed = await agoraKvGet(env, 'agora:feed', []);
-    feed.push({ ts: now, from: b.from || '?', text: String(b.text || '').slice(0, 2000), kind: b.kind || 'msg', url: b.url || undefined, host: b.host || undefined });
+    feed.push({ ts: now, from, text, kind: b.kind || 'msg', url: b.url || undefined, host: b.host || undefined });
     await agoraKvPut(env, 'agora:feed', feed.slice(-AGORA_FEED_CAP), now);
+    // Espejo Agora→Telegram (bidireccional, decisión Carlos 2026-06-10): los
+    // MENSAJES del feed (agora send) SÍ se reflejan al grupo, para que la
+    // conversación entre agentes sea visible. El housekeeping (presence/inbox/
+    // tasks/config) sigue FUERA del espejo (era el que spameaba). Anti-bucle:
+    // los mensajes que vienen de Telegram entran por el webhook al INBOX, no al
+    // feed, así que esto no los reenvía; marcamos con from para distinguir.
+    if (text && ctx) {
+      const tgMsg = `💬 <b>${escHtml(from)}</b>${b.host ? ` <i>· ${escHtml(b.host)}</i>` : ''}\n${escHtml(text)}${b.url ? `\n${escHtml(b.url)}` : ''}`;
+      ctx.waitUntil(sendTelegram(env, tgMsg).catch(() => {}));
+    }
     return json({ ok: true });
   }
   if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
@@ -1929,7 +1941,7 @@ export default {
       } else if (path === '/agora/presence') {
         res = await agoraPresenceHandler(req, env, url);
       } else if (path === '/agora/feed') {
-        res = await agoraFeedHandler(req, env, url);
+        res = await agoraFeedHandler(req, env, url, ctx);
       } else if (path === '/agora/config') {
         res = await agoraConfigHandler(req, env, url);
       } else if (path === '/agora/inbox' && req.method === 'GET') {
