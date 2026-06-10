@@ -190,6 +190,41 @@ async function xaiVideoPollHandler(req, env, requestId) {
   return json(data, { status: r.status });
 }
 
+// ─── Pollinations Video (gratis, tier "seed") ──────────────────────
+// GET /pvideo?prompt=&model=&duration=&aspect=&audio= → proxy SÍNCRONO a
+// gen.pollinations.ai/video/{prompt}, que devuelve el mp4 directo. La key
+// (POLLINATIONS_KEY) nunca llega al cliente. Es la opción "Good" gratis.
+async function pollinationsVideoHandler(req, env, url) {
+  if (!env.POLLINATIONS_KEY) return json({ error: 'server-missing-key', service: 'pollinations' }, { status: 500 });
+  const prompt = (url.searchParams.get('prompt') || '').slice(0, 2000);
+  if (!prompt) return json({ error: 'missing-prompt' }, { status: 400 });
+  const model = (url.searchParams.get('model') || 'wan-fast').slice(0, 40);
+  const duration = Math.max(1, Math.min(15, parseInt(url.searchParams.get('duration'), 10) || 6));
+  const aspect = (url.searchParams.get('aspect') || '16:9') === '9:16' ? '9:16' : '16:9';
+  const audio = url.searchParams.get('audio') === 'true';
+
+  const params = new URLSearchParams({ model, duration: String(duration), aspectRatio: aspect });
+  if (audio) params.set('audio', 'true');
+  const target = `https://gen.pollinations.ai/video/${encodeURIComponent(prompt)}?${params.toString()}`;
+
+  let r;
+  try {
+    r = await fetch(target, { headers: { 'Authorization': `Bearer ${env.POLLINATIONS_KEY}` } });
+  } catch (e) {
+    return json({ error: 'upstream-fetch-failed', message: String(e) }, { status: 502 });
+  }
+  const cors = corsHeaders(req);
+  if (!r.ok) {
+    const detail = (await r.text().catch(() => '')).slice(0, 300);
+    return new Response(detail || 'pollinations-error', { status: r.status, headers: cors });
+  }
+  // Passthrough del mp4 (síncrono). El frontend lo descarga como blob.
+  const headers = new Headers(cors);
+  headers.set('Content-Type', r.headers.get('Content-Type') || 'video/mp4');
+  headers.set('Cache-Control', 'no-store');
+  return new Response(r.body, { status: 200, headers });
+}
+
 // ─── Lyria 3 (Vertex AI) ───────────────────────────────────────────
 // SA JSON en env.GCP_SA_KEY. Firmar JWT RS256, cambiar por access_token, llamar a /predict.
 
@@ -1157,8 +1192,28 @@ async function stockPublishHandler(req, env, ctx) {
       bytes = b64ToBytes(base64);
       finalMime = mime || 'application/octet-stream';
     } else {
-      const r = await fetch(sourceUrl);
-      if (!r.ok) return json({ error: 'sourceUrl-fetch-failed', status: r.status }, { status: 502 });
+      // Vídeos Veo: el frontend manda sourceUrl = {worker}/veo/download?uri=<gemini>.
+      // Hacer fetch a nuestra propia URL pública (worker→self) es un anti-patrón
+      // en Cloudflare y falla. Detectamos ese caso y bajamos el vídeo DIRECTO de
+      // Google con la API key, igual que veoDownloadHandler.
+      let fetchUrl = sourceUrl, fetchHeaders = {};
+      try {
+        const su = new URL(sourceUrl);
+        if (su.pathname === '/veo/download') {
+          const geminiUri = su.searchParams.get('uri') || '';
+          if (geminiUri.startsWith('https://generativelanguage.googleapis.com/')) {
+            if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key' }, { status: 500 });
+            fetchUrl = geminiUri;
+            fetchHeaders = { 'x-goog-api-key': env.GEMINI_API_KEY };
+          }
+        }
+      } catch { /* sourceUrl no es URL absoluta → fetch tal cual */ }
+
+      const r = await fetch(fetchUrl, { headers: fetchHeaders });
+      if (!r.ok) {
+        const detail = (await r.text().catch(() => '')).slice(0, 200);
+        return json({ error: 'sourceUrl-fetch-failed', status: r.status, detail }, { status: 502 });
+      }
       const buf = await r.arrayBuffer();
       bytes = new Uint8Array(buf);
       finalMime = mime || r.headers.get('Content-Type') || 'application/octet-stream';
@@ -1522,37 +1577,65 @@ async function ideaHandler(req, env) {
     .map((m) => ({ role: m.role, content: m.content.slice(0, 6000) }));
   if (!msgs.length) return json({ error: 'no-messages' }, { status: 400 });
 
-  const model = env.NEMOTRON_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
-  let r;
-  try {
-    r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://www.pixeria.com',
-        'X-Title': 'Pixeria Idea',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'system', content: IDEA_SYSTEM }, ...msgs],
-        temperature: 0.7,
-        max_tokens: 1200,
-      }),
-    });
-  } catch (e) {
-    return json({ error: 'upstream-fetch-failed', message: String(e) }, { status: 502 });
+  // Modelos a intentar en orden. El primario (Nemotron grande :free) tiene cola
+  // compartida en OpenRouter y a veces NO responde nunca → antes el fetch no
+  // tenía timeout y el chat se quedaba "pensando" para siempre. Ahora: timeout
+  // por intento (AbortController) + fallback a un Nemotron más pequeño/rápido.
+  // Primario = NANO (rápido, raramente encola). El super 120b :free se cuelga
+  // en cola con frecuencia → lo dejamos solo como fallback. 2 intentos × 30s
+  // = 60s < timeout del cliente (75s). NEMOTRON_MODEL (var) puede forzar otro.
+  const preferred = env.NEMOTRON_MODEL || 'nvidia/nemotron-3-nano-30b-a3b:free';
+  const candidates = [...new Set([preferred, 'nvidia/nemotron-3-super-120b-a12b:free'])];
+  const PER_TRY_MS = 30000;
+
+  let lastErr = null;
+  for (const model of candidates) {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), PER_TRY_MS);
+    let r;
+    try {
+      r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: {
+          'Authorization': `Bearer ${env.OPENROUTER_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://www.pixeria.com',
+          'X-Title': 'Pixeria Idea',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'system', content: IDEA_SYSTEM }, ...msgs],
+          temperature: 0.7,
+          // Nemotron 3 razona antes de responder (reasoning_tokens ~200-500).
+          // Margen amplio para que el reasoning NO se coma el presupuesto y
+          // deje el `content` vacío en respuestas largas.
+          max_tokens: 2500,
+        }),
+      });
+    } catch (e) {
+      clearTimeout(to);
+      // abort (timeout) o fallo de red → probar el siguiente modelo
+      lastErr = { error: ctrl.signal.aborted ? 'upstream-timeout' : 'upstream-fetch-failed', model, message: String(e) };
+      continue;
+    }
+    clearTimeout(to);
+
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.text()).slice(0, 400); } catch {}
+      // 429 (rate-limit del :free) o 5xx → probar siguiente; otros errores también
+      lastErr = { error: 'upstream-error', status: r.status, model, detail };
+      continue;
+    }
+    let data;
+    try { data = await r.json(); } catch { lastErr = { error: 'bad-upstream-json', model }; continue; }
+    const reply = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (!reply) { lastErr = { error: 'empty-reply', model }; continue; }
+    return json({ reply, model });
   }
-  if (!r.ok) {
-    let detail = '';
-    try { detail = (await r.text()).slice(0, 400); } catch {}
-    return json({ error: 'upstream-error', status: r.status, detail }, { status: 502 });
-  }
-  let data;
-  try { data = await r.json(); } catch { return json({ error: 'bad-upstream-json' }, { status: 502 }); }
-  const reply = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-  if (!reply) return json({ error: 'empty-reply' }, { status: 502 });
-  return json({ reply, model });
+  // Todos los modelos fallaron
+  return json(lastErr || { error: 'all-models-failed' }, { status: 502 });
 }
 
 // ─── Agora — coordinación multi-agente (reconstruido 2026-06-09) ──────
@@ -1715,6 +1798,8 @@ export default {
       } else if (path.startsWith('/xai/video/') && req.method === 'GET') {
         const id = path.slice('/xai/video/'.length);
         res = await xaiVideoPollHandler(req, env, id);
+      } else if (path === '/pvideo' && req.method === 'GET') {
+        res = await pollinationsVideoHandler(req, env, url);
       } else if (path === '/lyria/generate' && req.method === 'POST') {
         res = await lyriaHandler(req, env);
       } else if (path === '/llm/lyrics' && req.method === 'POST') {
