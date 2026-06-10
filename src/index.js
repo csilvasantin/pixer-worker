@@ -152,13 +152,33 @@ async function xaiImageHandler(req, env) {
   if (prompt.length > 4000) return json({ error: 'prompt-too-long', max: 4000 }, { status: 400 });
   // Modelos válidos: grok-imagine-image (rápido/barato $0.02), grok-imagine-image-pro ($0.07)
   const safeModel = (model === 'grok-imagine-image-pro') ? 'grok-imagine-image-pro' : 'grok-imagine-image';
+  // b64:true → devolvemos las imágenes en base64 (data URL). Necesario para
+  // procesarlas en canvas en el cliente sin "tainting" CORS (p. ej. recortar el
+  // fondo del furni en Pixeria antes de publicarlo al gemelo).
+  const wantB64 = body.b64 === true || body.response_format === 'b64_json';
 
   const r = await fetch('https://api.x.ai/v1/images/generations', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: safeModel, prompt, n: Math.min(4, Math.max(1, n)), response_format: 'url' }),
+    body: JSON.stringify({ model: safeModel, prompt, n: Math.min(4, Math.max(1, n)), response_format: wantB64 ? 'b64_json' : 'url' }),
   });
   const data = await r.json().catch(() => ({}));
+  if (r.ok && wantB64 && data && Array.isArray(data.data)) {
+    // Si x.ai devolvió `url` en vez de `b64_json`, la traemos aquí (server-side,
+    // sin CORS) y la convertimos a base64 para que el cliente la reciba lista.
+    for (const item of data.data) {
+      if (item && !item.b64_json && item.url) {
+        try {
+          const ir = await fetch(item.url);
+          if (ir.ok) {
+            const buf = await ir.arrayBuffer();
+            item.b64_json = bytesToB64(new Uint8Array(buf));
+            item.mime = ir.headers.get('Content-Type') || 'image/jpeg';
+          }
+        } catch (e) {}
+      }
+    }
+  }
   return json(data, { status: r.status });
 }
 
@@ -1210,6 +1230,14 @@ function b64ToBytes(b64) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+function bytesToB64(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 function extForMime(mime) {
