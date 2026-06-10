@@ -1876,6 +1876,7 @@ const AGORA_AWAKE_MS = 5 * 60 * 1000; // visto < 5 min = despierto
 const AGORA_FEED_CAP = 200;           // últimos N items del feed compartido
 const AGORA_QUEUE_CAP = 100;          // tope por buzón/cola
 const AGORA_TASKLOG_CAP = 100;        // historial compacto para comandos del grupo
+const AGORA_FALLBACK_CHAT_IDS = new Set(['-5110197528']);
 
 function agoraAuth(env, key) {
   return !!env.AGORA_SYNC_KEY && key === env.AGORA_SYNC_KEY;
@@ -1889,6 +1890,10 @@ async function agoraKvPut(env, key, value, now) {
   try { await env.SIGNAGE_KV.put(key, JSON.stringify(value)); return true; }
   catch { return false; }
 }
+function agoraChatAllowed(chatId, expectedChat) {
+  if (!expectedChat) return true;
+  return String(chatId) === String(expectedChat) || AGORA_FALLBACK_CHAT_IDS.has(String(chatId));
+}
 function agoraCommandKey(s) {
   return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
 }
@@ -1899,6 +1904,12 @@ function agoraCommandFromText(text) {
   const target = AGORA_COMMAND_TARGETS[alias];
   if (!target) return null;
   return { alias, target, text: String(m[2] || '').trim() };
+}
+function agoraPersonaNameForIdentity(identity) {
+  for (const target of Object.values(AGORA_COMMAND_TARGETS)) {
+    if (target.identity === identity) return target.persona;
+  }
+  return identity;
 }
 function agoraCliCommandFromText(text) {
   const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
@@ -2075,6 +2086,59 @@ async function agoraEnqueueCommand(env, command, who, chat) {
   return { identity: command.target.identity, persona: command.target.persona, text: body };
 }
 
+async function agoraEnqueueDirect(env, identity, text, who, chat, command) {
+  const now = Date.now();
+  const persona = agoraPersonaNameForIdentity(identity);
+  const item = {
+    ts: now,
+    who: who || 'humano',
+    text: String(text || '').slice(0, 1000),
+    command: command || undefined,
+    persona,
+    chat: chat != null ? chat : undefined,
+  };
+  await agoraEnqueueForIdentity(env, identity, 'inbox', item, now);
+  await agoraEnqueueForIdentity(env, identity, 'tasks', item, now);
+  await agoraAppendTaskLog(env, { ...item, identity }, now);
+  return { identity, persona, text: item.text };
+}
+
+async function agoraHookHandler(req, env, url, ctx) {
+  if (req.method !== 'POST') return json({ ok: true });
+  const identity = url.searchParams.get('id') || '';
+  if (!AGORA_IDENTITIES.includes(identity)) return json({ ok: true });
+  let update;
+  try { update = await req.json(); } catch { return json({ ok: true }); }
+  const msg = update.message || update.edited_message;
+  if (!msg) return json({ ok: true });
+  const chatId = String((msg.chat && msg.chat.id) || '');
+  const expectedChat = await agoraTgChatId(env);
+  if (!agoraChatAllowed(chatId, expectedChat)) return json({ ok: true });
+  const text = (msg.text || msg.caption || '').trim();
+  if (!text) return json({ ok: true });
+  const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
+  const token = await agoraBotTokenFor(env, identity);
+  const cliCommand = agoraCliCommandFromText(text);
+  if (cliCommand) {
+    ctx.waitUntil(sendTelegramVia(token, chatId, await agoraCliCommandReply(env, cliCommand)).catch(() => {}));
+    return json({ ok: true });
+  }
+  const command = agoraCommandFromText(text);
+  if (command) {
+    ctx.waitUntil((async () => {
+      const routed = await agoraEnqueueCommand(env, command, who, chatId);
+      const tok = await agoraBotTokenFor(env, routed.identity);
+      await sendTelegramVia(tok || token, chatId, `📨 <b>${escHtml(routed.persona)}</b> invocado.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
+    })().catch(() => {}));
+    return json({ ok: true });
+  }
+  ctx.waitUntil((async () => {
+    const routed = await agoraEnqueueDirect(env, identity, text, who, chatId, '/direct');
+    await sendTelegramVia(token, chatId, `📨 <b>${escHtml(routed.persona)}</b> recibido.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
+  })().catch(() => {}));
+  return json({ ok: true });
+}
+
 // Encola un mensaje del grupo de Telegram en el buzón de TODAS las identidades
 // (lo recoge el cmd-poller y `agora inbox`). Mismo ts en todas → el poller dedup
 // por high-water mark y dispara una sola vez. Best-effort.
@@ -2131,6 +2195,8 @@ export default {
         res = await agoraPresenceHandler(req, env, url);
       } else if (path === '/agora/feed') {
         res = await agoraFeedHandler(req, env, url, ctx);
+      } else if (path === '/agora/hook' && req.method === 'POST') {
+        res = await agoraHookHandler(req, env, url, ctx);
       } else if (path === '/agora/tg-test' && req.method === 'GET') {
         res = await agoraTgTestHandler(req, env, url);
       } else if (path === '/agora/config') {
