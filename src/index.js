@@ -125,6 +125,27 @@ async function agoraBotTokenFor(env, from) {
   return env.TELEGRAM_BOT_TOKEN;
 }
 
+// Diagnóstico: GET /agora/tg-test?key=<GRID_KEY>&persona=MORFEO → intenta enviar
+// al grupo AgoraMatrix con el bot de esa persona y devuelve la respuesta CRUDA
+// de Telegram (ok / error_code / description) SIN exponer el token. Sirve para
+// saber por qué un bot no escribe (no está en el grupo, token mal, chat mal).
+async function agoraTgTestHandler(req, env, url) {
+  if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+  const persona = (url.searchParams.get('persona') || 'MORFEO').toUpperCase().replace(/[^A-Z]/g, '');
+  const chatId = await agoraTgChatId(env);
+  const token = await vaultGet(env, 'TELEGRAM_BOT_TOKEN_' + persona);
+  const out = { persona, hasToken: !!token, hasChat: !!chatId, chatTail: chatId ? String(chatId).slice(-4) : null };
+  if (!token || !chatId) return json({ ...out, sent: false, reason: 'falta token o chat' });
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: `🟢 <b>${persona}</b> · prueba de canal AgoraMatrix (diagnóstico)`, parse_mode: 'HTML' }),
+    });
+    const tg = await r.json().catch(() => ({}));
+    return json({ ...out, sent: true, status: r.status, tgOk: !!tg.ok, tgError: tg.ok ? null : { code: tg.error_code, desc: tg.description } });
+  } catch (e) { return json({ ...out, sent: false, reason: String(e) }); }
+}
+
 function notify(ctx, env, text) {
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(sendTelegram(env, text));
   else sendTelegram(env, text).catch(() => {});
@@ -1084,12 +1105,20 @@ async function telegramWebhookHandler(req, env, ctx) {
   if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
+  const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
+  const command = agoraCommandFromText(text);
+  if (command) {
+    ctx.waitUntil((async () => {
+      const routed = await agoraEnqueueCommand(env, command, who, chatId);
+      await tgSend(env, chatId, `📨 <b>${escHtml(routed.persona)}</b> invocado.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
+    })().catch(() => {}));
+    return json({ ok: true });
+  }
   const m = text.match(/https?:\/\/[^\s]+/i);
   if (!m) {
     // Sin URL → es un mensaje del grupo para los agentes: lo encolamos en los
     // buzones de Agora (lo recogen el cmd-poller —p.ej. "apaga monitores"— y
     // `agora inbox`). No auto-respondemos para no ensuciar el chat.
-    const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
     ctx.waitUntil(agoraEnqueueInbox(env, text, who, chatId).catch(() => {}));
     return json({ ok: true });
   }
@@ -1826,7 +1855,16 @@ async function ideaHandler(req, env) {
 // Auth: ?key= (GET) o body.key (POST) === env.AGORA_SYNC_KEY (la .synckey de 32
 // chars del grid). Todas las rutas /agora/* están EXCLUIDAS del espejo a Telegram
 // (ver NOTIFY_SKIP_PREFIX) — son housekeeping de alta frecuencia, no se notifican.
-const AGORA_IDENTITIES = ['Claude·admira', 'Codex·admira', 'Claude·gmail', 'Codex·gmail'];
+const AGORA_IDENTITIES = ['Claude·admira', 'Codex·admira', 'Claude·gmail', 'Codex·gmail', 'OpenCode·grok'];
+const AGORA_COMMAND_TARGETS = {
+  neo: { identity: 'Claude·admira', persona: 'Neo' },
+  morfeo: { identity: 'Claude·gmail', persona: 'Morfeo' },
+  morpheus: { identity: 'Claude·gmail', persona: 'Morfeo' },
+  trinity: { identity: 'Codex·admira', persona: 'Trinity' },
+  oraculo: { identity: 'Codex·gmail', persona: 'Oráculo' },
+  oracle: { identity: 'Codex·gmail', persona: 'Oráculo' },
+  cypher: { identity: 'OpenCode·grok', persona: 'Cypher' },
+};
 const AGORA_AWAKE_MS = 5 * 60 * 1000; // visto < 5 min = despierto
 const AGORA_FEED_CAP = 200;           // últimos N items del feed compartido
 const AGORA_QUEUE_CAP = 100;          // tope por buzón/cola
@@ -1842,6 +1880,23 @@ async function agoraKvPut(env, key, value, now) {
   if (!(await reserveKvWrite(env, now))) return false;
   try { await env.SIGNAGE_KV.put(key, JSON.stringify(value)); return true; }
   catch { return false; }
+}
+function agoraCommandKey(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+}
+function agoraCommandFromText(text) {
+  const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const alias = agoraCommandKey(m[1]);
+  const target = AGORA_COMMAND_TARGETS[alias];
+  if (!target) return null;
+  return { alias, target, text: String(m[2] || '').trim() };
+}
+async function agoraEnqueueForIdentity(env, identity, kind, item, now) {
+  const kkey = `agora:${kind}:${identity}`;
+  const items = await agoraKvGet(env, kkey, []);
+  items.push(item);
+  await agoraKvPut(env, kkey, items.slice(-AGORA_QUEUE_CAP), now);
 }
 
 // POST /agora/presence {key,identity,host,tokens?,reqs?}  ·  GET /agora/presence?key=
@@ -1956,16 +2011,34 @@ async function agoraAnalyzeHandler(req, env) {
   }
 }
 
+async function agoraEnqueueCommand(env, command, who, chat) {
+  const now = Date.now();
+  const body = command.text || `Carlos invoca /${command.alias}. Responde en AgoraMatrix y queda a la espera de instrucciones.`;
+  const item = {
+    ts: now,
+    who: who || 'humano',
+    text: body.slice(0, 1000),
+    command: `/${command.alias}`,
+    persona: command.target.persona,
+    chat: chat != null ? chat : undefined,
+  };
+  await agoraEnqueueForIdentity(env, command.target.identity, 'inbox', item, now);
+  await agoraEnqueueForIdentity(env, command.target.identity, 'tasks', item, now);
+  return { identity: command.target.identity, persona: command.target.persona, text: body };
+}
+
 // Encola un mensaje del grupo de Telegram en el buzón de TODAS las identidades
-// (lo recoge el cmd-poller y `agora inbox`). Mismo ts en las 4 → el poller dedup
+// (lo recoge el cmd-poller y `agora inbox`). Mismo ts en todas → el poller dedup
 // por high-water mark y dispara una sola vez. Best-effort.
 async function agoraEnqueueInbox(env, text, who, chat) {
   const now = Date.now();
   for (const id of AGORA_IDENTITIES) {
-    const kkey = `agora:inbox:${id}`;
-    const items = await agoraKvGet(env, kkey, []);
-    items.push({ ts: now, who: who || 'humano', text: String(text || '').slice(0, 1000), chat: chat != null ? chat : undefined });
-    await agoraKvPut(env, kkey, items.slice(-AGORA_QUEUE_CAP), now);
+    await agoraEnqueueForIdentity(env, id, 'inbox', {
+      ts: now,
+      who: who || 'humano',
+      text: String(text || '').slice(0, 1000),
+      chat: chat != null ? chat : undefined,
+    }, now);
   }
 }
 
@@ -2010,6 +2083,8 @@ export default {
         res = await agoraPresenceHandler(req, env, url);
       } else if (path === '/agora/feed') {
         res = await agoraFeedHandler(req, env, url, ctx);
+      } else if (path === '/agora/tg-test' && req.method === 'GET') {
+        res = await agoraTgTestHandler(req, env, url);
       } else if (path === '/agora/config') {
         res = await agoraConfigHandler(req, env, url);
       } else if (path === '/agora/inbox' && req.method === 'GET') {
