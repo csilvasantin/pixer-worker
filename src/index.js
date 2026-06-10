@@ -93,6 +93,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
+  '/lead',          // notificado dentro del handler con los datos del contacto
   '/telegram/webhook', // webhook entrante de Telegram (import por URL) — responde él mismo
   '/telegram/setup',
   // (los prefijos /stock/track/ y /stock/asset/ van en NOTIFY_SKIP_PREFIX abajo)
@@ -151,13 +152,33 @@ async function xaiImageHandler(req, env) {
   if (prompt.length > 4000) return json({ error: 'prompt-too-long', max: 4000 }, { status: 400 });
   // Modelos válidos: grok-imagine-image (rápido/barato $0.02), grok-imagine-image-pro ($0.07)
   const safeModel = (model === 'grok-imagine-image-pro') ? 'grok-imagine-image-pro' : 'grok-imagine-image';
+  // b64:true → devolvemos las imágenes en base64 (data URL). Necesario para
+  // procesarlas en canvas en el cliente sin "tainting" CORS (p. ej. recortar el
+  // fondo del furni en Pixeria antes de publicarlo al gemelo).
+  const wantB64 = body.b64 === true || body.response_format === 'b64_json';
 
   const r = await fetch('https://api.x.ai/v1/images/generations', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: safeModel, prompt, n: Math.min(4, Math.max(1, n)), response_format: 'url' }),
+    body: JSON.stringify({ model: safeModel, prompt, n: Math.min(4, Math.max(1, n)), response_format: wantB64 ? 'b64_json' : 'url' }),
   });
   const data = await r.json().catch(() => ({}));
+  if (r.ok && wantB64 && data && Array.isArray(data.data)) {
+    // Si x.ai devolvió `url` en vez de `b64_json`, la traemos aquí (server-side,
+    // sin CORS) y la convertimos a base64 para que el cliente la reciba lista.
+    for (const item of data.data) {
+      if (item && !item.b64_json && item.url) {
+        try {
+          const ir = await fetch(item.url);
+          if (ir.ok) {
+            const buf = await ir.arrayBuffer();
+            item.b64_json = bytesToB64(new Uint8Array(buf));
+            item.mime = ir.headers.get('Content-Type') || 'image/jpeg';
+          }
+        } catch (e) {}
+      }
+    }
+  }
   return json(data, { status: r.status });
 }
 
@@ -540,6 +561,97 @@ async function signageWriteIndex(env, arr) {
   await env.STOCK_BUCKET.put(SIGNAGE_INDEX_KEY, JSON.stringify(arr), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'no-cache' },
   });
+}
+
+// ─── Lead capture (booth Shoptalk · gemelo Admira XP) ──────────────
+// POST /lead  → guarda el contacto en SIGNAGE_KV (prefijo lead:) y avisa por
+//   Telegram al instante (alerta en el stand + copia de respaldo del dato).
+// GET  /leads?token=…&format=csv|json → export protegido para seguimiento
+//   comercial post-evento. El token vive en el secret LEADS_TOKEN.
+const LEAD_PREFIX = 'lead:';
+function leadClean(s, max = 200) {
+  return String(s == null ? '' : s).replace(/[\r\n\t]+/g, ' ').trim().slice(0, max);
+}
+function isEmail(s) {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+}
+function csvCell(s) {
+  const v = String(s == null ? '' : s);
+  return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+
+async function leadCreateHandler(req, env, ctx) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const name = leadClean(body.name);
+  const email = leadClean(body.email);
+  const phone = leadClean(body.phone, 40);
+  const company = leadClean(body.company);
+  const role = leadClean(body.role, 80);
+  const interest = leadClean(body.interest, 80);
+  const notes = leadClean(body.notes, 500);
+  const consent = body.consent === true || body.consent === 'true';
+  if (!name) return json({ error: 'missing-name' }, { status: 400 });
+  if (!email && !phone) return json({ error: 'missing-contact' }, { status: 400 });
+  if (email && !isEmail(email)) return json({ error: 'bad-email' }, { status: 400 });
+
+  const ts = Date.now();
+  const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const source = leadClean(body.source, 60) || 'admira-xp';
+  const origin = req.headers.get('Origin') || req.headers.get('Referer') || 'direct';
+  const ua = leadClean(req.headers.get('User-Agent'), 200);
+  const rec = { id, ts, name, email, phone, company, role, interest, notes, consent, source, origin, ua };
+  // Clave ordenable por tiempo (ts de 13 dígitos ⇒ orden lexicográfico = cronológico).
+  await env.SIGNAGE_KV.put(`${LEAD_PREFIX}${id}`, JSON.stringify(rec));
+
+  const msg = `🧲 <b>Nuevo lead · ${escHtml(source)}</b>\n` +
+              `· <b>${escHtml(name)}</b>${company ? ' · ' + escHtml(company) : ''}\n` +
+              (email ? `· ✉️ <code>${escHtml(email)}</code>\n` : '') +
+              (phone ? `· ☎️ <code>${escHtml(phone)}</code>\n` : '') +
+              (role ? `· 💼 ${escHtml(role)}\n` : '') +
+              (interest ? `· 🎯 ${escHtml(interest)}\n` : '') +
+              (notes ? `· 📝 ${escHtml(notes)}\n` : '');
+  notify(ctx, env, msg);
+  return json({ ok: true, id });
+}
+
+async function leadExportHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const token = url.searchParams.get('token') || '';
+  if (!env.LEADS_TOKEN || token !== env.LEADS_TOKEN) {
+    return json({ error: 'unauthorized' }, { status: 401 });
+  }
+  const format = (url.searchParams.get('format') || 'json').toLowerCase();
+  const leads = [];
+  let cursor;
+  do {
+    const list = await env.SIGNAGE_KV.list({ prefix: LEAD_PREFIX, cursor, limit: 1000 });
+    for (const k of list.keys) {
+      const v = await env.SIGNAGE_KV.get(k.name);
+      if (v) { try { leads.push(JSON.parse(v)); } catch {} }
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+  leads.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+  if (format === 'csv') {
+    const cols = ['ts', 'date', 'name', 'email', 'phone', 'company', 'role', 'interest', 'notes', 'consent', 'source', 'origin'];
+    const rows = leads.map(l => [
+      l.ts, new Date(l.ts).toISOString(), l.name, l.email, l.phone, l.company,
+      l.role, l.interest, l.notes, l.consent ? 'yes' : 'no', l.source, l.origin,
+    ].map(csvCell).join(','));
+    const csv = '﻿' + [cols.join(','), ...rows].join('\r\n');
+    return new Response(csv, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="xpaceos-leads.csv"',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+  return json({ ok: true, count: leads.length, leads });
 }
 
 async function signagePushHandler(req, env) {
@@ -1153,6 +1265,14 @@ function b64ToBytes(b64) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+function bytesToB64(bytes) {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 function extForMime(mime) {
@@ -1862,6 +1982,10 @@ export default {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/lead' && req.method === 'POST') {
+        res = await leadCreateHandler(req, env, ctx);
+      } else if (path === '/leads' && req.method === 'GET') {
+        res = await leadExportHandler(req, env, url);
       } else if (path === '/stock/recategorize' && req.method === 'POST') {
         res = await stockRecategorizeHandler(req, env);
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
