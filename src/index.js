@@ -877,6 +877,8 @@ async function signageHeartbeatHandler(req, env) {
     showing_id: body.showing_id || null,
     role: (body.role || 'signage').toString().slice(0, 40),
     version: (body.version || '').toString().slice(0, 40),
+    loc: (body.loc || '').toString().slice(0, 60),       // Xpacio al que pertenece (cierra el loop: admira.app lo vende)
+    locName: (body.locName || '').toString().slice(0, 80),
   };
   // Silenciar errores de KV (límite diario en Workers Free): el heartbeat es
   // telemetría no crítica; mejor perder algún ping que reventar el worker y
@@ -890,7 +892,8 @@ async function signageHeartbeatHandler(req, env) {
     let prev = null;
     try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
     const changed = !prev || prev.showing_id !== data.showing_id ||
-                    prev.role !== data.role || prev.version !== data.version;
+                    prev.role !== data.role || prev.version !== data.version ||
+                    prev.loc !== data.loc;
     const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
     if (!changed && !stale) {
       return json({ ok: true, last_seen: prev.last_seen, throttled: 'unchanged' });
