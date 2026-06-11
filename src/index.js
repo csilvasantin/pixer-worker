@@ -163,6 +163,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
+  '/stock/reasset', // reproceso de transparencia en lote: no notificar cada uno
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
   '/lead',          // notificado dentro del handler con los datos del contacto
   '/telegram/webhook', // webhook entrante de Telegram (import por URL) — responde él mismo
@@ -180,6 +181,7 @@ const NOTIFY_SKIP_PREFIX = [
   '/xai/video/', // GET polling
   '/agora/',     // coordinación multi-agente: housekeeping de alta frecuencia, no notificar
   '/layout/',    // distribuciones de mobiliario: la UI de pixeria/gemelo da su propio feedback
+  '/xpacio',     // monedero/inventario del Xpacio: housekeeping de la UI del Marketplace
 ];
 
 function shouldNotify(path, method, status) {
@@ -1395,6 +1397,8 @@ async function stockPublishHandler(req, env, ctx) {
     ? [Math.max(1, Math.min(6, +body.fp[0] || 1)), Math.max(1, Math.min(6, +body.fp[1] || 1))]
     : null;
   const ph = (body.ph != null && isFinite(+body.ph)) ? Math.max(8, Math.min(400, +body.ph)) : null;
+  // Precio del mueble (créditos del Xpacio), para el Marketplace.
+  const price = (body.price != null && isFinite(+body.price)) ? Math.max(0, Math.min(100000, Math.round(+body.price))) : null;
   let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
 
   if (!type || !STOCK_TYPES.includes(type)) {
@@ -1488,6 +1492,7 @@ async function stockPublishHandler(req, env, ctx) {
     assetKey,
     fp,
     ph,
+    price,
     createdAt: new Date(ts).toISOString(),
   };
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
@@ -1551,10 +1556,44 @@ async function stockListHandler(req, env, url) {
   const origin = new URL(req.url).origin;
   const items = filtered.slice(0, limit).map(m => ({
     ...m,
-    url: m.assetKey ? `${origin}/stock/asset/${m.id}` : m.url,
+    // ?v=size: el asset es immutable; si se reprocesa (p.ej. recorte a
+    // transparente) cambia el tamaño → nueva URL → el navegador no sirve el viejo.
+    url: m.assetKey ? `${origin}/stock/asset/${m.id}?v=${m.size || 0}` : m.url,
     thumbnail: m.thumbnail ? m.thumbnail.replace(WORKER_PUBLIC_BASE, origin) : m.thumbnail,
   }));
   return json({ items, total: filtered.length });
+}
+
+// POST /stock/reasset {id, base64, mime}
+// Sobrescribe el BLOB de un asset ya publicado conservando su id/meta (título,
+// precio, fp, ph…). Lo usa la "pasada de transparencia": recortar el fondo de
+// los muebles viejos (JPEG con fondo) y dejarlos PNG transparentes sin perder
+// referencias ni duplicar. (Carlos 2026-06-11)
+async function stockReassetHandler(req, env, ctx) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const id = b.id;
+  if (!id || !/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  if (!b.base64) return json({ error: 'missing-base64' }, { status: 400 });
+  const metaObj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+  if (!metaObj) return json({ error: 'not-found' }, { status: 404 });
+  let meta; try { meta = await metaObj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
+  const mime = b.mime || 'image/png';
+  const ext = extForMime(mime);
+  let bytes; try { bytes = b64ToBytes(b.base64); } catch { return json({ error: 'bad-base64' }, { status: 400 }); }
+  if (bytes.length > 50 * 1024 * 1024) return json({ error: 'too-big' }, { status: 413 });
+  const newAssetKey = `stock/${id}/asset.${ext}`;
+  await env.STOCK_BUCKET.put(newAssetKey, bytes, {
+    httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
+    customMetadata: { motor: meta.motor || '', type: meta.type || 'furni', id },
+  });
+  if (meta.assetKey && meta.assetKey !== newAssetKey) { try { await env.STOCK_BUCKET.delete(meta.assetKey); } catch {} }
+  meta.assetKey = newAssetKey; meta.mime = mime; meta.ext = ext; meta.size = bytes.length;
+  await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
+  ctx.waitUntil(rebuildStockIndex(env));
+  return json({ ok: true, id, mime, size: bytes.length });
 }
 
 // ─── Índice estático de Stock en R2 (anti-bloqueo workers.dev) ─────
@@ -1589,7 +1628,7 @@ async function rebuildStockIndex(env) {
   metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   const items = metas.map(m => ({
     ...m,
-    url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}` : m.url,
+    url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}?v=${m.size || 0}` : m.url,
     // thumbnail se deja tal cual: son data-URIs o URLs externas; si alguno
     // apuntase a workers.dev el <video> cae a preload de metadata sin póster.
   }));
@@ -2219,6 +2258,55 @@ async function layoutDeleteHandler(req, env, url) {
   return json({ ok: true, id });
 }
 
+// ─── MONEDERO DEL XPACIO (Marketplace: comprar muebles con créditos) ──
+// Por Xpacio (id propio del navegador/cuenta): saldo + inventario «Mis
+// muebles». KV `xpacio:<id>`. Comprar descuenta el precio del furni. Los
+// muebles comprados se colocan en el editor de Distribución. (Carlos 2026-06-11)
+const XPACIO_DEFAULT_BALANCE = 2000;
+function xpacioKey(id) { return 'xpacio:' + String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40); }
+function furniPrice(item) {
+  if (item && item.price != null && isFinite(+item.price)) return Math.max(0, Math.round(+item.price));
+  const fp = Array.isArray(item && item.fp) ? item.fp : [1, 1];
+  const area = Math.max(1, (fp[0] || 1) * (fp[1] || 1));
+  return 50 + 30 * area;   // precio por defecto si el furni no trae price
+}
+async function xpacioLoad(env, id) {
+  const w = await agoraKvGet(env, xpacioKey(id), null);
+  return w || { id: String(id || '').slice(0, 40), balance: XPACIO_DEFAULT_BALANCE, owned: [] };
+}
+async function xpacioGetHandler(req, env, url) {
+  const id = url.searchParams.get('id');
+  if (!id) return json({ error: 'missing-id' }, { status: 400 });
+  return json(await xpacioLoad(env, id));
+}
+async function xpacioBuyHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!b.id || !b.item || !b.item.url) return json({ error: 'missing-id-or-item' }, { status: 400 });
+  const now = Date.now();
+  const w = await xpacioLoad(env, b.id);
+  if (w.owned.some(o => o.url === b.item.url)) return json({ ok: true, already: true, wallet: w });
+  const price = furniPrice(b.item);
+  if ((w.balance || 0) < price) return json({ ok: false, error: 'insufficient', balance: w.balance || 0, price }, { status: 402 });
+  w.balance = (w.balance || 0) - price;
+  w.owned.unshift({
+    url: b.item.url, title: String(b.item.title || 'Mueble').slice(0, 120),
+    fp: Array.isArray(b.item.fp) ? b.item.fp : [1, 1], ph: +b.item.ph || 46, price, ts: now,
+  });
+  w.owned = w.owned.slice(0, 300);
+  await agoraKvPut(env, xpacioKey(b.id), w, now);
+  return json({ ok: true, wallet: w, spent: price });
+}
+async function xpacioCreditHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!b.id) return json({ error: 'missing-id' }, { status: 400 });
+  const now = Date.now();
+  const w = await xpacioLoad(env, b.id);
+  const amt = Math.max(-100000, Math.min(100000, Math.round(+b.amount || 0)));
+  w.balance = Math.max(0, (w.balance || 0) + amt);
+  await agoraKvPut(env, xpacioKey(b.id), w, now);
+  return json({ ok: true, wallet: w });
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
@@ -2324,12 +2412,20 @@ export default {
         res = await layoutGetHandler(req, env, url);
       } else if (path === '/layout/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
         res = await layoutDeleteHandler(req, env, url);
+      } else if (path === '/xpacio' && req.method === 'GET') {
+        res = await xpacioGetHandler(req, env, url);
+      } else if (path === '/xpacio/buy' && req.method === 'POST') {
+        res = await xpacioBuyHandler(req, env);
+      } else if (path === '/xpacio/credit' && req.method === 'POST') {
+        res = await xpacioCreditHandler(req, env);
       } else if (path === '/lead' && req.method === 'POST') {
         res = await leadCreateHandler(req, env, ctx);
       } else if (path === '/leads' && req.method === 'GET') {
         res = await leadExportHandler(req, env, url);
       } else if (path === '/stock/recategorize' && req.method === 'POST') {
         res = await stockRecategorizeHandler(req, env);
+      } else if (path === '/stock/reasset' && req.method === 'POST') {
+        res = await stockReassetHandler(req, env, ctx);
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
