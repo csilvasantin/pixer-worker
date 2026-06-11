@@ -179,6 +179,7 @@ const NOTIFY_SKIP_PREFIX = [
   '/veo/status/',
   '/xai/video/', // GET polling
   '/agora/',     // coordinación multi-agente: housekeeping de alta frecuencia, no notificar
+  '/layout/',    // distribuciones de mobiliario: la UI de pixeria/gemelo da su propio feedback
 ];
 
 function shouldNotify(path, method, status) {
@@ -2154,6 +2155,70 @@ async function agoraEnqueueInbox(env, text, who, chat) {
   }
 }
 
+// ─── DISTRIBUCIONES (layouts de mobiliario) ──────────────────────────
+// Canal compartido pixeria ⇄ gemelos: una "distribución" es la sala entera
+// (config + mobiliario + staff). Vive en SIGNAGE_KV con prefijo `layout:`.
+//   layout:index        → [{id,name,client,source,savedAt,counts,thumb?}] (resumen, cap 120)
+//   layout:item:<id>    → JSON completo {schema,id,name,client,source,savedAt,config,furniture,staff,thumb?}
+// Sin auth (como el stock); CORS por whitelist. Pixeria publica/edita; los
+// gemelos publican su distribución actual y aplican una. (Carlos 2026-06-11)
+const LAYOUT_INDEX_CAP = 120;
+function layoutSummary(item) {
+  return {
+    id: item.id, name: item.name || '(sin nombre)', client: item.client || null,
+    source: item.source || 'pixeria', savedAt: item.savedAt || null,
+    counts: { furniture: Array.isArray(item.furniture) ? item.furniture.length : 0,
+              staff: Array.isArray(item.staff) ? item.staff.length : 0 },
+    thumb: item.thumb || null,
+  };
+}
+async function layoutPublishHandler(req, env, ctx) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!Array.isArray(b.furniture)) return json({ error: 'missing-furniture' }, { status: 400 });
+  const now = Date.now();
+  const id = (typeof b.id === 'string' && /^[A-Za-z0-9_-]{3,40}$/.test(b.id))
+    ? b.id : `${now}-${Math.random().toString(36).slice(2, 8)}`;
+  const item = {
+    schema: 'distribucion-1', id,
+    name: String(b.name || '').slice(0, 80) || 'Distribución',
+    client: b.client ? String(b.client).slice(0, 40) : null,
+    source: ['pixeria', 'gemelo'].includes(b.source) ? b.source : 'pixeria',
+    savedAt: new Date(now).toISOString(),
+    config: (b.config && typeof b.config === 'object') ? b.config : null,
+    furniture: b.furniture.slice(0, 200),
+    staff: Array.isArray(b.staff) ? b.staff.slice(0, 30) : [],
+    thumb: (typeof b.thumb === 'string' && b.thumb.length < 200000) ? b.thumb : null,
+  };
+  await agoraKvPut(env, `layout:item:${id}`, item, now);
+  const index = await agoraKvGet(env, 'layout:index', []);
+  const filtered = index.filter(x => x.id !== id);
+  filtered.unshift(layoutSummary(item));
+  await agoraKvPut(env, 'layout:index', filtered.slice(0, LAYOUT_INDEX_CAP), now);
+  return json({ ok: true, id, name: item.name });
+}
+async function layoutListHandler(req, env, url) {
+  const index = await agoraKvGet(env, 'layout:index', []);
+  const client = url.searchParams.get('client');
+  const items = client ? index.filter(x => !x.client || x.client === client) : index;
+  return json({ items });
+}
+async function layoutGetHandler(req, env, url) {
+  const id = url.searchParams.get('id');
+  if (!id) return json({ error: 'missing-id' }, { status: 400 });
+  const item = await agoraKvGet(env, `layout:item:${id}`, null);
+  if (!item) return json({ error: 'not-found' }, { status: 404 });
+  return json(item);
+}
+async function layoutDeleteHandler(req, env, url) {
+  const id = url.searchParams.get('id');
+  if (!id) return json({ error: 'missing-id' }, { status: 400 });
+  const now = Date.now();
+  try { await env.SIGNAGE_KV.delete(`layout:item:${id}`); } catch {}
+  const index = await agoraKvGet(env, 'layout:index', []);
+  await agoraKvPut(env, 'layout:index', index.filter(x => x.id !== id), now);
+  return json({ ok: true, id });
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
@@ -2251,6 +2316,14 @@ export default {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/layout/publish' && req.method === 'POST') {
+        res = await layoutPublishHandler(req, env, ctx);
+      } else if (path === '/layout/list' && req.method === 'GET') {
+        res = await layoutListHandler(req, env, url);
+      } else if (path === '/layout/get' && req.method === 'GET') {
+        res = await layoutGetHandler(req, env, url);
+      } else if (path === '/layout/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
+        res = await layoutDeleteHandler(req, env, url);
       } else if (path === '/lead' && req.method === 'POST') {
         res = await leadCreateHandler(req, env, ctx);
       } else if (path === '/leads' && req.method === 'GET') {
