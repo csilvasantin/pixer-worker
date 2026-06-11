@@ -1403,6 +1403,18 @@ async function stockPublishHandler(req, env, ctx) {
   // Precio del mueble (créditos del Xpacio), para el Marketplace.
   const price = (body.price != null && isFinite(+body.price)) ? Math.max(0, Math.min(100000, Math.round(+body.price))) : null;
   let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
+  // Segmento de campaña (fase 3): "crear campaña" manda el segmento de cada
+  // versión para casarla con su público al venderse (audience/edad/franja/emplazamiento).
+  const SEG_AUD = ['f','m','all'], SEG_AGE = ['nino','joven','adulto','senior','vejez'], SEG_TS = ['manana','mediodia','tarde','noche'], SEG_TYP = ['exterior','interior'];
+  const _cleanArr = (a, allow) => Array.isArray(a) ? [...new Set(a.map(x => String(x)).filter(x => allow.includes(x)))] : [];
+  const segIn = (body.segmentation && typeof body.segmentation === 'object') ? body.segmentation : null;
+  const segmentation = segIn ? {
+    audiences: _cleanArr(segIn.audiences, SEG_AUD),
+    ageBuckets: _cleanArr(segIn.ageBuckets, SEG_AGE),
+    timeSlots: _cleanArr(segIn.timeSlots, SEG_TS),
+    typologies: _cleanArr(segIn.typologies, SEG_TYP),
+  } : null;
+  const bodyAudience = (typeof body.audience === 'string' && SEG_AUD.includes(body.audience)) ? body.audience : null;
 
   if (!type || !STOCK_TYPES.includes(type)) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
@@ -1475,6 +1487,10 @@ async function stockPublishHandler(req, env, ctx) {
     audience = auto.audience;
     category = auto.category;
   } catch { if (!tags) tags = []; }
+  // En campañas segmentadas el frontend manda el público explícito → prevalece
+  // sobre la clasificación de Gemini (es el segmento exacto de esta versión).
+  if (bodyAudience) audience = bodyAudience;
+  else if (segmentation && segmentation.audiences.length === 1) audience = segmentation.audiences[0];
 
   const meta = {
     id,
@@ -1486,6 +1502,9 @@ async function stockPublishHandler(req, env, ctx) {
     tags: tags || [],
     audience,
     category,
+    segmentation: segmentation || null,
+    ageBucket: (segmentation && segmentation.ageBuckets[0]) || null,   // edad principal (para pickCreative del gemelo)
+    timeSlot: (segmentation && segmentation.timeSlots[0]) || null,     // franja principal (matching por daypart)
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
     ext,
