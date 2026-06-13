@@ -2439,6 +2439,24 @@ async function xpacioBuyHandler(req, env) {
   await agoraKvPut(env, xpacioKey(b.id), w, now);
   return json({ ok: true, wallet: w, spent: price });
 }
+// EDICIÓN: aplica cambios del editor pixel-art a un mueble de Mis muebles
+// (imagen base64 editada, altura ph, footprint fp, título). Match por url.
+async function xpacioUpdateHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!b.id || !b.url) return json({ error: 'missing-id-or-url' }, { status: 400 });
+  const now = Date.now();
+  const w = await xpacioLoad(env, b.id);
+  const it = (w.owned || []).find(o => o.url === b.url);
+  if (!it) return json({ error: 'not-owned' }, { status: 404 });
+  const p = b.patch || {};
+  if (typeof p.img === 'string' && p.img.startsWith('data:image') && p.img.length < 800000) it.img = p.img;
+  if (p.ph != null && isFinite(+p.ph)) it.ph = Math.max(8, Math.min(400, Math.round(+p.ph)));
+  if (Array.isArray(p.fp) && p.fp.length === 2) it.fp = [Math.max(1, p.fp[0] | 0), Math.max(1, p.fp[1] | 0)];
+  if (typeof p.title === 'string' && p.title.trim()) it.title = p.title.slice(0, 120);
+  it.editedAt = now;
+  await agoraKvPut(env, xpacioKey(b.id), w, now);
+  return json({ ok: true, wallet: w });
+}
 async function xpacioCreditHandler(req, env) {
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!b.id) return json({ error: 'missing-id' }, { status: 400 });
@@ -2573,6 +2591,8 @@ export default {
         res = await xpacioBuyHandler(req, env);
       } else if (path === '/xpacio/credit' && req.method === 'POST') {
         res = await xpacioCreditHandler(req, env);
+      } else if (path === '/xpacio/update' && req.method === 'POST') {
+        res = await xpacioUpdateHandler(req, env);
       } else if (path === '/lead' && req.method === 'POST') {
         res = await leadCreateHandler(req, env, ctx);
       } else if (path === '/leads' && req.method === 'GET') {
