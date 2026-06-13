@@ -428,7 +428,7 @@ async function geminiHandler(req, env) {
     model = 'gemini-2.5-flash',
     location = 'us-central1',
     temperature = 0.9,
-    maxOutputTokens = 800,
+    maxOutputTokens = 1400,
   } = body;
 
   let sa;
@@ -436,22 +436,21 @@ async function geminiHandler(req, env) {
   const projectId = sa.project_id;
   const safeModel = ['gemini-2.5-flash', 'gemini-2.5-pro'].includes(model) ? model : 'gemini-2.5-flash';
 
-  // Construye prompt para letras
+  // Construye prompt para letras. La IDEA/tema viene de brief.idea o brief.letra
+  // (lo que el usuario escribe en el campo Letra como semilla); el estilo de brief.uso.
   const moods = Array.isArray(brief.emocion) ? brief.emocion.join(', ') : '';
   const layers = Array.isArray(brief.capas) ? brief.capas.join(', ') : '';
+  const idea = String(brief.idea || brief.letra || '').trim();
+  const extra = [moods && `emoción: ${moods}`, layers && `capas: ${layers}`, brief.tonalidad && `tonalidad: ${brief.tonalidad}`, brief.bpm && `${brief.bpm} bpm`].filter(Boolean).join(', ');
   const langName = { es: 'español', en: 'inglés', ca: 'catalán', fr: 'francés', pt: 'portugués', de: 'alemán', it: 'italiano' }[idioma] || idioma;
 
-  const userPrompt = `Genera la letra de una canción en ${langName} con este brief:
+  const userPrompt = `Eres letrista profesional. Escribe la letra de una canción en ${langName}.
 
-- Cliente / proyecto: ${brief.cliente || 'sin especificar'}
-- Uso: ${brief.uso || 'libre'}
-- Emoción: ${moods || 'libre'}
-- Tonalidad: ${brief.tonalidad || 'libre'}
-- BPM: ${brief.bpm || 'libre'}
-- Capas musicales: ${layers || 'libre'}
-- Versiones a entregar: ${brief.versiones || 'una versión completa'}
+IDEA / TEMA de la canción: ${idea || 'libre — inspírate en el estilo'}
+Estilo musical: ${brief.uso || 'libre'}${extra ? '\n' + extra : ''}
+Cliente / proyecto: ${brief.cliente || 'sin especificar'}
 
-Devuelve SOLO la letra estructurada con secciones marcadas: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Outro]. Sin comentarios, sin explicaciones, sin markdown. Máximo 24 líneas.`;
+Transforma la IDEA en versos emotivos, cantables y con rima natural (NO la copies literal: conviértela en canción). Devuelve SOLO la letra estructurada con secciones marcadas: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Outro]. Sin comentarios, sin explicaciones, sin markdown. Máximo 24 líneas.`;
 
   let token;
   try { token = await getGcpAccessToken(env); }
@@ -463,7 +462,7 @@ Devuelve SOLO la letra estructurada con secciones marcadas: [Verse 1], [Chorus],
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: { temperature, maxOutputTokens, topP: 0.95 },
+      generationConfig: { temperature, maxOutputTokens, topP: 0.95, thinkingConfig: { thinkingBudget: 0 } },
     }),
   });
   const data = await r.json().catch(() => ({}));
@@ -732,7 +731,7 @@ async function signagePushHandler(req, env) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const { kind, src, title, mime, base64, target } = body;
+  const { kind, src, title, mime, base64, target, priority, interrupt } = body;
   if (!kind || !['image', 'video', 'audio', 'text'].includes(kind)) return json({ error: 'bad-kind' }, { status: 400 });
   if (!src && !base64) return json({ error: 'missing-src-or-base64' }, { status: 400 });
   if (base64 && base64.length > 25 * 1024 * 1024) return json({ error: 'too-big', max_b64: 25 * 1024 * 1024 }, { status: 413 });
@@ -753,6 +752,9 @@ async function signagePushHandler(req, env) {
     acked_at: null,
     screen: null,
     target: tgt,
+    // Prioridad 0 = envío que interrumpe a pantalla completa lo que se emite.
+    priority: (typeof priority === 'number') ? priority : null,
+    interrupt: !!interrupt,
   };
   if (base64) {
     await env.STOCK_BUCKET.put(`${SIGNAGE_ASSET_PREFIX}${id}`, b64ToBytes(base64), {
