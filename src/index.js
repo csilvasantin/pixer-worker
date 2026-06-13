@@ -159,6 +159,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/healthz',
   '/signage/heartbeat',
   '/signage/feed',
+  '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
   '/stock/list',
@@ -185,11 +186,36 @@ const NOTIFY_SKIP_PREFIX = [
 ];
 
 function shouldNotify(path, method, status) {
-  if (status >= 500) return true; // errores siempre
+  if (status >= 400) return true; // errores siempre
   if (NOTIFY_SKIP_EXACT.has(path)) return false;
   if (NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p))) return false;
   if (method === 'GET') return false; // resto de GETs son lecturas baratas
   return true;
+}
+
+function cleanMetaText(v, max = 120) {
+  return String(v || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function sourceUrlForNotify(req, body) {
+  const meta = body && typeof body.meta === 'object' ? body.meta : {};
+  return cleanMetaText(
+    meta.page_url || meta.url || body.source_url || req.headers.get('Origin') || req.headers.get('Referer') || 'direct',
+    220
+  );
+}
+
+function signageMetaForItem(body, req) {
+  const meta = body && typeof body.meta === 'object' ? body.meta : {};
+  return {
+    source: cleanMetaText(meta.source || body.source || 'unknown', 80),
+    page: cleanMetaText(meta.page || meta.page_title || '', 120),
+    page_url: sourceUrlForNotify(req, body),
+    asset_id: cleanMetaText(meta.asset_id || body.asset_id || '', 80),
+    asset_label: cleanMetaText(meta.asset_label || body.asset_label || body.title || '', 160),
+    dispatch_mode: cleanMetaText(meta.dispatch_mode || '', 40),
+    selected_count: Number.isFinite(Number(meta.selected_count)) ? Number(meta.selected_count) : null,
+  };
 }
 
 // ─── ElevenLabs ────────────────────────────────────────────────────
@@ -727,7 +753,7 @@ async function leadExportHandler(req, env, url) {
   return json({ ok: true, count: leads.length, leads });
 }
 
-async function signagePushHandler(req, env) {
+async function signagePushHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -743,6 +769,7 @@ async function signagePushHandler(req, env) {
 
   const ts = Date.now();
   const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const meta = signageMetaForItem(body, req);
   const item = {
     id, ts, kind,
     title: (title || '').slice(0, 200),
@@ -755,6 +782,7 @@ async function signagePushHandler(req, env) {
     // Prioridad 0 = envío que interrumpe a pantalla completa lo que se emite.
     priority: (typeof priority === 'number') ? priority : null,
     interrupt: !!interrupt,
+    meta,
   };
   if (base64) {
     await env.STOCK_BUCKET.put(`${SIGNAGE_ASSET_PREFIX}${id}`, b64ToBytes(base64), {
@@ -764,6 +792,19 @@ async function signagePushHandler(req, env) {
   const idx = await signageReadIndex(env);
   idx.unshift(item);
   await signageWriteIndex(env, idx.slice(0, SIGNAGE_MAX_ITEMS));
+
+  const targetLabel = tgt || 'broadcast/TODAS';
+  const assetLabel = cleanMetaText(meta.asset_label || title || id, 120);
+  const sourceLabel = cleanMetaText(meta.source || 'unknown', 80);
+  const modeLabel = cleanMetaText(meta.dispatch_mode || (interrupt ? 'priority-0' : 'now'), 40);
+  const countLabel = meta.selected_count ? ` · lote ${meta.selected_count}` : '';
+  const srcLabel = src ? `\n· url <code>${escHtml(cleanMetaText(src, 160))}</code>` : '';
+  const msg = `📺 <b>SIGNAGE PUSH</b> · ${escHtml(kind)} · ${escHtml(modeLabel)}${countLabel}\n` +
+              `· asset <b>${escHtml(assetLabel || id)}</b>\n` +
+              `· target <code>${escHtml(targetLabel)}</code>${interrupt ? ' · INTERRUPT' : ''}\n` +
+              `· source <b>${escHtml(sourceLabel)}</b>${meta.page ? ` · ${escHtml(meta.page)}` : ''}\n` +
+              `· page <code>${escHtml(meta.page_url || 'direct')}</code>${srcLabel}`;
+  notify(ctx, env, msg);
 
   return json({ ok: true, id, url: `${SIGNAGE_BASE}/signage/asset/${id}` });
 }
@@ -2396,7 +2437,7 @@ export default {
       } else if (path === '/veo/download' && req.method === 'GET') {
         res = await veoDownloadHandler(req, env, url);
       } else if (path === '/signage/push' && req.method === 'POST') {
-        res = await signagePushHandler(req, env);
+        res = await signagePushHandler(req, env, ctx);
       } else if (path === '/signage/feed' && req.method === 'GET') {
         res = await signageFeedHandler(req, env, url);
       } else if (path.startsWith('/signage/asset/') && req.method === 'GET') {
