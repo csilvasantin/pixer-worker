@@ -608,6 +608,32 @@ async function imagenHandler(req, env) {
   return json(data, { status: r.status });
 }
 
+// ─── Edición de imagen con IA (Gemini 2.5 Flash Image) ─────────────
+// Recibe una imagen (base64) + instrucción y devuelve la imagen EDITADA.
+// Lo usa el editor pixel-art de pixeria ("la moto ahora rosa" → la pinta).
+async function imageEditHandler(req, env) {
+  if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key', service: 'gemini' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const prompt = String(b.prompt || '').trim();
+  if (!prompt) return json({ error: 'missing-prompt' }, { status: 400 });
+  let img = String(b.image || ''), mime = b.mime || 'image/png';
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(img); if (m) { mime = m[1]; img = m[2]; }
+  if (!img) return json({ error: 'missing-image' }, { status: 400 });
+  const model = (typeof b.model === 'string' && b.model) ? b.model : 'gemini-2.5-flash-image';
+  const sys = 'Eres un editor de sprites pixel-art de mobiliario. Edita la imagen dada siguiendo la instrucción. MANTÉN el estilo pixel-art, el mismo encuadre/pose y el fondo transparente; cambia SOLO lo que se pide. Devuelve la imagen editada.';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  const r = await fetch(url, {
+    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType: mime, data: img } }, { text: sys + '\n\nInstrucción: ' + prompt }] }] }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) return json({ error: 'gemini-' + r.status, detail: (d && d.error && d.error.message) || '' }, { status: r.status });
+  let outImg = null, outMime = 'image/png';
+  try { const parts = (((d.candidates || [])[0] || {}).content || {}).parts || []; for (const p of parts) { if (p.inlineData && p.inlineData.data) { outImg = p.inlineData.data; outMime = p.inlineData.mimeType || outMime; break; } } } catch (e) {}
+  if (!outImg) return json({ error: 'no-image-out', detail: JSON.stringify(d).slice(0, 200) }, { status: 502 });
+  return json({ ok: true, image: 'data:' + outMime + ';base64,' + outImg, mime: outMime });
+}
+
 // ─── Veo 3 / Veo 3 Fast (Gemini API) — async ───────────────────────
 async function veoStartHandler(req, env) {
   if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key', service: 'gemini' }, { status: 500 });
@@ -2496,6 +2522,8 @@ export default {
         res = await ttsHandler(req, env);
       } else if (path === '/xai/image' && req.method === 'POST') {
         res = await xaiImageHandler(req, env);
+      } else if (path === '/image/edit' && req.method === 'POST') {
+        res = await imageEditHandler(req, env);
       } else if (path === '/xai/video' && req.method === 'POST') {
         res = await xaiVideoStartHandler(req, env);
       } else if (path.startsWith('/xai/video/') && req.method === 'GET') {
