@@ -2335,6 +2335,26 @@ async function layoutDeleteHandler(req, env, url) {
   await agoraKvPut(env, 'layout:index', index.filter(x => x.id !== id), now);
   return json({ ok: true, id });
 }
+// MUDANZA: asigna una distribución a una o varias pantallas (gemelos) para que
+// la apliquen solas. Guarda un puntero "pendiente" por pantalla; el gemelo lo
+// sondea con /layout/pending?screen= y aplica cuando el ts es nuevo.
+async function layoutAssignHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const id = String(b.id || '');
+  if (!/^[A-Za-z0-9_-]{3,40}$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  const targets = Array.isArray(b.targets) ? b.targets.map(t => String(t).slice(0, 60)).filter(t => /^[a-z0-9_-]+$/i.test(t)) : [];
+  if (!targets.length) return json({ error: 'no-targets' }, { status: 400 });
+  const now = Date.now();
+  const ptr = { id, ts: now, name: String(b.name || '').slice(0, 80) };
+  await Promise.all(targets.map(scr => agoraKvPut(env, `layout:pending:${scr}`, ptr, now)));
+  return json({ ok: true, id, targets });
+}
+async function layoutPendingHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  if (!screen) return json({ pending: null });
+  const ptr = await agoraKvGet(env, `layout:pending:${screen}`, null);
+  return json({ pending: ptr || null });
+}
 
 // ─── MONEDERO DEL XPACIO (Marketplace: comprar muebles con créditos) ──
 // Por Xpacio (id propio del navegador/cuenta): saldo + inventario «Mis
@@ -2492,6 +2512,10 @@ export default {
         res = await layoutGetHandler(req, env, url);
       } else if (path === '/layout/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
         res = await layoutDeleteHandler(req, env, url);
+      } else if (path === '/layout/assign' && req.method === 'POST') {
+        res = await layoutAssignHandler(req, env);
+      } else if (path === '/layout/pending' && req.method === 'GET') {
+        res = await layoutPendingHandler(req, env, url);
       } else if (path === '/xpacio' && req.method === 'GET') {
         res = await xpacioGetHandler(req, env, url);
       } else if (path === '/xpacio/buy' && req.method === 'POST') {
