@@ -158,6 +158,7 @@ function notify(ctx, env, text) {
 const NOTIFY_SKIP_EXACT = new Set([
   '/healthz',
   '/grok/latest.json', // legacy polling de AdmiraXP/Grok: JSON estable, sin spam
+  '/grok/latest',      // variante legacy sin extension: JSON estable, sin spam
   '/signage/heartbeat',
   '/signage/feed',
   '/signage/push', // notificado dentro del handler con asset/origen/target
@@ -2451,7 +2452,7 @@ export default {
     try {
       if (path === '/healthz') {
         res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
-      } else if (path === '/grok/latest.json' && req.method === 'GET') {
+      } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
         res = grokLatestHandler();
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
