@@ -159,6 +159,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/healthz',
   '/grok/latest.json', // legacy polling de AdmiraXP/Grok: JSON estable, sin spam
   '/grok/latest',      // variante legacy sin extension: JSON estable, sin spam
+  '/grok/agent-ack',   // ACK legacy de agentes Grok/Cypher: housekeeping frecuente
   '/signage/heartbeat',
   '/signage/feed',
   '/signage/push', // notificado dentro del handler con asset/origen/target
