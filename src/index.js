@@ -2355,6 +2355,31 @@ async function layoutPendingHandler(req, env, url) {
   const ptr = await agoraKvGet(env, `layout:pending:${screen}`, null);
   return json({ pending: ptr || null });
 }
+// ESTADO ACTUAL: el gemelo reporta su distribución viva (por pantalla y cliente);
+// pixeria la lee para "Cargar distribución actual" → la representa en la rejilla.
+async function layoutReportHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const snap = b.snapshot;
+  if (!snap || !Array.isArray(snap.furniture)) return json({ error: 'missing-furniture' }, { status: 400 });
+  const now = Date.now();
+  const screen = b.screen ? String(b.screen).slice(0, 60) : '';
+  const client = b.client ? String(b.client).slice(0, 40) : '';
+  const rec = Object.assign({}, snap, { ts: now, screen: screen || null, client: client || null });
+  const ops = [];
+  if (screen && /^[a-z0-9_-]+$/i.test(screen)) ops.push(agoraKvPut(env, `layout:current:${screen}`, rec, now));
+  if (client) ops.push(agoraKvPut(env, `layout:current:client:${client}`, rec, now));
+  if (!ops.length) return json({ error: 'no-key' }, { status: 400 });
+  await Promise.all(ops);
+  return json({ ok: true });
+}
+async function layoutCurrentHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  const client = String(url.searchParams.get('client') || '').slice(0, 40);
+  let rec = null;
+  if (screen) rec = await agoraKvGet(env, `layout:current:${screen}`, null);
+  if (!rec && client) rec = await agoraKvGet(env, `layout:current:client:${client}`, null);
+  return json({ current: rec || null });
+}
 
 // ─── MONEDERO DEL XPACIO (Marketplace: comprar muebles con créditos) ──
 // Por Xpacio (id propio del navegador/cuenta): saldo + inventario «Mis
@@ -2516,6 +2541,10 @@ export default {
         res = await layoutAssignHandler(req, env);
       } else if (path === '/layout/pending' && req.method === 'GET') {
         res = await layoutPendingHandler(req, env, url);
+      } else if (path === '/layout/report' && req.method === 'POST') {
+        res = await layoutReportHandler(req, env);
+      } else if (path === '/layout/current' && req.method === 'GET') {
+        res = await layoutCurrentHandler(req, env, url);
       } else if (path === '/xpacio' && req.method === 'GET') {
         res = await xpacioGetHandler(req, env, url);
       } else if (path === '/xpacio/buy' && req.method === 'POST') {
