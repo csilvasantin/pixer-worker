@@ -187,10 +187,11 @@ const NOTIFY_SKIP_PREFIX = [
 ];
 
 function shouldNotify(path, method, status) {
-  if (status >= 400) return true; // errores siempre
   if (NOTIFY_SKIP_EXACT.has(path)) return false;
   if (NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p))) return false;
-  if (method === 'GET') return false; // resto de GETs son lecturas baratas
+  if (status >= 500) return true; // excepciones reales, tambien en GET
+  if (method === 'GET') return false; // lecturas/polling legacy: no llenar Telegram
+  if (status >= 400) return true; // errores de escrituras/acciones si importan
   return true;
 }
 
