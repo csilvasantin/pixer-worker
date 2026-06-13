@@ -157,6 +157,7 @@ function notify(ctx, env, text) {
 // Rutas que NO notificamos para evitar spam (polling, lecturas cacheadas)
 const NOTIFY_SKIP_EXACT = new Set([
   '/healthz',
+  '/grok/latest.json', // legacy polling de AdmiraXP/Grok: JSON estable, sin spam
   '/signage/heartbeat',
   '/signage/feed',
   '/signage/push', // notificado dentro del handler con asset/origen/target
@@ -216,6 +217,18 @@ function signageMetaForItem(body, req) {
     dispatch_mode: cleanMetaText(meta.dispatch_mode || '', 40),
     selected_count: Number.isFinite(Number(meta.selected_count)) ? Number(meta.selected_count) : null,
   };
+}
+
+function grokLatestHandler() {
+  return json({
+    ok: true,
+    source: 'pixer-worker',
+    route: '/grok/latest.json',
+    latest: null,
+    items: [],
+    message: 'No hay snapshot Grok activo en este worker. Ruta legacy mantenida para clientes antiguos.',
+    ts: Date.now(),
+  }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 // ─── ElevenLabs ────────────────────────────────────────────────────
@@ -2392,6 +2405,8 @@ export default {
     try {
       if (path === '/healthz') {
         res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
+      } else if (path === '/grok/latest.json' && req.method === 'GET') {
+        res = grokLatestHandler();
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
       } else if (path === '/xai/image' && req.method === 'POST') {
