@@ -2381,7 +2381,10 @@ async function layoutReportHandler(req, env) {
   const now = Date.now();
   const screen = b.screen ? String(b.screen).slice(0, 60) : '';
   const client = b.client ? String(b.client).slice(0, 40) : '';
-  const rec = Object.assign({}, snap, { ts: now, screen: screen || null, client: client || null });
+  // origin = quién hizo el cambio ('gemelo'|'pixeria') → para el sync EN VIVO
+  // bidireccional cada lado ignora sus propios cambios (anti-bucle).
+  const origin = b.origin ? String(b.origin).slice(0, 16) : 'gemelo';
+  const rec = Object.assign({}, snap, { ts: now, screen: screen || null, client: client || null, origin });
   const ops = [];
   if (screen && /^[a-z0-9_-]+$/i.test(screen)) ops.push(agoraKvPut(env, `layout:current:${screen}`, rec, now));
   if (client) ops.push(agoraKvPut(env, `layout:current:client:${client}`, rec, now));
