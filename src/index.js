@@ -233,6 +233,20 @@ function grokLatestHandler() {
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
+async function grokAgentAckHandler(req) {
+  let body = {};
+  try { body = await req.json(); } catch {}
+  return json({
+    ok: true,
+    source: 'pixer-worker',
+    route: '/grok/agent-ack',
+    message: 'ACK legacy recibido. No hay accion pendiente en este worker.',
+    agent: cleanMetaText(body.agent || body.from || body.persona || '', 80) || null,
+    task_id: cleanMetaText(body.task_id || body.taskId || body.id || '', 120) || null,
+    ts: Date.now(),
+  }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
 // ─── ElevenLabs ────────────────────────────────────────────────────
 async function ttsHandler(req, env) {
   if (!env.ELEVENLABS_KEY) return json({ error: 'server-missing-key', service: 'elevenlabs' }, { status: 500 });
@@ -2454,6 +2468,8 @@ export default {
         res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
       } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
         res = grokLatestHandler();
+      } else if (path === '/grok/agent-ack' && req.method === 'POST') {
+        res = await grokAgentAckHandler(req);
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
       } else if (path === '/xai/image' && req.method === 'POST') {
