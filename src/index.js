@@ -1214,7 +1214,7 @@ async function telegramWebhookHandler(req, env, ctx) {
   const cliCommand = agoraCliCommandFromText(text);
   if (cliCommand) {
     ctx.waitUntil((async () => {
-      await tgSend(env, chatId, await agoraCliCommandReply(env, cliCommand));
+      await tgSend(env, chatId, await agoraCliCommandReply(env, cliCommand, { who, chat: chatId }));
     })().catch(() => {}));
     return json({ ok: true });
   }
@@ -2076,8 +2076,14 @@ function agoraCliCommandFromText(text) {
   const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
   if (!m) return null;
   const alias = agoraCommandKey(m[1]);
-  if (!['inbox', 'help', 'ayuda'].includes(alias)) return null;
+  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping'].includes(alias)) return null;
   return { alias, text: String(m[2] || '').trim() };
+}
+function agoraCliArgs(text) {
+  return String(text || '').trim().split(/\s+/).filter(Boolean);
+}
+function agoraTargetFromArg(arg) {
+  return AGORA_COMMAND_TARGETS[agoraCommandKey(arg)] || null;
 }
 async function agoraEnqueueForIdentity(env, identity, kind, item, now) {
   const kkey = `agora:${kind}:${identity}`;
@@ -2095,7 +2101,59 @@ function agoraFormatTs(ts) {
   try { return new Date(ts).toISOString().slice(5, 16).replace('T', ' '); }
   catch { return ''; }
 }
-async function agoraInboxCliText(env, limit) {
+function agoraAgeText(ts) {
+  const ms = Date.now() - (Number(ts) || 0);
+  if (!Number.isFinite(ms) || ms < 0) return '?';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h`;
+}
+function agoraCliHelpText() {
+  return [
+    '<b>CLI AgoraMatrix</b>',
+    '<code>/who</code> o <code>/ps</code> — agentes despiertos/dormidos',
+    '<code>/status</code> — resumen operativo del grupo',
+    '<code>/feed 10</code> o <code>/tail 10</code> — ultimos mensajes compartidos',
+    '<code>/inbox</code> — ultimas tareas globales',
+    '<code>/inbox cypher 5</code> — buzon de un agente',
+    '<code>/tasks oraculo 5</code> — cola de tareas de un agente',
+    '<code>/ping neo revisa el deploy</code> — manda una tarea breve',
+    '<code>/oraculo</code>, <code>/cypher</code>, <code>/morfeo</code>, <code>/neo</code>, <code>/trinity</code> — invocar agentes',
+  ].join('\n');
+}
+async function agoraPresenceCliText(env) {
+  const map = await agoraKvGet(env, 'agora:presence', {});
+  const now = Date.now();
+  const lines = ['<b>AgoraMatrix /who</b>'];
+  AGORA_IDENTITIES.forEach(identity => {
+    const p = map[identity] || {};
+    const awake = (now - (p.ts || 0)) < AGORA_AWAKE_MS;
+    const icon = awake ? '✅' : '🌙';
+    const persona = agoraPersonaNameForIdentity(identity);
+    const host = p.host ? ` · ${escHtml(p.host)}` : '';
+    const usage = (p.tokens || p.reqs) ? ` · ${Number(p.tokens || 0).toLocaleString('es-ES')} tok · ${Number(p.reqs || 0)} pet.` : '';
+    lines.push(`${icon} <b>${escHtml(persona)}</b> <code>${escHtml(identity)}</code> · ${awake ? 'despierto' : 'dormido'} hace ${escHtml(agoraAgeText(p.ts))}${host}${usage}`);
+  });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraFeedCliText(env, limit) {
+  const n = Math.max(1, Math.min(20, parseInt(limit, 10) || 10));
+  const items = (await agoraKvGet(env, 'agora:feed', [])).slice(-n).reverse();
+  if (!items.length) return '<b>AgoraMatrix /feed</b>\nSin mensajes en el feed.';
+  const lines = [`<b>AgoraMatrix /feed</b> · ultimos ${items.length}`];
+  items.forEach((it, idx) => {
+    const from = it.from || '?';
+    const host = it.host ? ` · ${it.host}` : '';
+    const text = String(it.text || '').replace(/\s+/g, ' ').slice(0, 260);
+    lines.push(`${idx + 1}. <code>${escHtml(agoraFormatTs(it.ts))}</code> <b>${escHtml(from)}</b>${escHtml(host)}`);
+    lines.push(`   ${escHtml(text || '(sin texto)')}`);
+  });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraTasklogCliText(env, limit) {
   const n = Math.max(1, Math.min(10, parseInt(limit, 10) || 10));
   const items = (await agoraKvGet(env, 'agora:tasklog', [])).slice(-n).reverse();
   if (!items.length) return '<b>Inbox AgoraMatrix</b>\nSin tareas registradas todavia.';
@@ -2111,11 +2169,54 @@ async function agoraInboxCliText(env, limit) {
   });
   return lines.join('\n').slice(0, 3900);
 }
-async function agoraCliCommandReply(env, command) {
-  if (command.alias === 'help' || command.alias === 'ayuda') {
-    return '<b>CLI AgoraMatrix</b>\n/inbox — ultimas 10 tareas\n/inbox 5 — ultimas 5 tareas\n/oraculo, /cypher, /morfeo, /neo, /trinity — invocar agente';
+async function agoraQueueCliText(env, kind, args) {
+  const target = agoraTargetFromArg(args[0] || '');
+  const limitArg = target ? args[1] : args[0];
+  if (!target) return agoraTasklogCliText(env, limitArg ? parseInt(limitArg, 10) : 10);
+  const n = Math.max(1, Math.min(10, parseInt(limitArg, 10) || 5));
+  const items = (await agoraKvGet(env, `agora:${kind}:${target.identity}`, [])).slice(-n).reverse();
+  const title = kind === 'tasks' ? 'tasks' : 'inbox';
+  if (!items.length) return `<b>AgoraMatrix /${title}</b>\n${escHtml(target.persona)} no tiene elementos pendientes.`;
+  const lines = [`<b>AgoraMatrix /${title}</b> · ${escHtml(target.persona)} · ${items.length}`];
+  items.forEach((it, idx) => {
+    const text = String(it.text || '').replace(/\s+/g, ' ').slice(0, 240);
+    lines.push(`${idx + 1}. <code>${escHtml(agoraFormatTs(it.ts))}</code> ${escHtml(it.command || '')} · ${escHtml(it.who || 'humano')}`);
+    lines.push(`   ${escHtml(text || '(sin texto)')}`);
+  });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraStatusCliText(env) {
+  const map = await agoraKvGet(env, 'agora:presence', {});
+  const now = Date.now();
+  const awake = AGORA_IDENTITIES.filter(id => (now - ((map[id] || {}).ts || 0)) < AGORA_AWAKE_MS).length;
+  const feed = await agoraKvGet(env, 'agora:feed', []);
+  const tasklog = await agoraKvGet(env, 'agora:tasklog', []);
+  return [
+    '<b>AgoraMatrix /status</b>',
+    `Agentes despiertos: <b>${awake}/${AGORA_IDENTITIES.length}</b>`,
+    `Feed compartido: <b>${feed.length}</b> mensajes guardados`,
+    `Tasklog: <b>${tasklog.length}</b> tareas recientes`,
+    `Ultimo feed: <code>${escHtml(agoraFormatTs((feed[feed.length - 1] || {}).ts) || 'n/a')}</code>`,
+    'Usa <code>/who</code>, <code>/feed 10</code>, <code>/inbox cypher</code> o <code>/ping oraculo texto</code>.',
+  ].join('\n');
+}
+async function agoraCliCommandReply(env, command, actor) {
+  const alias = command.alias;
+  const args = agoraCliArgs(command.text);
+  if (alias === 'help' || alias === 'ayuda' || alias === 'cli') return agoraCliHelpText();
+  if (alias === 'who' || alias === 'ps') return agoraPresenceCliText(env);
+  if (alias === 'status' || alias === 'estado') return agoraStatusCliText(env);
+  if (alias === 'feed' || alias === 'tail') return agoraFeedCliText(env, args[0]);
+  if (alias === 'inbox') return agoraQueueCliText(env, 'inbox', args);
+  if (alias === 'tasks' || alias === 'tareas' || alias === 'cola' || alias === 'queues') return agoraQueueCliText(env, 'tasks', args);
+  if (alias === 'ping') {
+    const target = agoraTargetFromArg(args[0] || '');
+    if (!target) return 'Uso: <code>/ping neo mensaje</code> · agentes: neo, morfeo, trinity, oraculo, cypher';
+    const body = args.slice(1).join(' ').trim() || 'ping desde CLI AgoraMatrix: confirma presencia y estado breve.';
+    const routed = await agoraEnqueueCommand(env, { alias: agoraCommandKey(args[0]), target, text: body }, actor && actor.who, actor && actor.chat);
+    return `📨 <b>${escHtml(routed.persona)}</b> invocado por CLI.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`;
   }
-  return agoraInboxCliText(env, command.text);
+  return agoraCliHelpText();
 }
 
 // POST /agora/presence {key,identity,host,tokens?,reqs?}  ·  GET /agora/presence?key=
@@ -2281,7 +2382,9 @@ async function agoraHookHandler(req, env, url, ctx) {
   const token = await agoraBotTokenFor(env, identity);
   const cliCommand = agoraCliCommandFromText(text);
   if (cliCommand) {
-    ctx.waitUntil(sendTelegramVia(token, chatId, await agoraCliCommandReply(env, cliCommand)).catch(() => {}));
+    ctx.waitUntil((async () => {
+      await sendTelegramVia(token, chatId, await agoraCliCommandReply(env, cliCommand, { who, chat: chatId }));
+    })().catch(() => {}));
     return json({ ok: true });
   }
   const command = agoraCommandFromText(text);
