@@ -1273,6 +1273,19 @@ async function notifyHandler(req, env, ctx) {
 // El token del bot nunca sale del worker.
 // Se puede sobreescribir con el secret ADMIRA_TUBE_BASE (sin redesplegar código).
 const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/admira';
+function admiraTubeBaseCandidates(env) {
+  const candidates = [];
+  const seen = new Set();
+  const push = (value) => {
+    const v = String(value || '').trim().replace(/\/+$/, '');
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    candidates.push(v);
+  };
+  push(env.ADMIRA_TUBE_BASE);
+  push(ADMIRA_TUBE_BASE_DEFAULT);
+  return candidates;
+}
 async function tgSend(env, chatId, html) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
   try {
@@ -1353,18 +1366,31 @@ async function telegramWebhookHandler(req, env, ctx) {
   }
 
   const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
-  const base = env.ADMIRA_TUBE_BASE || ADMIRA_TUBE_BASE_DEFAULT;
   ctx.waitUntil((async () => {
     await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
     try {
-      const r = await fetch(base + '/tube/import-to-stock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: link, format: fmt, comment }),
-      });
-      if (!r.ok) {
-        const t = await r.text().catch(() => '');
-        await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${r.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+      const bases = admiraTubeBaseCandidates(env);
+      let lastStatus = 0;
+      let lastBody = '';
+      let lastBase = '';
+      let accepted = false;
+      for (const base of bases) {
+        lastBase = base;
+        const r = await fetch(base + '/tube/import-to-stock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: link, format: fmt, comment }),
+        });
+        if (r.ok) {
+          accepted = true;
+          break;
+        }
+        lastStatus = r.status;
+        lastBody = await r.text().catch(() => '');
+      }
+      if (!accepted) {
+        const baseNote = lastBase ? ` · base <code>${escHtml(lastBase)}</code>` : '';
+        await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>`);
       }
       // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
     } catch (e) {
