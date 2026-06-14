@@ -2218,7 +2218,7 @@ function agoraCliCommandFromText(text) {
   const parsed = agoraAddressedSlashFromText(text);
   if (!parsed) return null;
   const alias = parsed.alias;
-  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'enqueandais', 'queandais', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping'].includes(alias)) return null;
+  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'enqueandais', 'queandais', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping', 'done', 'hecho', 'bloqueos', 'blockers', 'ultima', 'last', 'latest'].includes(alias)) return null;
   return { alias, text: parsed.text };
 }
 function agoraCliArgs(text) {
@@ -2290,6 +2290,19 @@ function agoraIdentityFromActivity(item) {
   }
   return null;
 }
+function agoraTaskMatches(a, b) {
+  return !!a && !!b
+    && Number(a.ts || 0) === Number(b.ts || 0)
+    && String(a.text || '') === String(b.text || '')
+    && String(a.command || '') === String(b.command || '')
+    && String(a.persona || '') === String(b.persona || '');
+}
+function agoraTaskStateIcon(item) {
+  const state = String(item && item.status || '').toLowerCase();
+  if (state === 'done') return '✅';
+  if (state === 'blocked') return '⛔';
+  return '📨';
+}
 function agoraCliHelpText() {
   return [
     '<b>CLI AgoraMatrix</b>',
@@ -2301,6 +2314,9 @@ function agoraCliHelpText() {
     '<code>/inbox cypher 5</code> — buzon de un agente',
     '<code>/tasks oraculo 5</code> — cola de tareas de un agente',
     '<code>/ping neo revisa el deploy</code> — manda una tarea breve',
+    '<code>/done oraculo 1 resuelto en commit abc123</code> — cierra una tarea',
+    '<code>/bloqueos</code> — resumen de bloqueos y esperas activas',
+    '<code>/ultima neo</code> o <code>/ultima pixer-worker</code> — ultimo movimiento de un agente o proyecto',
     '<code>/oraculo</code>, <code>/cypher</code>, <code>/morfeo</code>, <code>/neo</code>, <code>/trinity</code> — invocar agentes',
   ].join('\n');
 }
@@ -2394,7 +2410,7 @@ async function agoraTasklogCliText(env, limit) {
     const command = it.command || '';
     const who = it.who || 'humano';
     const text = String(it.text || '').replace(/\s+/g, ' ').slice(0, 220);
-    lines.push(`${idx + 1}. <code>${escHtml(ts)}</code> <b>${escHtml(persona)}</b> ${escHtml(command)}`);
+    lines.push(`${idx + 1}. ${agoraTaskStateIcon(it)} <code>${escHtml(ts)}</code> <b>${escHtml(persona)}</b> ${escHtml(command)}`);
     lines.push(`   ${escHtml(who)}: ${escHtml(text || '(sin texto)')}`);
   });
   return lines.join('\n').slice(0, 3900);
@@ -2413,6 +2429,139 @@ async function agoraQueueCliText(env, kind, args) {
     lines.push(`${idx + 1}. <code>${escHtml(agoraFormatTs(it.ts))}</code> ${escHtml(it.command || '')} · ${escHtml(it.who || 'humano')}`);
     lines.push(`   ${escHtml(text || '(sin texto)')}`);
   });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraDoneCliText(env, args, actor) {
+  const target = agoraTargetFromArg(args[0] || '');
+  if (!target) return 'Uso: <code>/done oraculo 1 resuelto en commit abc123</code>';
+  const displayIndex = parseInt(args[1], 10);
+  if (!Number.isFinite(displayIndex) || displayIndex < 1) return 'Uso: <code>/done oraculo 1 resuelto en commit abc123</code>';
+  const note = args.slice(2).join(' ').trim();
+  const now = Date.now();
+  const tasksKey = `agora:tasks:${target.identity}`;
+  const inboxKey = `agora:inbox:${target.identity}`;
+  const tasks = await agoraKvGet(env, tasksKey, []);
+  const rawIndex = tasks.length - displayIndex;
+  if (rawIndex < 0 || rawIndex >= tasks.length) return `No existe la tarea ${displayIndex} en ${escHtml(target.persona)}.`;
+  const removed = tasks[rawIndex];
+  const nextTasks = tasks.slice();
+  nextTasks.splice(rawIndex, 1);
+  await agoraKvPut(env, tasksKey, nextTasks, now);
+  const inbox = await agoraKvGet(env, inboxKey, []);
+  const inboxIndex = inbox.findIndex(it => agoraTaskMatches(it, removed));
+  if (inboxIndex >= 0) {
+    const nextInbox = inbox.slice();
+    nextInbox.splice(inboxIndex, 1);
+    await agoraKvPut(env, inboxKey, nextInbox, now);
+  }
+  const doneEntry = {
+    ...removed,
+    identity: target.identity,
+    status: 'done',
+    resolvedAt: now,
+    resolvedBy: actor && actor.who || 'CLI AgoraMatrix',
+    note: note || '',
+    text: note ? `${removed.text} | RESUELTO: ${note}` : removed.text,
+    command: '/done',
+  };
+  await agoraAppendTaskLog(env, doneEntry, now);
+  const summary = [
+    `✅ <b>${escHtml(target.persona)}</b> · tarea ${displayIndex} cerrada.`,
+    `<code>${escHtml(agoraCleanBriefText(removed.text, 220) || '(sin texto)')}</code>`,
+  ];
+  if (note) summary.push(`Cierre: ${escHtml(note.slice(0, 220))}`);
+  return summary.join('\n');
+}
+async function agoraBlockersCliText(env, limit) {
+  const n = Math.max(1, Math.min(10, parseInt(limit, 10) || 6));
+  const feed = await agoraKvGet(env, 'agora:feed', []);
+  const tasklog = await agoraKvGet(env, 'agora:tasklog', []);
+  const blockers = [];
+  const blockerRe = /\b(bloque|bloquea|bloqueado|bloqueada|pendiente|espera|waiting|blocked|atascad|falta|duda para carlos|needs decision|sin verificar|404|500|error|falla)\b/i;
+  for (const it of tasklog.slice().reverse()) {
+    const text = `${it.command || ''} ${it.text || ''} ${it.note || ''}`.trim();
+    if (String(it.status || '').toLowerCase() === 'blocked' || blockerRe.test(text)) {
+      blockers.push({
+        ts: it.ts,
+        source: 'tasklog',
+        actor: it.persona || it.identity || '?',
+        text: agoraCleanBriefText(text, 180),
+      });
+    }
+  }
+  for (const it of feed.slice().reverse()) {
+    const text = String(it.text || '');
+    if (blockerRe.test(text)) {
+      blockers.push({
+        ts: it.ts,
+        source: 'feed',
+        actor: it.from || '?',
+        text: agoraCleanBriefText(text, 180),
+      });
+    }
+  }
+  const dedup = [];
+  const seen = new Set();
+  for (const it of blockers.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))) {
+    const key = `${it.actor}|${it.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(it);
+    if (dedup.length >= n) break;
+  }
+  if (!dedup.length) return '<b>AgoraMatrix /bloqueos</b>\nNo detecto bloqueos claros en feed/tasklog reciente.';
+  const lines = [`<b>AgoraMatrix /bloqueos</b> · ${dedup.length} señales recientes`];
+  dedup.forEach((it, idx) => {
+    lines.push(`${idx + 1}. <code>${escHtml(agoraFormatTs(it.ts))}</code> <b>${escHtml(it.actor)}</b> · ${escHtml(it.source)}`);
+    lines.push(`   ${escHtml(it.text)}`);
+  });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraLatestCliText(env, args) {
+  const needle = args.join(' ').trim();
+  const feed = await agoraKvGet(env, 'agora:feed', []);
+  const tasklog = await agoraKvGet(env, 'agora:tasklog', []);
+  const target = agoraTargetFromArg(args[0] || '');
+  const items = [];
+  for (const it of feed) {
+    items.push({
+      ts: it.ts,
+      kind: 'feed',
+      actor: it.from || '?',
+      identity: agoraIdentityFromActivity(it),
+      text: String(it.text || ''),
+      host: it.host || '',
+    });
+  }
+  for (const it of tasklog) {
+    items.push({
+      ts: it.ts,
+      kind: 'tasklog',
+      actor: it.persona || it.identity || '?',
+      identity: agoraIdentityFromActivity(it) || it.identity || null,
+      text: `${it.command || ''} ${it.text || ''} ${it.note || ''}`.trim(),
+      host: '',
+    });
+  }
+  items.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  let filtered = items;
+  if (target) {
+    filtered = items.filter(it => it.identity === target.identity || agoraCommandKey(it.actor) === agoraCommandKey(target.persona));
+  } else if (needle) {
+    const q = agoraCommandKey(needle);
+    filtered = items.filter(it => agoraCommandKey(it.text).includes(q) || agoraCommandKey(it.actor).includes(q));
+  }
+  const hit = filtered[0];
+  if (!hit) return needle
+    ? `<b>AgoraMatrix /ultima</b>\nSin actividad encontrada para <code>${escHtml(needle)}</code>.`
+    : '<b>AgoraMatrix /ultima</b>\nSin actividad registrada todavia.';
+  const label = target ? target.persona : (needle || 'grupo');
+  const lines = [
+    `<b>AgoraMatrix /ultima</b> · ${escHtml(label)}`,
+    `<code>${escHtml(agoraMadridDateTime(hit.ts))}</code> · <b>${escHtml(hit.actor)}</b> · ${escHtml(hit.kind)}`,
+    escHtml(agoraCleanBriefText(hit.text, 320) || '(sin texto)'),
+  ];
+  if (hit.host) lines.push(`Host: ${escHtml(hit.host)}`);
   return lines.join('\n').slice(0, 3900);
 }
 async function agoraStatusCliText(env) {
@@ -2440,6 +2589,9 @@ async function agoraCliCommandReply(env, command, actor) {
   if (alias === 'feed' || alias === 'tail') return agoraFeedCliText(env, args[0]);
   if (alias === 'inbox') return agoraQueueCliText(env, 'inbox', args);
   if (alias === 'tasks' || alias === 'tareas' || alias === 'cola' || alias === 'queues') return agoraQueueCliText(env, 'tasks', args);
+  if (alias === 'done' || alias === 'hecho') return agoraDoneCliText(env, args, actor);
+  if (alias === 'bloqueos' || alias === 'blockers') return agoraBlockersCliText(env, args[0]);
+  if (alias === 'ultima' || alias === 'last' || alias === 'latest') return agoraLatestCliText(env, args);
   if (alias === 'ping') {
     const target = agoraTargetFromArg(args[0] || '');
     if (!target) return 'Uso: <code>/ping neo mensaje</code> · agentes: neo, morfeo, trinity, oraculo, cypher';
