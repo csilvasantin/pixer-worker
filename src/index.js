@@ -1296,6 +1296,45 @@ async function tgSend(env, chatId, html) {
     });
   } catch {}
 }
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function monitorTubeImport(env, chatId, base, jobId, link) {
+  const deadline = Date.now() + (9 * 60 * 1000);
+  let notFoundCount = 0;
+  while (Date.now() < deadline) {
+    await sleepMs(3000);
+    let r;
+    try {
+      r = await fetch(`${base}/tube/status?id=${encodeURIComponent(jobId)}`);
+    } catch (e) {
+      await tgSend(env, chatId, `🚨 Se perdió el seguimiento de la importación: <code>${escHtml(String(e).slice(0, 180))}</code>`);
+      return;
+    }
+    if (r.status === 404) {
+      notFoundCount += 1;
+      if (notFoundCount >= 3) {
+        await tgSend(env, chatId, `⚠️ La importación quedó sin estado final en el proxy.\n<code>${escHtml(link)}</code>`);
+        return;
+      }
+      continue;
+    }
+    notFoundCount = 0;
+    let status;
+    try { status = await r.json(); } catch { status = null; }
+    const state = status && typeof status.state === 'string' ? status.state : '';
+    if (!state || state === 'running' || state === 'done' || state === 'publishing') continue;
+    if (state === 'published') return;
+    const bits = [];
+    if (status && status.error) bits.push(String(status.error));
+    if (status && status.detail) bits.push(String(status.detail));
+    if (status && status.stderr) bits.push(String(status.stderr));
+    const detail = bits.join(' | ').slice(0, 260) || 'sin detalle';
+    await tgSend(env, chatId, `⚠️ La importación falló en segundo plano (${escHtml(state)}).\n<code>${escHtml(detail)}</code>`);
+    return;
+  }
+  await tgSend(env, chatId, `⚠️ La importación sigue sin resultado tras 9 min.\n<code>${escHtml(link)}</code>`);
+}
 async function telegramWebhookHandler(req, env, ctx) {
   // Verificación del secret de Telegram (cabecera fijada en setWebhook)
   const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
@@ -1373,6 +1412,7 @@ async function telegramWebhookHandler(req, env, ctx) {
       let lastStatus = 0;
       let lastBody = '';
       let lastBase = '';
+      let acceptedJobId = '';
       let accepted = false;
       for (const base of bases) {
         lastBase = base;
@@ -1382,6 +1422,8 @@ async function telegramWebhookHandler(req, env, ctx) {
           body: JSON.stringify({ url: link, format: fmt, comment }),
         });
         if (r.ok) {
+          const payload = await r.json().catch(() => null);
+          acceptedJobId = payload && typeof payload.jobId === 'string' ? payload.jobId : '';
           accepted = true;
           break;
         }
@@ -1391,6 +1433,8 @@ async function telegramWebhookHandler(req, env, ctx) {
       if (!accepted) {
         const baseNote = lastBase ? ` · base <code>${escHtml(lastBase)}</code>` : '';
         await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>`);
+      } else if (acceptedJobId && lastBase) {
+        await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link);
       }
       // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
     } catch (e) {
