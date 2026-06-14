@@ -285,6 +285,33 @@ async function ttsHandler(req, env) {
 }
 
 // TTS GRATIS (sin key) vía Google Translate TTS → MP3. Da soporte al motor
+// /da/* → proxy server-side a omnipublicity-api (el cerebro del DigitalAvatar.ai
+// y el Metahuman del gemelo). Los ISP españoles bloquean intermitentemente
+// 188.114.96.0/22 (workers.dev) → llamar a omnipublicity directo desde el
+// navegador de Carlos falla ("bloqueo ES"). pixer-eleven SÍ es alcanzable (lo usa
+// pixeria a diario), y la llamada worker→worker viaja por la red de Cloudflare,
+// no por el ISP. Reenvía método+cuerpo y devuelve la respuesta con ACAO:* para que
+// digitalavatar.ai / carlossilva.info / xpaceos.com puedan leerla.
+const DA_UPSTREAM = 'https://omnipublicity-api.csilvasantin.workers.dev';
+async function daProxyHandler(req, env) {
+  const u = new URL(req.url);
+  const sub = u.pathname.slice('/da'.length) || '/';   // '/da/metahuman/ask' → '/metahuman/ask'
+  const target = DA_UPSTREAM + sub + u.search;
+  const init = { method: req.method, headers: { 'Content-Type': req.headers.get('Content-Type') || 'application/json' } };
+  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.arrayBuffer();
+  let up;
+  // Service binding (env.OMNI) → la subpetición viaja por la malla interna de
+  // Cloudflare y evita el error 1042 de fetch worker→worker en el mismo workers.dev.
+  // Si por lo que sea no está el binding, cae al fetch directo (puede dar 1042).
+  try { up = env && env.OMNI ? await env.OMNI.fetch(new Request(target, init)) : await fetch(target, init); }
+  catch (e) { return json({ ok: false, error: 'da-upstream-failed', detail: String(e).slice(0, 160) }, { status: 502 }); }
+  const headers = new Headers();
+  const ct = up.headers.get('Content-Type'); if (ct) headers.set('Content-Type', ct);
+  headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Cache-Control', 'no-store');
+  return new Response(await up.arrayBuffer(), { status: up.status, headers });
+}
+
 // "Web Speech" de pixeria para que la locución gratis produzca un FICHERO y se
 // pueda guardar en Stock (speechSynthesis del navegador no genera archivo).
 // POST /tts/free { text, lang? } → audio/mpeg (ACAO:* para leerlo en el cliente).
@@ -3152,6 +3179,16 @@ export default {
 
   async fetch(req, env, ctx) {
     if (req.method === 'OPTIONS') {
+      // /da/* es un proxy público (lo consumen digitalavatar.ai, el gemelo, etc.)
+      // → preflight abierto a cualquier origen, no solo a ALLOWED_ORIGINS.
+      if (new URL(req.url).pathname.startsWith('/da/')) {
+        return new Response(null, { status: 204, headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Max-Age': '86400',
+        } });
+      }
       return new Response(null, { status: 204, headers: corsHeaders(req) });
     }
     const url = new URL(req.url);
@@ -3168,6 +3205,8 @@ export default {
         res = await grokAgentAckHandler(req);
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
+      } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
+        res = await daProxyHandler(req, env);
       } else if (path === '/tts/free' && req.method === 'POST') {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {

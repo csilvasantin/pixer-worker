@@ -25,3 +25,11 @@ id = "013098f4df534234994ae04b8c1929a5"
 [[r2_buckets]]
 binding = "STOCK_BUCKET"
 bucket_name = "pixer-stock"
+
+# Service binding al cerebro del DigitalAvatar.ai / Metahuman. Un Worker NO puede
+# hacer fetch() a otro Worker del mismo *.workers.dev (error 1042); el binding
+# enruta la subpetición por la malla interna de Cloudflare. Lo usa el proxy /da/*
+# para esquivar el bloqueo ISP español de workers.dev sin tocar al cliente.
+[[services]]
+binding = "OMNI"
+service = "omnipublicity-api"
