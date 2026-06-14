@@ -1266,12 +1266,13 @@ async function notifyHandler(req, env, ctx) {
 
 // ─── Telegram: importar a Stock enviando una URL a @AdmiraXPBot ──────
 // Flujo: Telegram → /telegram/webhook → respondemos "importando" y disparamos
-// la descarga en el proxy del Mac Mini (Tailscale Funnel /pixtube → 127.0.0.1:8420,
-// que quita el prefijo y entrega /tube/import-to-stock al servicio). El proxy
+// la descarga en el proxy del Mac Mini (Tailscale Funnel /admira → 127.0.0.1:9126).
+// El path legado /pixtube quedó apuntando a otro servicio y no sirve para este flujo.
+// El proxy
 // descarga con yt-dlp y publica en /stock/publish, que ya notifica el resultado.
 // El token del bot nunca sale del worker.
 // Se puede sobreescribir con el secret ADMIRA_TUBE_BASE (sin redesplegar código).
-const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/pixtube';
+const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/admira';
 async function tgSend(env, chatId, html) {
   if (!env.TELEGRAM_BOT_TOKEN) return;
   try {
