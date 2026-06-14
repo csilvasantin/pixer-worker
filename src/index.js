@@ -2316,7 +2316,7 @@ function agoraCliCommandFromText(text) {
   const parsed = agoraAddressedSlashFromText(text);
   if (!parsed) return null;
   const alias = parsed.alias;
-  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'enqueandais', 'queandais', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping', 'done', 'hecho', 'bloqueos', 'blockers', 'ultima', 'last', 'latest', 'pendientes', 'pending', 'buscar', 'search', 'resumen', 'summary'].includes(alias)) return null;
+  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'enqueandais', 'queandais', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping', 'done', 'hecho', 'bloqueos', 'blockers', 'ultima', 'last', 'latest', 'pendientes', 'pending', 'buscar', 'search', 'resumen', 'summary', 'bot', 'agente', 'agent', 'switchbot', 'cambiarbot'].includes(alias)) return null;
   return { alias, text: parsed.text };
 }
 function agoraCliArgs(text) {
@@ -2324,6 +2324,30 @@ function agoraCliArgs(text) {
 }
 function agoraTargetFromArg(arg) {
   return AGORA_COMMAND_TARGETS[agoraCommandKey(arg)] || null;
+}
+function agoraChatBotStateKey(chatId) {
+  return `agora:chatbot:${chatId}`;
+}
+async function agoraChatBotGet(env, chatId) {
+  if (!chatId) return null;
+  const stored = await agoraKvGet(env, agoraChatBotStateKey(chatId), null);
+  if (!stored || !stored.identity || !AGORA_IDENTITIES.includes(stored.identity)) return null;
+  return stored;
+}
+async function agoraChatBotSet(env, chatId, target, actor, now) {
+  if (!chatId) return null;
+  const payload = {
+    identity: target.identity,
+    persona: target.persona,
+    by: actor && actor.who || 'CLI AgoraMatrix',
+    ts: now || Date.now(),
+  };
+  await agoraKvPut(env, agoraChatBotStateKey(chatId), payload, payload.ts);
+  return payload;
+}
+async function agoraChatBotClear(env, chatId, now) {
+  if (!chatId) return;
+  await agoraKvPut(env, agoraChatBotStateKey(chatId), null, now || Date.now());
 }
 async function agoraEnqueueForIdentity(env, identity, kind, item, now) {
   const kkey = `agora:${kind}:${identity}`;
@@ -2409,6 +2433,9 @@ function agoraPresenceUsageText(p) {
 function agoraCliHelpText() {
   return [
     '<b>CLI AgoraMatrix</b>',
+    '<code>/bot</code> — ver bot/agente activo para este chat',
+    '<code>/bot oraculo</code> o <code>/cambiarbot neo</code> — cambiar el bot activo',
+    '<code>/bot auto</code> — volver al bot por defecto del webhook actual',
     '<code>/who</code> o <code>/ps</code> — agentes despiertos/dormidos',
     '<code>/status</code> — resumen operativo del grupo',
     '<code>/pendientes</code> o <code>/pending</code> — colas abiertas por agente',
@@ -2753,10 +2780,43 @@ async function agoraStatusCliText(env) {
     'Usa <code>/who</code>, <code>/feed 10</code>, <code>/inbox cypher</code> o <code>/ping oraculo texto</code>.',
   ].join('\n');
 }
+async function agoraBotCliText(env, args, actor) {
+  const chatId = actor && actor.chat ? String(actor.chat) : '';
+  const current = chatId ? await agoraChatBotGet(env, chatId) : null;
+  const currentTarget = current && current.identity
+    ? { identity: current.identity, persona: current.persona || agoraPersonaNameForIdentity(current.identity) }
+    : null;
+  const arg0 = agoraCommandKey(args[0] || '');
+  if (!arg0) {
+    const lines = ['<b>AgoraMatrix /bot</b>'];
+    if (currentTarget) {
+      lines.push(`Activo en este chat: <b>${escHtml(currentTarget.persona)}</b> <code>${escHtml(currentTarget.identity)}</code>`);
+      lines.push(`Cambiado por ${escHtml(current && current.by || 'desconocido')} · <code>${escHtml(agoraMadridDateTime(current && current.ts || 0))}</code>`);
+    } else {
+      lines.push(`Sin override activo. Usa el bot actual del webhook: <b>${escHtml(actor && actor.persona || actor && actor.identity || 'actual')}</b>.`);
+    }
+    lines.push('Opciones: <code>neo</code>, <code>morfeo</code>, <code>trinity</code>, <code>oraculo</code>, <code>cypher</code>.');
+    lines.push('Usa <code>/bot oraculo</code> para que el texto libre vaya a ese agente.');
+    return lines.join('\n');
+  }
+  if (['auto', 'default', 'reset', 'normal'].includes(arg0)) {
+    await agoraChatBotClear(env, chatId, Date.now());
+    return '<b>AgoraMatrix /bot</b>\nModo por defecto restaurado para este chat.';
+  }
+  const target = agoraTargetFromArg(arg0);
+  if (!target) return 'Uso: <code>/bot oraculo</code>, <code>/bot neo</code> o <code>/bot auto</code>';
+  const stored = await agoraChatBotSet(env, chatId, target, actor, Date.now());
+  return [
+    '<b>AgoraMatrix /bot</b>',
+    `Activo en este chat: <b>${escHtml(target.persona)}</b> <code>${escHtml(target.identity)}</code>`,
+    `Desde ahora el texto libre se enruta a ese agente. Cambio hecho por ${escHtml(stored.by)}.`,
+  ].join('\n');
+}
 async function agoraCliCommandReply(env, command, actor) {
   const alias = command.alias;
   const args = agoraCliArgs(command.text);
   if (alias === 'help' || alias === 'ayuda' || alias === 'cli') return agoraCliHelpText();
+  if (alias === 'bot' || alias === 'agente' || alias === 'agent' || alias === 'switchbot' || alias === 'cambiarbot') return agoraBotCliText(env, args, actor);
   if (alias === 'who' || alias === 'ps') return agoraPresenceCliText(env);
   if (alias === 'status' || alias === 'estado') return agoraStatusCliText(env);
   if (alias === 'pendientes' || alias === 'pending') return agoraPendingCliText(env, args);
@@ -2940,14 +3000,28 @@ async function agoraHookHandler(req, env, url, ctx) {
   if (!text) return json({ ok: true });
   const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
   const token = await agoraBotTokenFor(env, identity);
+  const selectedBot = await agoraChatBotGet(env, chatId);
+  const activeIdentity = selectedBot && selectedBot.identity ? selectedBot.identity : identity;
+  const activePersona = selectedBot && selectedBot.persona ? selectedBot.persona : agoraPersonaNameForIdentity(activeIdentity);
+  const activeToken = await agoraBotTokenFor(env, activeIdentity);
   const addressed = agoraAddressedSlashFromText(text);
   if (addressed && addressed.target) {
     if (addressed.target.identity !== identity) return json({ ok: true });
   }
   const cliCommand = agoraCliCommandFromText(text);
   if (cliCommand) {
+    const alias = cliCommand.alias;
+    if (selectedBot && selectedBot.identity && selectedBot.identity !== identity
+        && !['bot', 'agente', 'agent', 'switchbot', 'cambiarbot'].includes(alias)) {
+      return json({ ok: true });
+    }
     ctx.waitUntil((async () => {
-      await sendTelegramVia(token, chatId, await agoraCliCommandReply(env, cliCommand, { who, chat: chatId }));
+      await sendTelegramVia(activeToken || token, chatId, await agoraCliCommandReply(env, cliCommand, {
+        who,
+        chat: chatId,
+        identity: activeIdentity,
+        persona: activePersona,
+      }));
     })().catch(() => {}));
     return json({ ok: true });
   }
@@ -2960,6 +3034,7 @@ async function agoraHookHandler(req, env, url, ctx) {
     })().catch(() => {}));
     return json({ ok: true });
   }
+  if (selectedBot && selectedBot.identity && selectedBot.identity !== identity) return json({ ok: true });
   if (addressed && addressed.target) {
     const forwarded = `/${addressed.alias}${addressed.text ? ` ${addressed.text}` : ''}`;
     ctx.waitUntil((async () => {
@@ -2969,8 +3044,8 @@ async function agoraHookHandler(req, env, url, ctx) {
     return json({ ok: true });
   }
   ctx.waitUntil((async () => {
-    const routed = await agoraEnqueueDirect(env, identity, text, who, chatId, '/direct');
-    await sendTelegramVia(token, chatId, `📨 <b>${escHtml(routed.persona)}</b> recibido.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
+    const routed = await agoraEnqueueDirect(env, activeIdentity, text, who, chatId, '/direct');
+    await sendTelegramVia(activeToken || token, chatId, `📨 <b>${escHtml(routed.persona)}</b> recibido.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
   })().catch(() => {}));
   return json({ ok: true });
 }
