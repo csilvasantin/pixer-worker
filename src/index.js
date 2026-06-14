@@ -105,7 +105,9 @@ async function agoraTgChatId(env) {
     const v = await vaultGet(env, n);
     if (v) return v;
   }
-  return env.AGORA_TG_CHAT_ID || env.TELEGRAM_CHAT_ID || null;
+  // TELEGRAM_CHAT_ID pertenece al bot operativo AdmiraXP. No usarlo como
+  // fallback de AgoraMatrix o los agentes acaban escribiendo en el chat errado.
+  return env.AGORA_TG_CHAT_ID || Array.from(AGORA_FALLBACK_CHAT_IDS)[0] || null;
 }
 // Cada agente Matrix escribe en AgoraMatrix con SU bot (Codex subió los tokens
 // a la bóveda como TELEGRAM_BOT_TOKEN_<PERSONA>). Mapeamos el `from` del feed
@@ -122,7 +124,17 @@ function agoraPersonaFor(from) {
 async function agoraBotTokenFor(env, from) {
   const p = agoraPersonaFor(from);
   if (p) { const t = await vaultGet(env, 'TELEGRAM_BOT_TOKEN_' + p); if (t) return t; }
-  return env.TELEGRAM_BOT_TOKEN;
+  if (p) {
+    const identity = AGORA_TOKEN_IDENTITIES[p];
+    const stored = await agoraKvGet(env, 'agora:config', null);
+    const token = stored && stored.config && stored.config.bots &&
+      stored.config.bots[identity] && stored.config.bots[identity].token;
+    if (token) return token;
+  }
+  // TELEGRAM_BOT_TOKEN es @AdmiraXPBot. No usarlo para AgoraMatrix: si falta
+  // el token propio del agente, preferimos no responder antes que hablar como
+  // el bot operativo equivocado.
+  return env.AGORA_TELEGRAM_BOT_TOKEN || null;
 }
 
 // Diagnóstico: GET /agora/tg-test?key=<GRID_KEY>&persona=MORFEO → intenta enviar
@@ -133,7 +145,7 @@ async function agoraTgTestHandler(req, env, url) {
   if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
   const persona = (url.searchParams.get('persona') || 'MORFEO').toUpperCase().replace(/[^A-Z]/g, '');
   const chatId = await agoraTgChatId(env);
-  const token = await vaultGet(env, 'TELEGRAM_BOT_TOKEN_' + persona);
+  const token = await agoraBotTokenFor(env, persona);
   const out = { persona, hasToken: !!token, hasChat: !!chatId, chatTail: chatId ? String(chatId).slice(-4) : null };
   if (!token || !chatId) return json({ ...out, sent: false, reason: 'falta token o chat' });
   try {
@@ -1260,28 +1272,10 @@ async function telegramWebhookHandler(req, env, ctx) {
   if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
-  const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
-  const cliCommand = agoraCliCommandFromText(text);
-  if (cliCommand) {
-    ctx.waitUntil((async () => {
-      await tgSend(env, chatId, await agoraCliCommandReply(env, cliCommand, { who, chat: chatId }));
-    })().catch(() => {}));
-    return json({ ok: true });
-  }
-  const command = agoraCommandFromText(text);
-  if (command) {
-    ctx.waitUntil((async () => {
-      const routed = await agoraEnqueueCommand(env, command, who, chatId);
-      await tgSend(env, chatId, `📨 <b>${escHtml(routed.persona)}</b> invocado.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
-    })().catch(() => {}));
-    return json({ ok: true });
-  }
   const m = text.match(/https?:\/\/[^\s]+/i);
   if (!m) {
-    // Sin URL → es un mensaje del grupo para los agentes: lo encolamos en los
-    // buzones de Agora (lo recogen el cmd-poller —p.ej. "apaga monitores"— y
-    // `agora inbox`). No auto-respondemos para no ensuciar el chat.
-    ctx.waitUntil(agoraEnqueueInbox(env, text, who, chatId).catch(() => {}));
+    // AdmiraXPBot es solo para importaciones de Stock por URL. El CLI y los
+    // buzones de Agora viven en /agora/hook con los bots/personas Matrix.
     return json({ ok: true });
   }
   const link = m[0].replace(/[).,]+$/, '');
@@ -2082,6 +2076,13 @@ const AGORA_COMMAND_TARGETS = {
   oraculo: { identity: 'Codex·gmail', persona: 'Oráculo' },
   oracle: { identity: 'Codex·gmail', persona: 'Oráculo' },
   cypher: { identity: 'OpenCode·grok', persona: 'Cypher' },
+};
+const AGORA_TOKEN_IDENTITIES = {
+  NEO: 'Claude·admira',
+  MORFEO: 'Claude·gmail',
+  ORACULO: 'Codex·gmail',
+  TRINITY: 'Codex·admira',
+  CYPHER: 'OpenCode·grok',
 };
 const AGORA_AWAKE_MS = 5 * 60 * 1000; // visto < 5 min = despierto
 const AGORA_FEED_CAP = 200;           // últimos N items del feed compartido
