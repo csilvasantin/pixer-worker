@@ -2143,13 +2143,25 @@ function agoraChatAllowed(chatId, expectedChat) {
 function agoraCommandKey(s) {
   return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
 }
-function agoraCommandFromText(text) {
-  const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
+function agoraAddressedSlashFromText(text) {
+  const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+))?(?:\s+([\s\S]*))?$/);
   if (!m) return null;
   const alias = agoraCommandKey(m[1]);
+  const targetKey = agoraCommandKey(m[2] || '');
+  return {
+    alias,
+    targetKey,
+    target: targetKey ? agoraTargetFromArg(targetKey) : null,
+    text: String(m[3] || '').trim(),
+  };
+}
+function agoraCommandFromText(text) {
+  const parsed = agoraAddressedSlashFromText(text);
+  if (!parsed) return null;
+  const alias = parsed.alias;
   const target = AGORA_COMMAND_TARGETS[alias];
   if (!target) return null;
-  return { alias, target, text: String(m[2] || '').trim() };
+  return { alias, target, text: parsed.text };
 }
 function agoraPersonaNameForIdentity(identity) {
   for (const target of Object.values(AGORA_COMMAND_TARGETS)) {
@@ -2158,11 +2170,11 @@ function agoraPersonaNameForIdentity(identity) {
   return identity;
 }
 function agoraCliCommandFromText(text) {
-  const m = String(text || '').trim().match(/^\/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ_.-]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
-  if (!m) return null;
-  const alias = agoraCommandKey(m[1]);
+  const parsed = agoraAddressedSlashFromText(text);
+  if (!parsed) return null;
+  const alias = parsed.alias;
   if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping'].includes(alias)) return null;
-  return { alias, text: String(m[2] || '').trim() };
+  return { alias, text: parsed.text };
 }
 function agoraCliArgs(text) {
   return String(text || '').trim().split(/\s+/).filter(Boolean);
@@ -2465,6 +2477,10 @@ async function agoraHookHandler(req, env, url, ctx) {
   if (!text) return json({ ok: true });
   const who = (msg.from && (msg.from.first_name || msg.from.username)) || 'humano';
   const token = await agoraBotTokenFor(env, identity);
+  const addressed = agoraAddressedSlashFromText(text);
+  if (addressed && addressed.target) {
+    if (addressed.target.identity !== identity) return json({ ok: true });
+  }
   const cliCommand = agoraCliCommandFromText(text);
   if (cliCommand) {
     ctx.waitUntil((async () => {
@@ -2478,6 +2494,14 @@ async function agoraHookHandler(req, env, url, ctx) {
       const routed = await agoraEnqueueCommand(env, command, who, chatId);
       const tok = await agoraBotTokenFor(env, routed.identity);
       await sendTelegramVia(tok || token, chatId, `📨 <b>${escHtml(routed.persona)}</b> invocado.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
+    })().catch(() => {}));
+    return json({ ok: true });
+  }
+  if (addressed && addressed.target) {
+    const forwarded = `/${addressed.alias}${addressed.text ? ` ${addressed.text}` : ''}`;
+    ctx.waitUntil((async () => {
+      const routed = await agoraEnqueueDirect(env, identity, forwarded, who, chatId, `/${addressed.alias}@${addressed.targetKey}`);
+      await sendTelegramVia(token, chatId, `📨 <b>${escHtml(routed.persona)}</b> recibido.\n<code>${escHtml(routed.text.slice(0, 900))}</code>`);
     })().catch(() => {}));
     return json({ ok: true });
   }
