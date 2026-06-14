@@ -1615,6 +1615,9 @@ async function stockPublishHandler(req, env, ctx) {
   // Precio del mueble (créditos del Xpacio), para el Marketplace.
   const price = (body.price != null && isFinite(+body.price)) ? Math.max(0, Math.min(100000, Math.round(+body.price))) : null;
   let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
+  // Calidad del asset (good/better/best, según el motor); default 'good'.
+  const QUALITY_TIERS = ['good', 'better', 'best'];
+  const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
   // Segmento de campaña (fase 3): "crear campaña" manda el segmento de cada
   // versión para casarla con su público al venderse (audience/edad/franja/emplazamiento).
   const SEG_AUD = ['f','m','all'], SEG_AGE = ['nino','joven','adulto','senior','vejez'], SEG_TS = ['manana','mediodia','tarde','noche'], SEG_TYP = ['exterior','interior'];
@@ -1704,6 +1707,10 @@ async function stockPublishHandler(req, env, ctx) {
   if (bodyAudience) audience = bodyAudience;
   else if (segmentation && segmentation.audiences.length === 1) audience = segmentation.audiences[0];
 
+  // El tag de calidad se añade SIEMPRE (además de los de contenido), sin pisar.
+  tags = Array.isArray(tags) ? tags : [];
+  if (!tags.includes(quality)) tags.push(quality);
+
   const meta = {
     id,
     type,
@@ -1712,6 +1719,7 @@ async function stockPublishHandler(req, env, ctx) {
     title: title ? String(title).slice(0, 300) : null,
     comment: comment ? String(comment).slice(0, 2000) : null,
     tags: tags || [],
+    quality,
     audience,
     category,
     segmentation: segmentation || null,
