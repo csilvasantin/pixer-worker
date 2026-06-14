@@ -1279,10 +1279,42 @@ async function telegramWebhookHandler(req, env, ctx) {
     return json({ ok: true });
   }
   const link = m[0].replace(/[).,]+$/, '');
-  const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
   const comment = text.replace(m[0], '').replace(/\b(audio|mp3)\b/ig, '').trim() || null;
-  let host = '';
-  try { host = new URL(link).hostname; } catch {}
+  // ¿Es una URL de imagen directa? Se mira la extensión del PATH (ignorando el
+  // ?query, p.ej. council-leyendas.jpg?v=…). Si lo es, se publica como
+  // type:image vía /stock/publish (que baja la sourceUrl del lado servidor),
+  // NO por el proxy de vídeo yt-dlp — que la marcaría como vídeo y no saldría
+  // en el filtro «Imágenes» del Stock.
+  let host = '', imgName = '';
+  let isImage = false;
+  try {
+    const lu = new URL(link);
+    host = lu.hostname;
+    isImage = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|tiff?)$/i.test(lu.pathname);
+    imgName = (lu.pathname.split('/').pop() || '').replace(/\.[^.]+$/, '');
+  } catch {}
+
+  if (isImage) {
+    ctx.waitUntil((async () => {
+      await tgSend(env, chatId, `📥 Importando imagen 🖼️ de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
+      try {
+        const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'image', motor: 'Telegram Import', sourceUrl: link, comment, title: comment ? comment.slice(0, 80) : (imgName || null) }),
+        });
+        const pr = await stockPublishHandler(pubReq, env, ctx); // notifica el éxito él mismo
+        if (!pr.ok) {
+          const t = await pr.text().catch(() => '');
+          await tgSend(env, chatId, `⚠️ No pude publicar la imagen (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+        }
+      } catch (e) {
+        await tgSend(env, chatId, `🚨 Error importando la imagen: <code>${escHtml(String(e).slice(0, 180))}</code>`);
+      }
+    })());
+    return json({ ok: true });
+  }
+
+  const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
   const base = env.ADMIRA_TUBE_BASE || ADMIRA_TUBE_BASE_DEFAULT;
   ctx.waitUntil((async () => {
     await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
