@@ -2173,7 +2173,7 @@ function agoraCliCommandFromText(text) {
   const parsed = agoraAddressedSlashFromText(text);
   if (!parsed) return null;
   const alias = parsed.alias;
-  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping'].includes(alias)) return null;
+  if (!['cli', 'help', 'ayuda', 'who', 'ps', 'status', 'estado', 'enqueandais', 'queandais', 'feed', 'tail', 'inbox', 'tasks', 'tareas', 'cola', 'queues', 'ping'].includes(alias)) return null;
   return { alias, text: parsed.text };
 }
 function agoraCliArgs(text) {
@@ -2208,11 +2208,49 @@ function agoraAgeText(ts) {
   const h = Math.floor(m / 60);
   return `${h}h`;
 }
+function agoraMadridDateKey(ts) {
+  if (!ts) return '';
+  try {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/Madrid',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(ts));
+  } catch { return ''; }
+}
+function agoraMadridDateTime(ts) {
+  if (!ts) return 'n/a';
+  try {
+    return new Intl.DateTimeFormat('es-ES', {
+      timeZone: 'Europe/Madrid',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(ts));
+  } catch { return 'n/a'; }
+}
+function agoraCleanBriefText(text, max = 150) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+function agoraIdentityFromActivity(item) {
+  if (item && item.identity && AGORA_IDENTITIES.includes(item.identity)) return item.identity;
+  const persona = agoraPersonaFor((item && (item.from || item.persona || item.who)) || '');
+  if (persona && AGORA_TOKEN_IDENTITIES[persona]) return AGORA_TOKEN_IDENTITIES[persona];
+  const key = agoraCommandKey((item && (item.from || item.persona)) || '');
+  for (const target of Object.values(AGORA_COMMAND_TARGETS)) {
+    if (agoraCommandKey(target.persona) === key) return target.identity;
+  }
+  return null;
+}
 function agoraCliHelpText() {
   return [
     '<b>CLI AgoraMatrix</b>',
     '<code>/who</code> o <code>/ps</code> — agentes despiertos/dormidos',
     '<code>/status</code> — resumen operativo del grupo',
+    '<code>/enqueandais</code> — resumen de hoy por agente',
     '<code>/feed 10</code> o <code>/tail 10</code> — ultimos mensajes compartidos',
     '<code>/inbox</code> — ultimas tareas globales',
     '<code>/inbox cypher 5</code> — buzon de un agente',
@@ -2248,6 +2286,56 @@ async function agoraFeedCliText(env, limit) {
     lines.push(`${idx + 1}. <code>${escHtml(agoraFormatTs(it.ts))}</code> <b>${escHtml(from)}</b>${escHtml(host)}`);
     lines.push(`   ${escHtml(text || '(sin texto)')}`);
   });
+  return lines.join('\n').slice(0, 3900);
+}
+async function agoraWhatAreYouDoingCliText(env) {
+  const presence = await agoraKvGet(env, 'agora:presence', {});
+  const feed = await agoraKvGet(env, 'agora:feed', []);
+  const tasklog = await agoraKvGet(env, 'agora:tasklog', []);
+  const now = Date.now();
+  const today = agoraMadridDateKey(now);
+  const lines = [`<b>AgoraMatrix /enqueandais</b> · hoy ${escHtml(today)}`];
+  for (const identity of AGORA_IDENTITIES) {
+    const persona = agoraPersonaNameForIdentity(identity);
+    const p = presence[identity] || {};
+    const awake = (now - (p.ts || 0)) < AGORA_AWAKE_MS;
+    const events = [];
+    for (const it of feed) {
+      if (agoraIdentityFromActivity(it) !== identity) continue;
+      const ts = Number(it.ts) || 0;
+      const text = agoraCleanBriefText(it.text, 150);
+      if (!text) continue;
+      events.push({ ts, host: it.host || '', text });
+    }
+    for (const it of tasklog) {
+      if (agoraIdentityFromActivity(it) !== identity) continue;
+      const ts = Number(it.ts) || 0;
+      const bits = [it.command, it.text].filter(Boolean).join(' ');
+      const text = agoraCleanBriefText(bits, 150);
+      if (!text) continue;
+      events.push({ ts, host: '', text });
+    }
+    events.sort((a, b) => b.ts - a.ts);
+    const todayEvents = events.filter(it => agoraMadridDateKey(it.ts) === today).slice(0, 2);
+    const lastEvent = events[0];
+    const lastTs = Number(p.ts || 0) || (lastEvent && lastEvent.ts) || 0;
+    const host = p.host || (lastEvent && lastEvent.host) || 'host desconocido';
+    const status = awake ? 'despierto' : 'dormido';
+    const usage = (p.tokens || p.reqs) ? ` · ${Number(p.tokens || 0).toLocaleString('es-ES')} tok · ${Number(p.reqs || 0)} pet.` : '';
+    lines.push(`\n<b>${escHtml(persona)}</b> <code>${escHtml(identity)}</code> · ${status}`);
+    lines.push(`Última conexión: <code>${escHtml(agoraMadridDateTime(lastTs))}</code> · ${escHtml(host)}${usage}`);
+    if (todayEvents.length) {
+      todayEvents.forEach(it => {
+        const h = it.host ? ` · ${it.host}` : '';
+        lines.push(`- ${escHtml(agoraMadridDateTime(it.ts))}${escHtml(h)}: ${escHtml(it.text)}`);
+      });
+    } else if (lastEvent) {
+      const h = lastEvent.host ? ` · ${lastEvent.host}` : '';
+      lines.push(`Sin actividad registrada hoy. Último apunte: ${escHtml(agoraMadridDateTime(lastEvent.ts))}${escHtml(h)}: ${escHtml(lastEvent.text)}`);
+    } else {
+      lines.push('Sin actividad registrada en feed/tasklog.');
+    }
+  }
   return lines.join('\n').slice(0, 3900);
 }
 async function agoraTasklogCliText(env, limit) {
@@ -2303,6 +2391,7 @@ async function agoraCliCommandReply(env, command, actor) {
   if (alias === 'help' || alias === 'ayuda' || alias === 'cli') return agoraCliHelpText();
   if (alias === 'who' || alias === 'ps') return agoraPresenceCliText(env);
   if (alias === 'status' || alias === 'estado') return agoraStatusCliText(env);
+  if (alias === 'enqueandais' || alias === 'queandais') return agoraWhatAreYouDoingCliText(env);
   if (alias === 'feed' || alias === 'tail') return agoraFeedCliText(env, args[0]);
   if (alias === 'inbox') return agoraQueueCliText(env, 'inbox', args);
   if (alias === 'tasks' || alias === 'tareas' || alias === 'cola' || alias === 'queues') return agoraQueueCliText(env, 'tasks', args);
