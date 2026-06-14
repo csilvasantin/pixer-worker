@@ -634,6 +634,56 @@ async function imageEditHandler(req, env) {
   return json({ ok: true, image: 'data:' + outMime + ';base64,' + outImg, mime: outMime });
 }
 
+// ─── Proxy de imágenes externas para el editor de pixeria ──────────
+// GET /image/proxy?url=<encoded>  → baja la imagen del lado servidor y la
+// re-emite con Access-Control-Allow-Origin:* para que el editor de Assets
+// pueda leer sus píxeles en canvas sin "tainting" CORS (importar de otra web
+// para retocar o guardar en Stock). Guardas SSRF: solo http(s), no IPs/hosts
+// internos. Tope de tamaño y obligación de content-type imagen.
+function isBlockedHost(host) {
+  const h = (host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal') || h === 'metadata.google.internal') return true;
+  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true; // loopback/ULA/link-local IPv6
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    if (a === 0 || a === 127 || a === 10) return true;
+    if (a === 169 && b === 254) return true;            // link-local + metadata 169.254.169.254
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a >= 224) return true;                          // multicast/reservado
+  }
+  return false;
+}
+async function imageProxyHandler(req) {
+  const u = new URL(req.url).searchParams.get('url') || '';
+  let target;
+  try { target = new URL(u); } catch { return json({ error: 'bad-url' }, { status: 400 }); }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') return json({ error: 'bad-protocol' }, { status: 400 });
+  if (isBlockedHost(target.hostname)) return json({ error: 'blocked-host' }, { status: 403 });
+  let r;
+  try {
+    r = await fetch(target.toString(), {
+      redirect: 'follow',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PixeriaImportBot/1.0)', 'Accept': 'image/*,*/*;q=0.8' },
+    });
+  } catch (e) { return json({ error: 'fetch-failed', detail: String(e).slice(0, 200) }, { status: 502 }); }
+  if (!r.ok) return json({ error: 'upstream-' + r.status }, { status: 502 });
+  const ct = r.headers.get('Content-Type') || '';
+  if (!/^image\//i.test(ct)) return json({ error: 'not-an-image', contentType: ct.slice(0, 80) }, { status: 415 });
+  const buf = await r.arrayBuffer();
+  if (buf.byteLength > 25 * 1024 * 1024) return json({ error: 'too-big', max: 25 * 1024 * 1024 }, { status: 413 });
+  return new Response(buf, {
+    headers: {
+      'Content-Type': ct,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=3600',
+      'X-Proxy-Source': target.hostname,
+    },
+  });
+}
+
 // ─── Veo 3 / Veo 3 Fast (Gemini API) — async ───────────────────────
 async function veoStartHandler(req, env) {
   if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key', service: 'gemini' }, { status: 500 });
@@ -2627,6 +2677,8 @@ export default {
         res = await xaiImageHandler(req, env);
       } else if (path === '/image/edit' && req.method === 'POST') {
         res = await imageEditHandler(req, env);
+      } else if (path === '/image/proxy' && req.method === 'GET') {
+        res = await imageProxyHandler(req);
       } else if (path === '/xai/video' && req.method === 'POST') {
         res = await xaiVideoStartHandler(req, env);
       } else if (path.startsWith('/xai/video/') && req.method === 'GET') {
@@ -2769,7 +2821,12 @@ export default {
       notify(ctx, env, msg);
     }
     const cors = corsHeaders(req);
-    Object.entries(cors).forEach(([k, v]) => res.headers.set(k, v));
+    Object.entries(cors).forEach(([k, v]) => {
+      // No pisar un Access-Control-Allow-Origin:* que el handler ponga a propósito
+      // (p.ej. /image/proxy: imagen pública sin credenciales, legible desde cualquier origen).
+      if (k === 'Access-Control-Allow-Origin' && res.headers.get(k) === '*') return;
+      res.headers.set(k, v);
+    });
     return res;
   },
 };
