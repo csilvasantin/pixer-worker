@@ -284,6 +284,43 @@ async function ttsHandler(req, env) {
   return new Response(r.body, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
 }
 
+// TTS GRATIS (sin key) vía Google Translate TTS → MP3. Da soporte al motor
+// "Web Speech" de pixeria para que la locución gratis produzca un FICHERO y se
+// pueda guardar en Stock (speechSynthesis del navegador no genera archivo).
+// POST /tts/free { text, lang? } → audio/mpeg (ACAO:* para leerlo en el cliente).
+async function ttsFreeHandler(req) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const text = String(b.text || '').trim();
+  if (!text) return json({ error: 'missing-text' }, { status: 400 });
+  if (text.length > 5000) return json({ error: 'text-too-long', max: 5000 }, { status: 400 });
+  const lang = (String(b.lang || 'es').toLowerCase().match(/^[a-z]{2}/) || ['es'])[0];
+  // Google TTS admite ~200 chars/petición → trocear respetando espacios.
+  const chunks = []; let rest = text;
+  while (rest.length && chunks.length < 50) {
+    let cut = Math.min(200, rest.length);
+    if (cut < rest.length) { const sp = rest.lastIndexOf(' ', cut); if (sp > 40) cut = sp; }
+    const piece = rest.slice(0, cut).trim();
+    if (piece) chunks.push(piece);
+    rest = rest.slice(cut);
+  }
+  const parts = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    const u = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' + encodeURIComponent(c) +
+      '&tl=' + lang + '&client=tw-ob&total=' + chunks.length + '&idx=' + i + '&textlen=' + c.length;
+    let r;
+    try { r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'Referer': 'https://translate.google.com/' } }); }
+    catch (e) { return json({ error: 'gtts-fetch-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+    if (!r.ok) return json({ error: 'gtts-' + r.status }, { status: 502 });
+    parts.push(new Uint8Array(await r.arrayBuffer()));
+  }
+  if (!parts.length) return json({ error: 'no-audio' }, { status: 502 });
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total); let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return new Response(out, { headers: { 'Content-Type': 'audio/mpeg', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' } });
+}
+
 // ─── xAI / Grok ────────────────────────────────────────────────────
 async function xaiImageHandler(req, env) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
@@ -2821,6 +2858,8 @@ export default {
         res = await grokAgentAckHandler(req);
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
+      } else if (path === '/tts/free' && req.method === 'POST') {
+        res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
         res = await xaiImageHandler(req, env);
       } else if (path === '/image/edit' && req.method === 'POST') {
