@@ -1984,10 +1984,12 @@ async function stockAssetHandler(req, env, id) {
   headers.set('Cache-Control', 'public, max-age=31536000, immutable');
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Content-Type', meta.mime || headers.get('Content-Type') || 'application/octet-stream');
-  // CORS en el asset: el gemelo dibuja sprites de mobiliario con
-  // crossOrigin='anonymous' (canvas sin "tainted"), así que el blob debe
-  // exponer Access-Control-Allow-Origin para el origen del juego.
+  // CORS en el asset: el gemelo dibuja sprites de mobiliario y el editor de
+  // pixeria carga imágenes del Stock con crossOrigin='anonymous' (canvas sin
+  // "tainted"). Es contenido público sin credenciales → ACAO:* para que sea
+  // legible desde cualquier origen (pixeria.com, github.io, gemelo, localhost).
   for (const [k, v] of Object.entries(corsHeaders(req))) headers.set(k, v);
+  headers.set('Access-Control-Allow-Origin', '*');
   if (obj.range) {
     const { offset, length } = obj.range;
     const end = offset + length - 1;
