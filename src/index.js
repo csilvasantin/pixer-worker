@@ -312,6 +312,102 @@ async function daProxyHandler(req, env) {
   return new Response(await up.arrayBuffer(), { status: up.status, headers });
 }
 
+// ── Resumen diario del Xpacio (calendario histórico del gemelo) ────
+// El gemelo guarda al cerrar cada día sus KPIs reales en KV (day:<loc>:<YYYYMMDD>);
+// el calendario los lee por rango para mostrar datos reales en vez de estimación.
+async function daySaveHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const date = String(b.date || '').replace(/[^0-9]/g, '').slice(0, 8);
+  if (!/^\d{8}$/.test(date)) return json({ error: 'bad-date', expected: 'YYYYMMDD' }, { status: 400 });
+  const s = (b.summary && typeof b.summary === 'object') ? b.summary : null;
+  if (!s) return json({ error: 'missing-summary' }, { status: 400 });
+  const rec = Object.assign({}, s, { date, loc, real: true, savedAt: Date.now() });
+  try { await env.SIGNAGE_KV.put(`day:${loc}:${date}`, JSON.stringify(rec).slice(0, 24000)); }
+  catch (e) { return json({ error: 'kv-put-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  return json({ ok: true, date, loc });
+}
+async function dayRangeHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const from = String(url.searchParams.get('from') || '').replace(/[^0-9]/g, '').slice(0, 8);
+  const to = String(url.searchParams.get('to') || '').replace(/[^0-9]/g, '').slice(0, 8);
+  const prefix = `day:${loc}:`;
+  const days = {}; let cursor, n = 0;
+  try {
+    do {
+      const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 });
+      for (const k of list.keys) {
+        const d = k.name.slice(prefix.length);
+        if (from && d < from) continue;
+        if (to && d > to) continue;
+        const v = await env.SIGNAGE_KV.get(k.name);
+        if (v) { try { days[d] = JSON.parse(v); } catch {} }
+        if (++n > 400) break;
+      }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor && n <= 400);
+  } catch (e) { return json({ error: 'kv-list-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  return json({ ok: true, loc, days });
+}
+
+// ── CPM por SEGMENTO (RTB) — la pauta la fija admira.app, el gemelo la lee ──
+const SEG_CPM_KEYS = ['joven_m','joven_f','adulto_m','adulto_f','senior_m','senior_f','nino_m','nino_f'];
+async function segCpmGetHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  let cpm = {}; try { cpm = JSON.parse(await env.SIGNAGE_KV.get(`segcpm:${loc}`) || '{}') || {}; } catch {}
+  return json({ ok: true, loc, cpm });
+}
+async function segCpmPutHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const inC = (b && typeof b.cpm === 'object' && b.cpm) ? b.cpm : b;
+  const cpm = {};
+  for (const k of SEG_CPM_KEYS) { const v = +(inC && inC[k]); if (isFinite(v) && v >= 0) cpm[k] = Math.min(200, Math.round(v * 100) / 100); }
+  if (!Object.keys(cpm).length) return json({ error: 'no-valid-cpm', expected: SEG_CPM_KEYS }, { status: 400 });
+  try { await env.SIGNAGE_KV.put(`segcpm:${loc}`, JSON.stringify(cpm)); } catch (e) { return json({ error: 'kv-put-failed' }, { status: 502 }); }
+  return json({ ok: true, loc, cpm });
+}
+
+// ── CAMPAÑAS programáticas (compra desde admira.app) ──────────────
+// Una campaña = {seg, presupuesto, cpm, creatividad}. El presupuesto se "consume"
+// con los impactos reales por segmento que reporta el gemelo (cálculo read-side
+// desde day:* en admira.app). Aquí solo guardamos/listamos el registro.
+async function campaignCreateHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const seg = String(b.seg || '').toLowerCase().replace(/[^a-z_]/g, '').slice(0, 16);
+  if (!SEG_CPM_KEYS.includes(seg)) return json({ error: 'bad-seg', expected: SEG_CPM_KEYS }, { status: 400 });
+  const budget = Math.max(1, Math.min(1e7, +b.budget || 0));
+  const cpm = Math.max(0.1, Math.min(200, +b.cpm || 8));
+  const d = new Date();
+  const startDate = String(b.startDate || '').replace(/[^0-9]/g, '').slice(0, 8) ||
+    ('' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0'));
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const rec = { id, loc, seg, name: String(b.name || 'Campaña').slice(0, 80), product: String(b.product || '').slice(0, 80),
+    creativeUrl: String(b.creativeUrl || '').slice(0, 300), budget, cpm, startDate, active: true, createdAt: Date.now() };
+  try { await env.SIGNAGE_KV.put(`camp:${loc}:${id}`, JSON.stringify(rec)); } catch (e) { return json({ error: 'kv-put-failed' }, { status: 502 }); }
+  return json({ ok: true, campaign: rec });
+}
+async function campaignListHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const prefix = `camp:${loc}:`; const out = []; let cursor, n = 0;
+  try {
+    do {
+      const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 });
+      for (const k of list.keys) { const v = await env.SIGNAGE_KV.get(k.name); if (v) { try { out.push(JSON.parse(v)); } catch {} } if (++n > 200) break; }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor && n <= 200);
+  } catch (e) { return json({ error: 'kv-list-failed' }, { status: 502 }); }
+  out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return json({ ok: true, loc, campaigns: out });
+}
+
 // "Web Speech" de pixeria para que la locución gratis produzca un FICHERO y se
 // pueda guardar en Stock (speechSynthesis del navegador no genera archivo).
 // POST /tts/free { text, lang? } → audio/mpeg (ACAO:* para leerlo en el cliente).
@@ -696,7 +792,11 @@ async function imageEditHandler(req, env) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(img); if (m) { mime = m[1]; img = m[2]; }
   if (!img) return json({ error: 'missing-image' }, { status: 400 });
   const model = (typeof b.model === 'string' && b.model) ? b.model : 'gemini-2.5-flash-image';
-  const sys = 'Eres un editor de sprites pixel-art de mobiliario. Edita la imagen dada siguiendo la instrucción. MANTÉN el estilo pixel-art, el mismo encuadre/pose y el fondo transparente; cambia SOLO lo que se pide. Devuelve la imagen editada.';
+  // System prompt por defecto = editor de sprites pixel-art (mobiliario). El cliente
+  // puede sobreescribirlo con b.sys (p.ej. para "humanizar" un NPC → foto realista).
+  const sys = (typeof b.sys === 'string' && b.sys.trim())
+    ? b.sys.trim()
+    : 'Eres un editor de sprites pixel-art de mobiliario. Edita la imagen dada siguiendo la instrucción. MANTÉN el estilo pixel-art, el mismo encuadre/pose y el fondo transparente; cambia SOLO lo que se pide. Devuelve la imagen editada.';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const r = await fetch(url, {
     method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
@@ -1323,10 +1423,54 @@ async function tgSend(env, chatId, html) {
     });
   } catch {}
 }
+async function saveTelegramImportFailure(env, data) {
+  if (!env.STOCK_BUCKET) return null;
+  const ts = Date.now();
+  const id = `tgfail-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const rec = {
+    id,
+    source: 'telegram',
+    state: 'failed',
+    link: String(data.link || '').slice(0, 2000),
+    format: String(data.format || '').slice(0, 20) || null,
+    comment: data.comment ? String(data.comment).slice(0, 2000) : null,
+    host: data.host ? String(data.host).slice(0, 200) : null,
+    phase: String(data.phase || 'unknown').slice(0, 80),
+    detail: data.detail ? String(data.detail).slice(0, 2000) : null,
+    chatId: data.chatId ? String(data.chatId).slice(0, 80) : null,
+    createdAt: new Date(ts).toISOString(),
+  };
+  await env.STOCK_BUCKET.put(`stock/import-failures/${id}.json`, JSON.stringify(rec), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' },
+  });
+  return rec;
+}
+async function stockImportFailuresHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!env.NOTIFY_KEY || (url.searchParams.get('key') || '') !== env.NOTIFY_KEY) {
+    return json({ error: 'unauthorized' }, { status: 401 });
+  }
+  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
+  const items = [];
+  let cursor;
+  do {
+    const list = await env.STOCK_BUCKET.list({ prefix: 'stock/import-failures/', cursor, limit: 1000 });
+    for (const k of list.objects || list.keys || []) {
+      if (!String(k.key || k.name || '').endsWith('.json')) continue;
+      const obj = await env.STOCK_BUCKET.get(k.key || k.name);
+      if (!obj) continue;
+      try { items.push(await obj.json()); } catch {}
+      if (items.length >= limit) break;
+    }
+    cursor = list.truncated ? list.cursor : null;
+  } while (cursor && items.length < limit);
+  items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return json({ ok: true, items: items.slice(0, limit) });
+}
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function monitorTubeImport(env, chatId, base, jobId, link) {
+async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
   const deadline = Date.now() + (9 * 60 * 1000);
   let notFoundCount = 0;
   while (Date.now() < deadline) {
@@ -1335,13 +1479,17 @@ async function monitorTubeImport(env, chatId, base, jobId, link) {
     try {
       r = await fetch(`${base}/tube/status?id=${encodeURIComponent(jobId)}`);
     } catch (e) {
-      await tgSend(env, chatId, `🚨 Se perdió el seguimiento de la importación: <code>${escHtml(String(e).slice(0, 180))}</code>`);
+      const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-fetch', detail: String(e) }).catch(() => null);
+      const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+      await tgSend(env, chatId, `🚨 Se perdió el seguimiento de la importación: <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
       return;
     }
     if (r.status === 404) {
       notFoundCount += 1;
       if (notFoundCount >= 3) {
-        await tgSend(env, chatId, `⚠️ La importación quedó sin estado final en el proxy.\n<code>${escHtml(link)}</code>`);
+        const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-not-found', detail: 'proxy status 404 repeated' }).catch(() => null);
+        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        await tgSend(env, chatId, `⚠️ La importación quedó sin estado final en el proxy.\n<code>${escHtml(link)}</code>${savedLine}`);
         return;
       }
       continue;
@@ -1357,10 +1505,14 @@ async function monitorTubeImport(env, chatId, base, jobId, link) {
     if (status && status.detail) bits.push(String(status.detail));
     if (status && status.stderr) bits.push(String(status.stderr));
     const detail = bits.join(' | ').slice(0, 260) || 'sin detalle';
-    await tgSend(env, chatId, `⚠️ La importación falló en segundo plano (${escHtml(state)}).\n<code>${escHtml(detail)}</code>`);
+    const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: `job-${state}`, detail }).catch(() => null);
+    const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+    await tgSend(env, chatId, `⚠️ La importación falló en segundo plano (${escHtml(state)}).\n<code>${escHtml(detail)}</code>${savedLine}`);
     return;
   }
-  await tgSend(env, chatId, `⚠️ La importación sigue sin resultado tras 9 min.\n<code>${escHtml(link)}</code>`);
+  const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-timeout', detail: 'sin resultado tras 9 min' }).catch(() => null);
+  const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+  await tgSend(env, chatId, `⚠️ La importación sigue sin resultado tras 9 min.\n<code>${escHtml(link)}</code>${savedLine}`);
 }
 async function telegramWebhookHandler(req, env, ctx) {
   // Verificación del secret de Telegram (cabecera fijada en setWebhook)
@@ -1422,10 +1574,14 @@ async function telegramWebhookHandler(req, env, ctx) {
         const pr = await stockPublishHandler(pubReq, env, ctx); // notifica el éxito él mismo
         if (!pr.ok) {
           const t = await pr.text().catch(() => '');
-          await tgSend(env, chatId, `⚠️ No pude publicar la imagen (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+          const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-publish', detail: `${pr.status} ${t}` }).catch(() => null);
+          const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+          await tgSend(env, chatId, `⚠️ No pude publicar la imagen (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>${savedLine}`);
         }
       } catch (e) {
-        await tgSend(env, chatId, `🚨 Error importando la imagen: <code>${escHtml(String(e).slice(0, 180))}</code>`);
+        const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-exception', detail: String(e) }).catch(() => null);
+        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        await tgSend(env, chatId, `🚨 Error importando la imagen: <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
       }
     })());
     return json({ ok: true });
@@ -1459,13 +1615,18 @@ async function telegramWebhookHandler(req, env, ctx) {
       }
       if (!accepted) {
         const baseNote = lastBase ? ` · base <code>${escHtml(lastBase)}</code>` : '';
-        await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>`);
+        const detail = `${lastStatus || 502} ${lastBody || 'sin detalle'}`;
+        const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-rejected', detail }).catch(() => null);
+        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>${savedLine}`);
       } else if (acceptedJobId && lastBase) {
-        await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link);
+        await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
       }
       // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
     } catch (e) {
-      await tgSend(env, chatId, `🚨 No pude contactar el proxy del Mac Mini (¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>`);
+      const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-contact', detail: String(e) }).catch(() => null);
+      const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+      await tgSend(env, chatId, `🚨 No pude contactar el proxy del Mac Mini (¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
     }
   })());
   return json({ ok: true });
@@ -3282,6 +3443,18 @@ export default {
         res = await ttsHandler(req, env);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
         res = await daProxyHandler(req, env);
+      } else if (path === '/day/save' && req.method === 'POST') {
+        res = await daySaveHandler(req, env);
+      } else if (path === '/day/range' && req.method === 'GET') {
+        res = await dayRangeHandler(req, env, url);
+      } else if (path === '/segcpm' && req.method === 'GET') {
+        res = await segCpmGetHandler(req, env, url);
+      } else if (path === '/segcpm' && (req.method === 'PUT' || req.method === 'POST')) {
+        res = await segCpmPutHandler(req, env, url);
+      } else if (path === '/campaign' && req.method === 'POST') {
+        res = await campaignCreateHandler(req, env);
+      } else if (path === '/campaign/list' && req.method === 'GET') {
+        res = await campaignListHandler(req, env, url);
       } else if (path === '/tts/free' && req.method === 'POST') {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
@@ -3363,6 +3536,8 @@ export default {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/stock/import-failures' && req.method === 'GET') {
+        res = await stockImportFailuresHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {
         res = await layoutPublishHandler(req, env, ctx);
       } else if (path === '/layout/list' && req.method === 'GET') {
