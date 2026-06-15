@@ -1423,49 +1423,57 @@ async function tgSend(env, chatId, html) {
     });
   } catch {}
 }
+function thumbnailForImportLink(link, format) {
+  const raw = String(link || '');
+  const yt = raw.match(/(?:youtube\.com\/.*[?&]v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/i);
+  if (yt) return `https://img.youtube.com/vi/${yt[1]}/hqdefault.jpg`;
+  try {
+    const u = new URL(raw);
+    if (/\.(jpe?g|png|gif|webp|bmp|svg|avif)(?:$|\?)/i.test(u.pathname)) return raw;
+  } catch {}
+  return format === 'audio' ? '' : null;
+}
 async function saveTelegramImportFailure(env, data) {
   if (!env.STOCK_BUCKET) return null;
   const ts = Date.now();
-  const id = `tgfail-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = `link-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const link = String(data.link || '').slice(0, 2000);
+  const detail = data.detail ? String(data.detail).slice(0, 1200) : null;
+  const comment = [
+    data.comment ? String(data.comment).slice(0, 800) : '',
+    detail ? `Fallo importación: ${detail}` : '',
+  ].filter(Boolean).join('\n');
   const rec = {
     id,
+    type: 'link',
+    motor: 'Telegram Import',
+    prompt: link,
+    title: data.host ? `Enlace pendiente · ${String(data.host).slice(0, 120)}` : 'Enlace pendiente',
+    comment: comment || null,
+    tags: ['enlace', 'pendiente'],
+    quality: 'good',
+    audience: 'all',
+    category: 'enlace',
+    costEst: 'no importado',
+    mime: 'text/uri-list',
+    ext: 'url',
+    size: 0,
+    thumbnail: thumbnailForImportLink(link, data.format),
+    url: link,
+    createdAt: new Date(ts).toISOString(),
     source: 'telegram',
     state: 'failed',
-    link: String(data.link || '').slice(0, 2000),
-    format: String(data.format || '').slice(0, 20) || null,
-    comment: data.comment ? String(data.comment).slice(0, 2000) : null,
-    host: data.host ? String(data.host).slice(0, 200) : null,
     phase: String(data.phase || 'unknown').slice(0, 80),
-    detail: data.detail ? String(data.detail).slice(0, 2000) : null,
+    format: String(data.format || '').slice(0, 20) || null,
+    host: data.host ? String(data.host).slice(0, 200) : null,
+    detail,
     chatId: data.chatId ? String(data.chatId).slice(0, 80) : null,
-    createdAt: new Date(ts).toISOString(),
   };
-  await env.STOCK_BUCKET.put(`stock/import-failures/${id}.json`, JSON.stringify(rec), {
-    httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' },
+  await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(rec), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+  await rebuildStockIndex(env);
   return rec;
-}
-async function stockImportFailuresHandler(req, env, url) {
-  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
-  if (!env.NOTIFY_KEY || (url.searchParams.get('key') || '') !== env.NOTIFY_KEY) {
-    return json({ error: 'unauthorized' }, { status: 401 });
-  }
-  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-  const items = [];
-  let cursor;
-  do {
-    const list = await env.STOCK_BUCKET.list({ prefix: 'stock/import-failures/', cursor, limit: 1000 });
-    for (const k of list.objects || list.keys || []) {
-      if (!String(k.key || k.name || '').endsWith('.json')) continue;
-      const obj = await env.STOCK_BUCKET.get(k.key || k.name);
-      if (!obj) continue;
-      try { items.push(await obj.json()); } catch {}
-      if (items.length >= limit) break;
-    }
-    cursor = list.truncated ? list.cursor : null;
-  } while (cursor && items.length < limit);
-  items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  return json({ ok: true, items: items.slice(0, limit) });
 }
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1480,7 +1488,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
       r = await fetch(`${base}/tube/status?id=${encodeURIComponent(jobId)}`);
     } catch (e) {
       const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-fetch', detail: String(e) }).catch(() => null);
-      const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+      const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
       await tgSend(env, chatId, `🚨 Se perdió el seguimiento de la importación: <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
       return;
     }
@@ -1488,7 +1496,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
       notFoundCount += 1;
       if (notFoundCount >= 3) {
         const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-not-found', detail: 'proxy status 404 repeated' }).catch(() => null);
-        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `⚠️ La importación quedó sin estado final en el proxy.\n<code>${escHtml(link)}</code>${savedLine}`);
         return;
       }
@@ -1506,12 +1514,12 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
     if (status && status.stderr) bits.push(String(status.stderr));
     const detail = bits.join(' | ').slice(0, 260) || 'sin detalle';
     const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: `job-${state}`, detail }).catch(() => null);
-    const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+    const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
     await tgSend(env, chatId, `⚠️ La importación falló en segundo plano (${escHtml(state)}).\n<code>${escHtml(detail)}</code>${savedLine}`);
     return;
   }
   const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-timeout', detail: 'sin resultado tras 9 min' }).catch(() => null);
-  const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+  const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
   await tgSend(env, chatId, `⚠️ La importación sigue sin resultado tras 9 min.\n<code>${escHtml(link)}</code>${savedLine}`);
 }
 async function telegramWebhookHandler(req, env, ctx) {
@@ -1575,12 +1583,12 @@ async function telegramWebhookHandler(req, env, ctx) {
         if (!pr.ok) {
           const t = await pr.text().catch(() => '');
           const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-publish', detail: `${pr.status} ${t}` }).catch(() => null);
-          const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+          const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
           await tgSend(env, chatId, `⚠️ No pude publicar la imagen (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>${savedLine}`);
         }
       } catch (e) {
         const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-exception', detail: String(e) }).catch(() => null);
-        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `🚨 Error importando la imagen: <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
       }
     })());
@@ -1617,7 +1625,7 @@ async function telegramWebhookHandler(req, env, ctx) {
         const baseNote = lastBase ? ` · base <code>${escHtml(lastBase)}</code>` : '';
         const detail = `${lastStatus || 502} ${lastBody || 'sin detalle'}`;
         const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-rejected', detail }).catch(() => null);
-        const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+        const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>${savedLine}`);
       } else if (acceptedJobId && lastBase) {
         await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
@@ -1625,7 +1633,7 @@ async function telegramWebhookHandler(req, env, ctx) {
       // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
     } catch (e) {
       const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-contact', detail: String(e) }).catch(() => null);
-      const savedLine = saved ? `\nGuardado para reintento: <code>${escHtml(saved.id)}</code>` : '';
+      const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
       await tgSend(env, chatId, `🚨 No pude contactar el proxy del Mac Mini (¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
     }
   })());
@@ -1833,7 +1841,7 @@ async function stockTrackHandler(req, env, ctx, id) {
 //                            size, thumbnail, url, createdAt)
 // Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
 // Sin KV → sin límite de 1000 writes/día en Workers Free.
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'animation', 'furni'];
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 function b64ToBytes(b64) {
@@ -3536,8 +3544,6 @@ export default {
         res = await stockPublishHandler(req, env, ctx);
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
-      } else if (path === '/stock/import-failures' && req.method === 'GET') {
-        res = await stockImportFailuresHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {
         res = await layoutPublishHandler(req, env, ctx);
       } else if (path === '/layout/list' && req.method === 'GET') {
