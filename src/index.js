@@ -407,6 +407,15 @@ async function campaignListHandler(req, env, url) {
   out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return json({ ok: true, loc, campaigns: out });
 }
+async function campaignDeleteHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
+  const id = String(b.id || '').replace(/[^a-z0-9]/gi, '').slice(0, 32);
+  if (!loc || !id) return json({ error: 'missing-loc-or-id' }, { status: 400 });
+  try { await env.SIGNAGE_KV.delete(`camp:${loc}:${id}`); } catch (e) { return json({ error: 'kv-delete-failed' }, { status: 502 }); }
+  return json({ ok: true, deleted: `camp:${loc}:${id}` });
+}
 
 // "Web Speech" de pixeria para que la locución gratis produzca un FICHERO y se
 // pueda guardar en Stock (speechSynthesis del navegador no genera archivo).
@@ -3463,6 +3472,8 @@ export default {
         res = await campaignCreateHandler(req, env);
       } else if (path === '/campaign/list' && req.method === 'GET') {
         res = await campaignListHandler(req, env, url);
+      } else if (path === '/campaign/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
+        res = await campaignDeleteHandler(req, env);
       } else if (path === '/tts/free' && req.method === 'POST') {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
