@@ -328,6 +328,15 @@ async function daySaveHandler(req, env) {
   catch (e) { return json({ error: 'kv-put-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
   return json({ ok: true, date, loc });
 }
+async function dayDeleteHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
+  const date = String(b.date || '').replace(/[^0-9]/g, '').slice(0, 8);
+  if (!loc || !/^\d{8}$/.test(date)) return json({ error: 'missing-loc-or-date' }, { status: 400 });
+  try { await env.SIGNAGE_KV.delete(`day:${loc}:${date}`); } catch (e) { return json({ error: 'kv-delete-failed' }, { status: 502 }); }
+  return json({ ok: true, deleted: `day:${loc}:${date}` });
+}
 async function dayRangeHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
@@ -3464,6 +3473,8 @@ export default {
         res = await daySaveHandler(req, env);
       } else if (path === '/day/range' && req.method === 'GET') {
         res = await dayRangeHandler(req, env, url);
+      } else if (path === '/day/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
+        res = await dayDeleteHandler(req, env);
       } else if (path === '/segcpm' && req.method === 'GET') {
         res = await segCpmGetHandler(req, env, url);
       } else if (path === '/segcpm' && (req.method === 'PUT' || req.method === 'POST')) {
