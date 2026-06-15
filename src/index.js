@@ -3431,12 +3431,67 @@ async function xpacioCreditHandler(req, env) {
   return json({ ok: true, wallet: w });
 }
 
+// ─── Informe de campañas al cierre del día (Telegram) ───────────────────────
+// El cron corre cada 10 min; a la hora objetivo (REPORT_HOUR Madrid, def 21h)
+// arma el informe de las campañas activas (impactos del día por segmento + gasto
+// CPM) y lo empuja a Telegram. KV flag por día para no repetir.
+const SEG_LABEL_RPT = { nino_m:'♂ Niño', nino_f:'♀ Niña', joven_m:'♂ Joven', joven_f:'♀ Joven',
+  adulto_m:'♂ Adulto', adulto_f:'♀ Adulta', senior_m:'♂ Senior', senior_f:'♀ Senior' };
+function madridParts() {
+  const d = new Date();
+  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d).replace(/-/g, '');
+  const hour = +new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hour12: false }).format(d);
+  return { ymd, hour };
+}
+async function dailyCampaignReport(env, ymd) {
+  const list = await env.SIGNAGE_KV.list({ prefix: 'camp:', limit: 1000 });
+  const dayCache = {};
+  async function dayFor(loc) {
+    if (dayCache[loc] !== undefined) return dayCache[loc];
+    let d = null; try { const v = await env.SIGNAGE_KV.get(`day:${loc}:${ymd}`); d = v ? JSON.parse(v) : null; } catch {}
+    dayCache[loc] = d; return d;
+  }
+  const lines = []; let gImp = 0, gSpend = 0, n = 0;
+  for (const k of list.keys) {
+    if (n >= 40) break;
+    let c; try { const v = await env.SIGNAGE_KV.get(k.name); if (!v) continue; c = JSON.parse(v); } catch { continue; }
+    if (!c || c.active === false) continue;
+    const day = await dayFor(c.loc);
+    const imp = (day && day.extAds && day.extAds[c.seg]) || 0;
+    if (imp <= 0) continue;
+    const spend = Math.min(c.budget || 0, imp / 1000 * (c.cpm || 0));
+    const done = (c.budget > 0 && spend >= c.budget) ? ' ✅' : '';
+    lines.push(`• ${SEG_LABEL_RPT[c.seg] || c.seg} · ${c.loc} — <b>${imp}</b> impactos · ${spend.toFixed(2)}€/${c.budget || 0}€${done}`);
+    gImp += imp; gSpend += spend; n++;
+  }
+  if (!lines.length) return false;
+  const dd = ymd.slice(6, 8), mm = ymd.slice(4, 6);
+  const txt = `📊 <b>Informe de campañas · ${dd}/${mm}</b>\n` + lines.join('\n') +
+    `\n\n<b>Total</b>: ${gImp} impactos · ${gSpend.toFixed(2)}€ consumidos`;
+  await sendTelegram(env, txt);
+  return true;
+}
+async function maybeDailyReport(env) {
+  try {
+    if (!env.SIGNAGE_KV) return;
+    const { ymd, hour } = madridParts();
+    const target = Number.isFinite(+env.REPORT_HOUR) ? +env.REPORT_HOUR : 21;
+    if (hour !== target) return;
+    const flag = `report:campaign:${ymd}`;
+    if (await env.SIGNAGE_KV.get(flag)) return;            // ya enviado hoy
+    await env.SIGNAGE_KV.put(flag, '1', { expirationTtl: 172800 });
+    await dailyCampaignReport(env, ymd);
+  } catch (e) { /* silencioso */ }
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
   // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
+  // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(rebuildStockIndex(env));
+    ctx.waitUntil(maybeDailyReport(env));
   },
 
   async fetch(req, env, ctx) {
@@ -3485,6 +3540,11 @@ export default {
         res = await campaignListHandler(req, env, url);
       } else if (path === '/campaign/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
         res = await campaignDeleteHandler(req, env);
+      } else if (path === '/campaign/report' && (req.method === 'POST' || req.method === 'GET')) {
+        // Dispara YA el informe de campañas a Telegram (el mismo que el cron de las 21h).
+        const ymd = madridParts().ymd;
+        const sent = await dailyCampaignReport(env, ymd);
+        res = json({ ok: true, sent, ymd });
       } else if (path === '/tts/free' && req.method === 'POST') {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
