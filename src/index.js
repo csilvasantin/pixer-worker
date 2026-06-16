@@ -3386,6 +3386,51 @@ async function layoutCurrentHandler(req, env, url) {
   return json({ current: rec || null });
 }
 
+// ─── CLI KEYLESS del Xtanco (EN VIVO) ─────────────────────────────────────
+// Canal SIN clave para el CLI de pixeria cuando está EN VIVO con un Xpacio (mismo
+// modelo de confianza que /layout/*: worker keyless del ecosistema, scoping por
+// pantalla). pixeria encola un comando (POST /twin/cmd), el gemelo de ese punto lo
+// sondea (GET /twin/cmd?screen=&since=) y lo ejecuta vía xtAPI; devuelve el resultado
+// (POST /twin/result) que pixeria recoge (GET /twin/result?screen=&id=).
+async function twinCmdPostHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(b.screen || '').slice(0, 60);
+  const text = String(b.text || '').trim().slice(0, 200);
+  if (!screen || !/^[a-z0-9_-]+$/i.test(screen) || !text) return json({ error: 'missing-screen-or-text' }, { status: 400 });
+  const now = Date.now();
+  const list = await agoraKvGet(env, `twincmd:${screen}`, []);
+  list.push({ id: now, text, ts: now });
+  await agoraKvPut(env, `twincmd:${screen}`, list.slice(-30), now);
+  return json({ ok: true, id: now });
+}
+async function twinCmdGetHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  const since = Number(url.searchParams.get('since') || 0);
+  if (!screen) return json({ commands: [] });
+  const list = await agoraKvGet(env, `twincmd:${screen}`, []);
+  return json({ commands: list.filter(c => c.id > since).slice(0, 10) });
+}
+async function twinResultPostHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(b.screen || '').slice(0, 60);
+  const id = Number(b.id || 0);
+  if (!screen || !id) return json({ error: 'missing' }, { status: 400 });
+  const now = Date.now();
+  const map = await agoraKvGet(env, `twinres:${screen}`, {});
+  map[id] = { text: String(b.text || '').slice(0, 3900), ts: now };
+  const ids = Object.keys(map).map(Number).sort((a, c) => a - c);
+  while (ids.length > 20) { delete map[ids.shift()]; }
+  await agoraKvPut(env, `twinres:${screen}`, map, now);
+  return json({ ok: true });
+}
+async function twinResultGetHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  const id = String(url.searchParams.get('id') || '');
+  if (!screen || !id) return json({ result: null });
+  const map = await agoraKvGet(env, `twinres:${screen}`, {});
+  return json({ result: map[id] || null });
+}
+
 // ─── MONEDERO DEL XPACIO (Marketplace: comprar muebles con créditos) ──
 // Por Xpacio (id propio del navegador/cuenta): saldo + inventario «Mis
 // muebles». KV `xpacio:<id>`. Comprar descuenta el precio del furni. Los
@@ -3664,6 +3709,14 @@ export default {
         res = await layoutPendingHandler(req, env, url);
       } else if (path === '/layout/report' && req.method === 'POST') {
         res = await layoutReportHandler(req, env);
+      } else if (path === '/twin/cmd' && req.method === 'POST') {
+        res = await twinCmdPostHandler(req, env);
+      } else if (path === '/twin/cmd' && req.method === 'GET') {
+        res = await twinCmdGetHandler(req, env, url);
+      } else if (path === '/twin/result' && req.method === 'POST') {
+        res = await twinResultPostHandler(req, env);
+      } else if (path === '/twin/result' && req.method === 'GET') {
+        res = await twinResultGetHandler(req, env, url);
       } else if (path === '/layout/current' && req.method === 'GET') {
         res = await layoutCurrentHandler(req, env, url);
       } else if (path === '/xpacio' && req.method === 'GET') {
