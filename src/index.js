@@ -3172,6 +3172,28 @@ async function agoraEnqueueDirect(env, identity, text, who, chat, command) {
   return { identity, persona, text: item.text };
 }
 
+// POST /agora/enqueue {key,agent|identity,text,who?,chat?,command?}
+// Entrada directa para herramientas MCP y automatizaciones no-Telegram.
+async function agoraEnqueueHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+  const target = b.identity && AGORA_IDENTITIES.includes(b.identity)
+    ? { identity: b.identity, persona: agoraPersonaNameForIdentity(b.identity) }
+    : agoraTargetFromArg(b.agent || b.persona || '');
+  if (!target) return json({ error: 'bad-agent' }, { status: 400 });
+  const text = String(b.text || '').trim();
+  if (!text) return json({ error: 'missing-text' }, { status: 400 });
+  const routed = await agoraEnqueueDirect(
+    env,
+    target.identity,
+    text,
+    b.who || b.origin || 'Admira Live MCP',
+    b.chat,
+    b.command || '/mcp',
+  );
+  return json({ ok: true, ...routed });
+}
+
 async function agoraHookHandler(req, env, url, ctx) {
   if (req.method !== 'POST') return json({ ok: true });
   const identity = url.searchParams.get('id') || '';
@@ -3572,6 +3594,8 @@ export default {
         res = await agoraFeedHandler(req, env, url, ctx);
       } else if (path === '/agora/hook' && req.method === 'POST') {
         res = await agoraHookHandler(req, env, url, ctx);
+      } else if (path === '/agora/enqueue' && req.method === 'POST') {
+        res = await agoraEnqueueHandler(req, env);
       } else if (path === '/agora/tg-test' && req.method === 'GET') {
         res = await agoraTgTestHandler(req, env, url);
       } else if (path === '/agora/config') {
