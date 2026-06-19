@@ -930,7 +930,9 @@ async function npcSpawnHandler(req, env) {
   if (!/^data:image\//.test(img)) return json({ error: 'bad-image' }, { status: 400 });
   if (img.length > 1500000) return json({ error: 'image-too-big' }, { status: 413 });
   const id = 'npc_' + crypto.randomUUID().slice(0, 8);
-  const entry = { id, img, ts: Date.now(), name: String(b.name || '').slice(0, 40), screen: String(b.screen || '').slice(0, 40) };
+  // name puede traer la AUDIENCIA empaquetada ("Anónimo||{json sex/age/desc}") → 300
+  // chars para que el JSON del segmento NO se trunque (antes 40 lo partía).
+  const entry = { id, img, ts: Date.now(), name: String(b.name || '').slice(0, 300), screen: String(b.screen || '').slice(0, 40) };
   let q; try { q = JSON.parse((await env.SIGNAGE_KV.get(NPC_QUEUE_KEY)) || '[]'); } catch { q = []; }
   q.push(entry); q = q.slice(-30); // cap defensivo
   await env.SIGNAGE_KV.put(NPC_QUEUE_KEY, JSON.stringify(q));
