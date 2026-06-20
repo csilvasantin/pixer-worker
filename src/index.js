@@ -361,6 +361,66 @@ async function dayRangeHandler(req, env, url) {
   return json({ ok: true, loc, days });
 }
 
+// ── EMISIÓN (proof-of-play) — admira.tv registra qué emite cada pantalla ──────
+// El canal (admira.tv/canal.html) manda el ACUMULADO del día POR PANTALLA. Es
+// cumulativo (last-write-wins por pantalla) → no hay carreras de incremento.
+// clearchannel.tv lo lee por circuito (/emit/range) para el "Informe de emisión".
+async function emitSaveHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const screen = (String(b.screen || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 48)) || (loc + '-led');
+  const date = String(b.date || '').replace(/[^0-9]/g, '').slice(0, 8);
+  if (!/^\d{8}$/.test(date)) return json({ error: 'bad-date', expected: 'YYYYMMDD' }, { status: 400 });
+  const num = v => { const n = +v; return isFinite(n) && n >= 0 ? Math.round(n) : 0; };
+  const cleanMap = m => { const o = {}; if (m && typeof m === 'object') for (const k of Object.keys(m).slice(0, 40)) o[String(k).slice(0, 24)] = num(m[k]); return o; };
+  const assets = {};
+  if (b.assets && typeof b.assets === 'object') {
+    for (const id of Object.keys(b.assets).slice(0, 300)) {
+      const a = b.assets[id] || {};
+      assets[String(id).slice(0, 80)] = {
+        n: num(a.n), type: String(a.type || '').slice(0, 24),
+        seg: a.seg ? String(a.seg).slice(0, 24) : null,
+        title: String(a.title || '').slice(0, 80),
+        num: a.num != null ? num(a.num) : null,
+        secs: num(a.secs), last: num(a.last) || Date.now(),
+      };
+    }
+  }
+  const rec = {
+    date, loc, screen, totalPlays: num(b.totalPlays), totalSecs: num(b.totalSecs),
+    byType: cleanMap(b.byType), bySeg: cleanMap(b.bySeg), assets, real: true, savedAt: Date.now(),
+  };
+  try { await env.SIGNAGE_KV.put(`emit:${loc}:${screen}:${date}`, JSON.stringify(rec).slice(0, 24000)); }
+  catch (e) { return json({ error: 'kv-put-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  return json({ ok: true, loc, screen, date });
+}
+async function emitRangeHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const from = String(url.searchParams.get('from') || '').replace(/[^0-9]/g, '').slice(0, 8);
+  const to = String(url.searchParams.get('to') || '').replace(/[^0-9]/g, '').slice(0, 8);
+  const prefix = `emit:${loc}:`;
+  const screens = {}; let cursor, n = 0;
+  try {
+    do {
+      const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 });
+      for (const k of list.keys) {
+        const rest = k.name.slice(prefix.length);          // <screen>:<date>
+        const li = rest.lastIndexOf(':'); if (li < 0) continue;
+        const screen = rest.slice(0, li), d = rest.slice(li + 1);
+        if (from && d < from) continue;
+        if (to && d > to) continue;
+        const v = await env.SIGNAGE_KV.get(k.name);
+        if (v) { try { (screens[screen] = screens[screen] || {})[d] = JSON.parse(v); } catch {} }
+        if (++n > 600) break;
+      }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor && n <= 600);
+  } catch (e) { return json({ error: 'kv-list-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  return json({ ok: true, loc, screens });
+}
+
 // ── CPM por SEGMENTO (RTB) — la pauta la fija admira.app, el gemelo la lee ──
 const SEG_CPM_KEYS = ['joven_m','joven_f','adulto_m','adulto_f','senior_m','senior_f','nino_m','nino_f'];
 async function segCpmGetHandler(req, env, url) {
@@ -3530,6 +3590,10 @@ export default {
         res = await dayRangeHandler(req, env, url);
       } else if (path === '/day/delete' && (req.method === 'POST' || req.method === 'DELETE')) {
         res = await dayDeleteHandler(req, env);
+      } else if (path === '/emit' && req.method === 'POST') {
+        res = await emitSaveHandler(req, env);
+      } else if (path === '/emit/range' && req.method === 'GET') {
+        res = await emitRangeHandler(req, env, url);
       } else if (path === '/segcpm' && req.method === 'GET') {
         res = await segCpmGetHandler(req, env, url);
       } else if (path === '/segcpm' && (req.method === 'PUT' || req.method === 'POST')) {
