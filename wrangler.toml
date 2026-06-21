@@ -13,7 +13,7 @@ enabled = true
 # r2.dev, que esquiva el bloqueo ISP de workers.dev). Las mutaciones también
 # lo regeneran al vuelo; esto cubre escrituras perdidas.
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["*/10 * * * *", "*/2 * * * *"]
 
 # KV para signage de Admira XP (también usado por stock con prefijos stock:meta:* y stock_index)
 [[kv_namespaces]]
