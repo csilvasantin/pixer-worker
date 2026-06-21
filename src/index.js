@@ -183,6 +183,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
+  '/signage/audience', // medición de audiencia — POST frecuente / GET polling del gemelo
+  '/emit',         // proof-of-play acumulado de admira.tv: telemetría frecuente
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/stock/reasset', // reproceso de transparencia en lote: no notificar cada uno
@@ -190,6 +192,11 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/lead',          // notificado dentro del handler con los datos del contacto
   '/telegram/webhook', // webhook entrante de Telegram (import por URL) — responde él mismo
   '/telegram/setup',
+  '/grid/day',     // lectura de parrilla — polling del backoffice
+  '/grid/config',  // GET frecuente
+  '/grid/screens',
+  '/grid/emit',    // empuje a signage — frecuente (cron)
+  '/grid/control', // GET/POST de control del circuito
   // (los prefijos /stock/track/ y /stock/asset/ van en NOTIFY_SKIP_PREFIX abajo)
   '/veo/download',
 ]);
@@ -3967,12 +3974,66 @@ async function maybeDailyReport(env) {
   } catch (e) { /* silencioso */ }
 }
 
+// ─── Monitor de activación del Consejo ───────────────────────────────
+// Cron: mira el feed central; si una persona del Consejo reaparece tras
+// >15 min de silencio, avisa por Telegram. Estado en KV agora:activity-monitor.
+const COUNCIL_PERSONAS = {
+  'Neo': { consejero: 'Elon Musk', role: 'CEO' },
+  'Morfeo': { consejero: 'Jensen Huang', role: 'CTO' },
+  'Trinity': { consejero: 'Gwynne Shotwell', role: 'COO' },
+  'Oráculo': { consejero: 'Ruth Porat', role: 'CFO' },
+  'Cypher': { consejero: 'Ryan Reynolds', role: 'CSO' },
+};
+const ACTIVITY_STATE_KEY = 'agora:activity-monitor';
+const ACTIVATION_GAP_MS = 15 * 60 * 1000;
+
+async function agoraActivityMonitor(env) {
+  if (!env.SIGNAGE_KV) return;
+  let feed = [];
+  try { feed = await agoraKvGet(env, 'agora:feed', []); } catch {}
+  if (!feed.length) return;
+  const newest = {};
+  for (const it of feed) {
+    const from = String(it.from || '');
+    if (!COUNCIL_PERSONAS[from]) continue;
+    const ts = Number(it.ts || 0);
+    if (!newest[from] || ts > newest[from].ts) newest[from] = { ts, text: String(it.text || '') };
+  }
+  let state = {};
+  try { state = JSON.parse(await env.SIGNAGE_KV.get(ACTIVITY_STATE_KEY)) || {}; } catch {}
+  const initialized = !!state._initialized;
+  const activations = [];
+  for (const [persona, info] of Object.entries(newest)) {
+    const prev = Number(state[persona] || 0);
+    if (info.ts > prev) {
+      if (initialized && (prev === 0 || (info.ts - prev) > ACTIVATION_GAP_MS)) {
+        activations.push({ persona, ...info });
+      }
+      state[persona] = info.ts;
+    }
+  }
+  state._initialized = true;
+  await env.SIGNAGE_KV.put(ACTIVITY_STATE_KEY, JSON.stringify(state));
+  if (!initialized || !activations.length) return;
+  for (const a of activations) {
+    const m = COUNCIL_PERSONAS[a.persona];
+    const txt = a.text.replace(/<[^>]+>/g, '').slice(0, 220);
+    const msg = `🟢 <b>${escHtml(a.persona)}</b> · ${escHtml(m.consejero)} (${m.role}) se ha activado en el Consejo\n${escHtml(txt)}\n\n<i>admira.live/sala.html</i>`;
+    try { await tgSend(env, env.TELEGRAM_CHAT_ID, msg); } catch {}
+  }
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
   // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
   // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
   async scheduled(event, env, ctx) {
+    const cron = event && event.cron;
+    if (cron === '*/2 * * * *') {
+      ctx.waitUntil(agoraActivityMonitor(env));
+      return;
+    }
     ctx.waitUntil(rebuildStockIndex(env));
     ctx.waitUntil(maybeDailyReport(env));
   },
