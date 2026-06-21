@@ -4042,6 +4042,12 @@ async function audienceSaveHandler(req, env) {
     if (ageBucket) { agg.age = agg.age || {}; agg.age[ageBucket] = (agg.age[ageBucket] || 0) + 1; }
     if (emotion) { agg.emotion = agg.emotion || {}; agg.emotion[emotion] = (agg.emotion[emotion] || 0) + 1; }
   }
+  // franja horaria (UTC) para el informe por horas
+  const hr = String(new Date().getUTCHours());
+  agg.hours = agg.hours || {};
+  const h = agg.hours[hr] = agg.hours[hr] || { samples: 0, present: 0, male: 0, female: 0 };
+  h.samples++;
+  if (faces > 0) { h.present++; if (gender === 'male' && gscore >= 0.6) h.male++; if (gender === 'female' && gscore >= 0.6) h.female++; }
   agg.lastTs = Date.now();
   try { await env.SIGNAGE_KV.put(key, JSON.stringify(agg).slice(0, 24000), { expirationTtl: 40 * 24 * 3600 }); } catch (e) {}
   return json({ ok: true, screen, date, samples: agg.samples, present: agg.present || 0 });
