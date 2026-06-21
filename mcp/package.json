@@ -1,0 +1,21 @@
+{
+  "name": "admira-live-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP server for Admira Live, AgoraMatrix and pixer-worker.",
+  "bin": {
+    "admira-live-mcp": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

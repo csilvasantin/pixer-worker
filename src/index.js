@@ -21,6 +21,10 @@ const ALLOWED_ORIGINS = [
   'https://www.pixeria.com',
   'https://xpaceos.com',
   'https://www.xpaceos.com',
+  'http://clearchannel.tv',
+  'https://clearchannel.tv',
+  'http://www.clearchannel.tv',
+  'https://www.clearchannel.tv',
   'https://admira.app',
   'https://www.admira.app',
   'https://admira.live',
@@ -1094,8 +1098,152 @@ async function imageEditHandler(req, env) {
   if (!r.ok) return json({ error: 'gemini-' + r.status, detail: (d && d.error && d.error.message) || '' }, { status: r.status });
   let outImg = null, outMime = 'image/png';
   try { const parts = (((d.candidates || [])[0] || {}).content || {}).parts || []; for (const p of parts) { if (p.inlineData && p.inlineData.data) { outImg = p.inlineData.data; outMime = p.inlineData.mimeType || outMime; break; } } } catch (e) {}
-  if (!outImg) return json({ error: 'no-image-out', detail: JSON.stringify(d).slice(0, 200) }, { status: 502 });
+  if (!outImg) {
+    // Gemini no devolvió imagen: clasificar el motivo (rechazo de seguridad,
+    // copyright/recitation, persona reconocible → IMAGE_OTHER, o respuesta vacía)
+    // para que el frontend muestre un mensaje humano en vez del JSON crudo.
+    const cand = (((d.candidates || [])[0]) || {});
+    const fr = String(cand.finishReason || '');
+    const block = String((d.promptFeedback && d.promptFeedback.blockReason) || '');
+    const msg = cand.finishMessage || (d.promptFeedback && d.promptFeedback.blockReasonMessage) || '';
+    let reason = 'empty';
+    if (/SAFETY|PROHIBITED|BLOCK/i.test(fr + ' ' + block)) reason = 'safety';
+    else if (/RECITATION|COPYRIGHT/i.test(fr + ' ' + block)) reason = 'copyright';
+    else if (/IMAGE/i.test(fr)) reason = 'image-declined';
+    return json({ ok: false, error: 'no-image-out', reason, finishReason: fr, blockReason: block, detail: String(msg).slice(0, 300) }, { status: 422 });
+  }
   return json({ ok: true, image: 'data:' + outMime + ';base64,' + outImg, mime: outMime });
+}
+
+// ─── Gemelo persistente: re-identificación por embedding facial ────
+// Prototipo del bucle cámara MUPI → gemelo sintético del Anonimizador.
+// La cara NUNCA se guarda: solo un vector pseudónimo (128 floats face-api, no
+// reversible a imagen) + la imagen del gemelo sintético ya anonimizado. En cada
+// pase se busca el vecino más cercano (distancia euclídea); si cae bajo umbral,
+// es la MISMA persona → se reusa su gemelo (re-identificado entre cámaras/visitas).
+// AVISO RGPD: un embedding re-identificable es un dato biométrico → esto es
+// PSEUDONIMIZACIÓN (no anonimato total): exige consentimiento/señalética,
+// hash salado y retención corta antes de producción.
+const TWIN_REG_KEY = 'twin:registry';
+const TWIN_THRESHOLD = 0.5; // face-api: distancia < ~0.5 ≈ misma persona
+
+function twinDist(a, b) {
+  let s = 0; const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { const d = a[i] - b[i]; s += d * d; }
+  return Math.sqrt(s);
+}
+async function twinLoadReg(env) {
+  try { return JSON.parse((await env.SIGNAGE_KV.get(TWIN_REG_KEY)) || '[]'); } catch { return []; }
+}
+async function twinSaveReg(env, reg) {
+  await env.SIGNAGE_KV.put(TWIN_REG_KEY, JSON.stringify(reg.slice(-500))); // cap demo
+}
+function twinValidVec(v) { return Array.isArray(v) && v.length >= 64 && v.every(x => Number.isFinite(+x)); }
+
+// POST /twin/match { embedding:[128], threshold? } → {matched, id?, seen?, dist?, twinImage?}
+async function twinMatchHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const vec = twinValidVec(b.embedding) ? b.embedding.map(Number) : null;
+  if (!vec) return json({ error: 'bad-embedding' }, { status: 400 });
+  const thr = Number(b.threshold) > 0 ? Number(b.threshold) : TWIN_THRESHOLD;
+  const reg = await twinLoadReg(env);
+  let best = null, bestD = Infinity;
+  for (const e of reg) { if (!Array.isArray(e.vec)) continue; const d = twinDist(vec, e.vec); if (d < bestD) { bestD = d; best = e; } }
+  if (best && bestD <= thr) {
+    best.seen = (best.seen || 1) + 1; best.ts = Date.now();
+    await twinSaveReg(env, reg);
+    let img = null; try { img = await env.SIGNAGE_KV.get('twin:img:' + best.id); } catch (e) {}
+    return json({ matched: true, id: best.id, seen: best.seen, dist: +bestD.toFixed(3), twinImage: img || null });
+  }
+  return json({ matched: false, dist: best ? +bestD.toFixed(3) : null, count: reg.length });
+}
+
+// POST /twin/save { embedding:[128], twinImage(dataURL)? } → {id} (acuña gemelo nuevo)
+async function twinSaveHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const vec = twinValidVec(b.embedding) ? b.embedding.map(Number) : null;
+  if (!vec) return json({ error: 'bad-embedding' }, { status: 400 });
+  const id = 'tw_' + crypto.randomUUID().slice(0, 8);
+  const reg = await twinLoadReg(env);
+  reg.push({ id, vec, seen: 1, ts: Date.now() });
+  await twinSaveReg(env, reg);
+  if (b.twinImage) { try { await env.SIGNAGE_KV.put('twin:img:' + id, String(b.twinImage).slice(0, 2000000), { expirationTtl: 60 * 60 * 24 * 30 }); } catch (e) {} }
+  return json({ ok: true, id, count: reg.length });
+}
+
+// GET /twin/list → metadatos sin vectores ni imágenes (debug/demo)
+async function twinListHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const reg = await twinLoadReg(env);
+  return json({ count: reg.length, twins: reg.map(e => ({ id: e.id, seen: e.seen, ts: e.ts, dims: (e.vec || []).length })) });
+}
+
+// POST /twin/reset → vacía el registro (solo demo)
+async function twinResetHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const reg = await twinLoadReg(env);
+  for (const e of reg) { try { await env.SIGNAGE_KV.delete('twin:img:' + e.id); } catch (x) {} }
+  await env.SIGNAGE_KV.put(TWIN_REG_KEY, '[]');
+  return json({ ok: true, cleared: reg.length });
+}
+
+// ─── Cola "Enviar a la tienda": NPCs sprite que el gemelo spawnea andando ───
+// El Anonimizador encola un sprite 8-bit (dataURL pequeño) y el gemelo sondea
+// /twin/spawn/pending?since=<ts> y mete ese NPC en la tienda.
+const NPC_QUEUE_KEY = 'twin:spawn:queue';
+async function npcSpawnHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const img = String(b.image || '');
+  if (!/^data:image\//.test(img)) return json({ error: 'bad-image' }, { status: 400 });
+  if (img.length > 1500000) return json({ error: 'image-too-big' }, { status: 413 });
+  const id = 'npc_' + crypto.randomUUID().slice(0, 8);
+  // name puede traer la AUDIENCIA empaquetada ("Anónimo||{json sex/age/desc}") → 300
+  // chars para que el JSON del segmento NO se trunque (antes 40 lo partía).
+  const entry = { id, img, ts: Date.now(), name: String(b.name || '').slice(0, 300), screen: String(b.screen || '').slice(0, 40) };
+  let q; try { q = JSON.parse((await env.SIGNAGE_KV.get(NPC_QUEUE_KEY)) || '[]'); } catch { q = []; }
+  q.push(entry); q = q.slice(-30); // cap defensivo
+  await env.SIGNAGE_KV.put(NPC_QUEUE_KEY, JSON.stringify(q));
+  return json({ ok: true, id, count: q.length });
+}
+async function npcPendingHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const since = Number(url.searchParams.get('since') || 0);
+  const screen = String(url.searchParams.get('screen') || '');
+  let q; try { q = JSON.parse((await env.SIGNAGE_KV.get(NPC_QUEUE_KEY)) || '[]'); } catch { q = []; }
+  const pending = q.filter(e => (e.ts || 0) > since && (!e.screen || !screen || e.screen === screen));
+  return json({ ok: true, pending, now: Date.now() });
+}
+async function npcClearHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let q; try { q = JSON.parse((await env.SIGNAGE_KV.get(NPC_QUEUE_KEY)) || '[]'); } catch { q = []; }
+  await env.SIGNAGE_KV.put(NPC_QUEUE_KEY, '[]');
+  return json({ ok: true, cleared: q.length });
+}
+
+// ─── Ack de recogida ──────────────────────────────────────────────
+// El gemelo confirma (POST /twin/spawn/ack) cuando spawnea el NPC y lo mete
+// paseando por la tienda. Guardamos un sello por id (TTL 1 h) que el Anonimizador
+// sondea (GET /twin/spawn/status?id=) para saber que el NPC YA está en la tienda
+// — no solo encolado. Idempotente: si varios gemelos lo recogen, basta el primero.
+const NPC_ACK_PREFIX = 'twin:ack:';
+async function npcAckHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const id = String(b.id || '').slice(0, 40);
+  if (!/^npc_[a-z0-9-]{4,}$/i.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  const screen = String(b.screen || '').slice(0, 40);
+  await env.SIGNAGE_KV.put(NPC_ACK_PREFIX + id, JSON.stringify({ at: Date.now(), screen }), { expirationTtl: 3600 });
+  return json({ ok: true });
+}
+async function npcStatusHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const id = String(url.searchParams.get('id') || '').slice(0, 40);
+  if (!id) return json({ error: 'bad-id' }, { status: 400 });
+  let a = null; try { a = JSON.parse((await env.SIGNAGE_KV.get(NPC_ACK_PREFIX + id)) || 'null'); } catch { a = null; }
+  return json({ ok: true, consumed: !!a, at: (a && a.at) || null, screen: (a && a.screen) || null });
 }
 
 // ─── Proxy de imágenes externas para el editor de pixeria ──────────
@@ -2129,7 +2277,7 @@ async function stockTrackHandler(req, env, ctx, id) {
 //                            size, thumbnail, url, createdAt)
 // Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
 // Sin KV → sin límite de 1000 writes/día en Workers Free.
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni'];
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 function b64ToBytes(b64) {
@@ -3442,6 +3590,28 @@ async function agoraEnqueueDirect(env, identity, text, who, chat, command) {
   return { identity, persona, text: item.text };
 }
 
+// POST /agora/enqueue {key,agent|identity,text,who?,chat?,command?}
+// Entrada directa para herramientas MCP y automatizaciones no-Telegram.
+async function agoraEnqueueHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
+  const target = b.identity && AGORA_IDENTITIES.includes(b.identity)
+    ? { identity: b.identity, persona: agoraPersonaNameForIdentity(b.identity) }
+    : agoraTargetFromArg(b.agent || b.persona || '');
+  if (!target) return json({ error: 'bad-agent' }, { status: 400 });
+  const text = String(b.text || '').trim();
+  if (!text) return json({ error: 'missing-text' }, { status: 400 });
+  const routed = await agoraEnqueueDirect(
+    env,
+    target.identity,
+    text,
+    b.who || b.origin || 'Admira Live MCP',
+    b.chat,
+    b.command || '/mcp',
+  );
+  return json({ ok: true, ...routed });
+}
+
 async function agoraHookHandler(req, env, url, ctx) {
   if (req.method !== 'POST') return json({ ok: true });
   const identity = url.searchParams.get('id') || '';
@@ -3632,6 +3802,51 @@ async function layoutCurrentHandler(req, env, url) {
   if (screen) rec = await agoraKvGet(env, `layout:current:${screen}`, null);
   if (!rec && client) rec = await agoraKvGet(env, `layout:current:client:${client}`, null);
   return json({ current: rec || null });
+}
+
+// ─── CLI KEYLESS del Xtanco (EN VIVO) ─────────────────────────────────────
+// Canal SIN clave para el CLI de pixeria cuando está EN VIVO con un Xpacio (mismo
+// modelo de confianza que /layout/*: worker keyless del ecosistema, scoping por
+// pantalla). pixeria encola un comando (POST /twin/cmd), el gemelo de ese punto lo
+// sondea (GET /twin/cmd?screen=&since=) y lo ejecuta vía xtAPI; devuelve el resultado
+// (POST /twin/result) que pixeria recoge (GET /twin/result?screen=&id=).
+async function twinCmdPostHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(b.screen || '').slice(0, 60);
+  const text = String(b.text || '').trim().slice(0, 200);
+  if (!screen || !/^[a-z0-9_-]+$/i.test(screen) || !text) return json({ error: 'missing-screen-or-text' }, { status: 400 });
+  const now = Date.now();
+  const list = await agoraKvGet(env, `twincmd:${screen}`, []);
+  list.push({ id: now, text, ts: now });
+  await agoraKvPut(env, `twincmd:${screen}`, list.slice(-30), now);
+  return json({ ok: true, id: now });
+}
+async function twinCmdGetHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  const since = Number(url.searchParams.get('since') || 0);
+  if (!screen) return json({ commands: [] });
+  const list = await agoraKvGet(env, `twincmd:${screen}`, []);
+  return json({ commands: list.filter(c => c.id > since).slice(0, 10) });
+}
+async function twinResultPostHandler(req, env) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(b.screen || '').slice(0, 60);
+  const id = Number(b.id || 0);
+  if (!screen || !id) return json({ error: 'missing' }, { status: 400 });
+  const now = Date.now();
+  const map = await agoraKvGet(env, `twinres:${screen}`, {});
+  map[id] = { text: String(b.text || '').slice(0, 3900), ts: now };
+  const ids = Object.keys(map).map(Number).sort((a, c) => a - c);
+  while (ids.length > 20) { delete map[ids.shift()]; }
+  await agoraKvPut(env, `twinres:${screen}`, map, now);
+  return json({ ok: true });
+}
+async function twinResultGetHandler(req, env, url) {
+  const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
+  const id = String(url.searchParams.get('id') || '');
+  if (!screen || !id) return json({ result: null });
+  const map = await agoraKvGet(env, `twinres:${screen}`, {});
+  return json({ result: map[id] || null });
 }
 
 // ─── MONEDERO DEL XPACIO (Marketplace: comprar muebles con créditos) ──
@@ -3845,6 +4060,24 @@ export default {
         res = await xaiImageHandler(req, env);
       } else if (path === '/image/edit' && req.method === 'POST') {
         res = await imageEditHandler(req, env);
+      } else if (path === '/twin/match' && req.method === 'POST') {
+        res = await twinMatchHandler(req, env);
+      } else if (path === '/twin/save' && req.method === 'POST') {
+        res = await twinSaveHandler(req, env);
+      } else if (path === '/twin/list' && req.method === 'GET') {
+        res = await twinListHandler(req, env);
+      } else if (path === '/twin/reset' && req.method === 'POST') {
+        res = await twinResetHandler(req, env);
+      } else if (path === '/twin/spawn' && req.method === 'POST') {
+        res = await npcSpawnHandler(req, env);
+      } else if (path === '/twin/spawn/pending' && req.method === 'GET') {
+        res = await npcPendingHandler(req, env, url);
+      } else if (path === '/twin/spawn/clear' && req.method === 'POST') {
+        res = await npcClearHandler(req, env);
+      } else if (path === '/twin/spawn/ack' && req.method === 'POST') {
+        res = await npcAckHandler(req, env);
+      } else if (path === '/twin/spawn/status' && req.method === 'GET') {
+        res = await npcStatusHandler(req, env, url);
       } else if (path === '/image/proxy' && req.method === 'GET') {
         res = await imageProxyHandler(req);
       } else if (path === '/xai/video' && req.method === 'POST') {
@@ -3866,6 +4099,8 @@ export default {
         res = await agoraFeedHandler(req, env, url, ctx);
       } else if (path === '/agora/hook' && req.method === 'POST') {
         res = await agoraHookHandler(req, env, url, ctx);
+      } else if (path === '/agora/enqueue' && req.method === 'POST') {
+        res = await agoraEnqueueHandler(req, env);
       } else if (path === '/agora/tg-test' && req.method === 'GET') {
         res = await agoraTgTestHandler(req, env, url);
       } else if (path === '/agora/config') {
@@ -3934,6 +4169,14 @@ export default {
         res = await layoutPendingHandler(req, env, url);
       } else if (path === '/layout/report' && req.method === 'POST') {
         res = await layoutReportHandler(req, env);
+      } else if (path === '/twin/cmd' && req.method === 'POST') {
+        res = await twinCmdPostHandler(req, env);
+      } else if (path === '/twin/cmd' && req.method === 'GET') {
+        res = await twinCmdGetHandler(req, env, url);
+      } else if (path === '/twin/result' && req.method === 'POST') {
+        res = await twinResultPostHandler(req, env);
+      } else if (path === '/twin/result' && req.method === 'GET') {
+        res = await twinResultGetHandler(req, env, url);
       } else if (path === '/layout/current' && req.method === 'GET') {
         res = await layoutCurrentHandler(req, env, url);
       } else if (path === '/xpacio' && req.method === 'GET') {
