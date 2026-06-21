@@ -4013,6 +4013,60 @@ async function agoraActivityMonitor(env) {
   }
 }
 
+
+// ─── Audiencia de cámara (gemelo XpaceOS → /audience): presencia + género + edad.
+//     Agrega por loc/pantalla/día; clearchannel.tv lo cruza con /emit/range.
+async function audienceSaveHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const screen = (String(b.screen || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 48)) || (loc + '-led');
+  const d = new Date();
+  const date = String(d.getUTCFullYear()) + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0');
+  const faces = Math.max(0, Math.round(+b.faces || 0));
+  const gender = (b.gender === 'male' || b.gender === 'female') ? b.gender : '';
+  const gscore = +b.genderScore || 0;
+  const ageBucket = ['nino', 'joven', 'adulto', 'senior'].includes(b.ageBucket) ? b.ageBucket : '';
+  const emotion = String(b.emotion || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 16);
+  const key = 'aud:' + loc + ':' + screen + ':' + date;
+  let agg = {};
+  try { agg = JSON.parse(await env.SIGNAGE_KV.get(key)) || {}; } catch (e) {}
+  agg.date = date; agg.loc = loc; agg.screen = screen;
+  agg.samples = (agg.samples || 0) + 1;
+  agg.facesPeak = Math.max(agg.facesPeak || 0, faces);
+  if (faces > 0) {
+    agg.present = (agg.present || 0) + 1;
+    agg.facesSum = (agg.facesSum || 0) + faces;
+    agg.gender = agg.gender || { male: 0, female: 0 };
+    if (gender && gscore >= 0.6) agg.gender[gender] = (agg.gender[gender] || 0) + 1;
+    if (ageBucket) { agg.age = agg.age || {}; agg.age[ageBucket] = (agg.age[ageBucket] || 0) + 1; }
+    if (emotion) { agg.emotion = agg.emotion || {}; agg.emotion[emotion] = (agg.emotion[emotion] || 0) + 1; }
+  }
+  agg.lastTs = Date.now();
+  try { await env.SIGNAGE_KV.put(key, JSON.stringify(agg).slice(0, 24000), { expirationTtl: 40 * 24 * 3600 }); } catch (e) {}
+  return json({ ok: true, screen, date, samples: agg.samples, present: agg.present || 0 });
+}
+
+async function audienceRangeHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const loc = String(url.searchParams.get('loc') || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  const prefix = 'aud:' + loc + ':';
+  const screens = {}; let cursor, n = 0;
+  do {
+    const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 });
+    for (const k of list.keys) {
+      const rest = k.name.slice(prefix.length); const li = rest.lastIndexOf(':');
+      if (li < 0) continue;
+      const screen = rest.slice(0, li), dt = rest.slice(li + 1);
+      const v = await env.SIGNAGE_KV.get(k.name);
+      if (v) { try { (screens[screen] = screens[screen] || {})[dt] = JSON.parse(v); } catch (e) {} }
+      if (++n > 2000) break;
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor && n <= 2000);
+  return json({ ok: true, loc, screens });
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
@@ -4067,6 +4121,10 @@ export default {
         res = await emitSaveHandler(req, env);
       } else if (path === '/emit/range' && req.method === 'GET') {
         res = await emitRangeHandler(req, env, url);
+      } else if (path === '/audience' && req.method === 'POST') {
+        res = await audienceSaveHandler(req, env);
+      } else if (path === '/audience/range' && req.method === 'GET') {
+        res = await audienceRangeHandler(req, env, url);
       } else if (path === '/grid/day' && req.method === 'GET') {
         res = await gridDayHandler(req, env, url);
       } else if (path === '/grid/config') {
