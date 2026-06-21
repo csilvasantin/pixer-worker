@@ -183,6 +183,10 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
+  '/emit', // proof-of-play de admira.tv: POST cada ~12s por pantalla — no spamear Telegram
+  '/emit/range', // lectura del informe (GET) — no notificar
+  '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
+  '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/stock/reasset', // reproceso de transparencia en lote: no notificar cada uno
