@@ -1751,7 +1751,7 @@ async function signageNowGetHandler(req, env, url) {
   try { stored = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
   const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
-  return json({ ok: true, screen, item: item || null });
+  return json({ ok: true, screen, item: item || null, ip: (stored && stored.__ip) || null, lastSeen: (stored && stored.__w) || null });
 }
 
 async function signageNowPostHandler(req, env) {
@@ -1776,7 +1776,7 @@ async function signageNowPostHandler(req, env) {
     return json({ ok: true, screen, throttled: 'budget' });
   }
   try {
-    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig }), { expirationTtl: SIGNAGE_NOW_TTL });
+    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig, __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
   } catch (e) {
     return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
   }
