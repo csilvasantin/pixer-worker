@@ -2572,6 +2572,26 @@ async function rebuildStockIndex(env) {
     } catch { return null; }
   }))).filter(Boolean);
 
+  // NÚMERO ÚNICO PERSISTENTE por asset (#N, para /play<N> y referencia humana).
+  // El publish no asigna num; aquí, contador monotónico = max(num existentes)+1,
+  // asignado a los que aún no lo tienen en ORDEN DE CREACIÓN (más antiguo = menor)
+  // y persistido en su meta.json. Autosana cualquier asset publicado sin num.
+  // Determinista (mismo orden por createdAt) → rebuilds concurrentes dan el mismo
+  // num al mismo asset (idempotente, sin duplicados).
+  let maxNum = 0;
+  for (const m of metas) { const n = +m.num; if (Number.isFinite(n) && n > maxNum) maxNum = n; }
+  const numberless = metas
+    .filter(m => m && (m.num == null || !Number.isFinite(+m.num) || +m.num <= 0))
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  for (const m of numberless) {
+    m.num = ++maxNum;
+    try {
+      await env.STOCK_BUCKET.put(`stock/${m.id}/meta.json`, JSON.stringify(m), {
+        httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+      });
+    } catch { /* si la escritura falla, el índice igual lleva el num; se reintenta en el próximo rebuild */ }
+  }
+
   metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   const items = metas.map(m => ({
     ...m,
@@ -4345,6 +4365,11 @@ export default {
         res = await telegramSetupHandler(req, env, url);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
+      } else if (path === '/stock/reindex' && req.method === 'POST') {
+        // Reconstruye el índice (asigna num a los assets sin él) bajo demanda. Auth NOTIFY_KEY.
+        let _b = {}; try { _b = await req.json(); } catch {}
+        if (!env.NOTIFY_KEY || _b.secret !== env.NOTIFY_KEY) { res = json({ error: 'unauthorized' }, { status: 401 }); }
+        else { await rebuildStockIndex(env); res = json({ ok: true, reindexed: true }); }
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {
