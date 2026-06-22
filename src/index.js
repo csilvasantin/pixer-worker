@@ -4077,6 +4077,78 @@ async function audienceRangeHandler(req, env, url) {
   return json({ ok: true, loc, screens });
 }
 
+// ─── /grid/playlist + /screen/cache — pseudo-streaming (Fase A) ──────────────
+// El servidor decide qué piezas puede emitir/descargar cada pantalla (playlist
+// AUTORITATIVA y FINITA): parrilla (own/sold de /grid) + assets de sus reglas de
+// segmentación (omnipublicity-api) resueltos a URL vía el índice público del Stock.
+// El player pre-descarga ESA lista (Cache API) y reporta su estado a /screen/cache;
+// el CMS lo pinta. Reutiliza los helpers de /grid (gridGetBookings/gridScreen/…).
+const GRID_OMNIP_API = 'https://omnipublicity-api.csilvasantin.workers.dev';
+async function gridStockIndexMap(env) {
+  try {
+    const r = await fetch(GRID_R2_PUBLIC + '/stock/index.json', { cf: { cacheTtl: 60 } });
+    if (!r.ok) return new Map();
+    const d = await r.json(); const arr = Array.isArray(d) ? d : (d.items || []);
+    const m = new Map(); for (const it of arr) if (it && it.id) m.set(String(it.id), it); return m;
+  } catch (e) { return new Map(); }
+}
+async function gridFetchSeg(target) {
+  try {
+    const r = await fetch(GRID_OMNIP_API + '/segmentation?target=' + encodeURIComponent(target) + '&t=' + Date.now(), { cf: { cacheTtl: 10 } });
+    if (!r.ok) return null; return await r.json();
+  } catch (e) { return null; }
+}
+async function gridPlaylistHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const screen = gridScreen(url.searchParams.get('screen')); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
+  const date = gridDate(url.searchParams.get('date')) || gridNow().ymd;
+  const seg = String(url.searchParams.get('seg') || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+  const items = [], seenUrl = new Set();
+  const add = (it) => { if (it && it.url && !seenUrl.has(it.url)) { seenUrl.add(it.url); items.push(it); } };
+  // 1) Parrilla: contenido propio + vendido (lo programado de verdad para esa pantalla).
+  const bookings = await gridGetBookings(env, screen, date);
+  for (const b of bookings) {
+    if (!['own', 'sold', 'accepted'].includes(b.status)) continue;
+    const c = b.creative; if (!c || !c.url) continue;
+    add({ id: b.id, url: c.url, type: c.type || 'image', title: b.title || c.name || b.advertiser || 'Parrilla', source: 'grid', advertiser: b.advertiser || null, bandId: b.bandId || null });
+  }
+  // 2) Segmentación: los assets concretos de sus reglas (propias o, si no, la global).
+  if (seg) {
+    let mtx = await gridFetchSeg(seg);
+    if (!mtx || !(mtx.rules || []).length) mtx = await gridFetchSeg('all');
+    const ids = new Set();
+    if (mtx) {
+      for (const r of (mtx.rules || [])) for (const a of (r.assets || [])) ids.add(String(a));
+      for (const a of ((mtx.default && mtx.default.assets) || [])) ids.add(String(a));
+    }
+    if (ids.size) {
+      const idx = await gridStockIndexMap(env);
+      for (const id of ids) { const s = idx.get(id); if (s && s.url) add({ id, url: s.url, type: s.type || 'image', title: s.title || '', source: 'seg' }); }
+    }
+  }
+  return json({ ok: true, screen, date: gridFmtDate(date), total: items.length, items, generatedAt: Date.now() });
+}
+async function screenCacheHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (req.method === 'GET') {
+    const screen = gridScreen(url.searchParams.get('screen')); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
+    let s = null; try { s = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
+    return json({ ok: true, screen, cache: s });
+  }
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = gridScreen(b.screen); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
+  const ready = Array.isArray(b.ready) ? b.ready.map(x => String(x).slice(0, 80)).slice(0, 300) : [];
+  const downloading = Array.isArray(b.downloading) ? b.downloading.slice(0, 50).map(x => ({ id: String((x && x.id) || '').slice(0, 80), pct: Math.max(0, Math.min(100, (x && x.pct) | 0)) })) : [];
+  const rec = { ready, readyCount: ready.length, total: Math.max(0, b.total | 0), downloading, bytes: Math.max(0, b.bytes | 0), at: Date.now() };
+  const now = Date.now(), sig = JSON.stringify({ r: ready, t: rec.total, d: downloading.length });
+  let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
+  if (prev && prev.__sig === sig && (now - (prev.at || 0)) < 60000) return json({ ok: true, screen, throttled: 'unchanged' });
+  rec.__sig = sig;
+  if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: 'budget' });
+  try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: 600 }); } catch (e) {}
+  return json({ ok: true, screen, readyCount: rec.readyCount, total: rec.total });
+}
+
 export default {
   // Cron de respaldo (wrangler.toml → [triggers]): reconstruye stock/index.json
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
@@ -4155,6 +4227,10 @@ export default {
         res = await gridUploadHandler(req, env, url);
       } else if (path === '/grid/screens' && req.method === 'GET') {
         res = await gridScreensHandler(req, env);
+      } else if (path === '/grid/playlist' && req.method === 'GET') {
+        res = await gridPlaylistHandler(req, env, url);
+      } else if (path === '/screen/cache' && (req.method === 'GET' || req.method === 'POST')) {
+        res = await screenCacheHandler(req, env, url);
       } else if (path === '/segcpm' && req.method === 'GET') {
         res = await segCpmGetHandler(req, env, url);
       } else if (path === '/segcpm' && (req.method === 'PUT' || req.method === 'POST')) {
