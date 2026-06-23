@@ -185,6 +185,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
   '/emit', // proof-of-play de admira.tv: POST cada ~12s por pantalla — no spamear Telegram
   '/emit/range', // lectura del informe (GET) — no notificar
+  '/screen/cache', // estado de pre-descarga del player (pseudo-streaming): POST cada ~30s por pantalla — no spamear Telegram
+  '/grid/playlist', // lista del player que acompaña a /screen/cache — polling frecuente
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
