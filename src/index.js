@@ -614,6 +614,34 @@ async function gridScreensHandler(req, env) {
   catch (e) { return json({ error: 'kv-list-failed' }, { status: 502 }); }
   return json({ ok: true, screens });
 }
+// ── Canales/proyectos: agrupan circuitos (CanalKiosk, CanalMetro, Canal AdmiraNeXT…) ──
+const GRID_PROJECTS_DEFAULT = [
+  { id: 'admiranext', name: 'Canal AdmiraNeXT', circuits: ['admiranext', 'admira', 'robot'] },
+  { id: 'kiosk', name: 'CanalKiosk', circuits: ['kiosko'] },
+  { id: 'metro', name: 'CanalMetro', circuits: ['metro'] },
+];
+function gridCleanProjects(arr) {
+  if (!Array.isArray(arr)) return null;
+  const out = arr.map(p => ({
+    id: gridCircuit(p && p.id),
+    name: String((p && p.name) || '').slice(0, 60),
+    circuits: Array.isArray(p && p.circuits) ? p.circuits.map(c => gridCircuit(c)).filter(Boolean).slice(0, 40) : [],
+  })).filter(p => p.id && p.name);
+  return out.slice(0, 60);
+}
+async function gridProjectsHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (req.method === 'GET') {
+    let p = null; try { p = JSON.parse(await env.SIGNAGE_KV.get('grid:projects') || 'null'); } catch (e) {}
+    return json({ ok: true, projects: (Array.isArray(p) && p.length) ? p : GRID_PROJECTS_DEFAULT });
+  }
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
+  const clean = gridCleanProjects(b.projects);
+  if (!clean) return json({ error: 'bad-projects' }, { status: 400 });
+  await env.SIGNAGE_KV.put('grid:projects', JSON.stringify(clean).slice(0, 16000));
+  return json({ ok: true, projects: clean });
+}
 async function gridUploadHandler(req, env, url) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!gridKeyOk(env, { key: url.searchParams.get('key') })) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
@@ -4249,6 +4277,8 @@ export default {
         res = await gridUploadHandler(req, env, url);
       } else if (path === '/grid/screens' && req.method === 'GET') {
         res = await gridScreensHandler(req, env);
+      } else if (path === '/grid/projects') {
+        res = await gridProjectsHandler(req, env);
       } else if (path === '/grid/playlist' && req.method === 'GET') {
         res = await gridPlaylistHandler(req, env, url);
       } else if (path === '/screen/cache' && (req.method === 'GET' || req.method === 'POST')) {
