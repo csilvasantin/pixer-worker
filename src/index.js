@@ -31,6 +31,8 @@ const ALLOWED_ORIGINS = [
   'https://www.admira.live',
   'https://admira.tv',
   'https://www.admira.tv',
+  'https://admiranext.com',
+  'https://www.admiranext.com',
   'https://carlossilva.info',
   'https://www.carlossilva.info',
   'http://localhost:8765',
