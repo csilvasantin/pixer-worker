@@ -525,6 +525,38 @@ async function gridDayHandler(req, env, url) {
   const cfg = await gridGetConfig(env, screen); const bookings = await gridGetBookings(env, screen, date);
   return json(Object.assign({ ok: true, screen, date: gridFmtDate(date) }, gridComputeDay(cfg, bookings, date, now)));
 }
+// Resumen ligero de ocupación por día para un rango (lo usa el calendario anual del CMS).
+// Una sola petición devuelve N días × M pantallas sin el detalle de slots → carga un año
+// de un tirado. Solo lectura; CORS abierto como el resto de /grid.
+async function gridRangeHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 400 });
+  const raw = url.searchParams.get('screens') || url.searchParams.get('screen') || '';
+  const screens = raw.split(',').map(s => gridScreen(s.trim())).filter(Boolean);
+  if (!screens.length) return json({ error: 'missing-screen' }, { status: 400 });
+  const from = gridDate(url.searchParams.get('from')), to = gridDate(url.searchParams.get('to')); // 8 dígitos YYYYMMDD
+  if (!from || !to) return json({ error: 'missing-from-to' }, { status: 400 });
+  const toISO = s => s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+  const d0 = new Date(toISO(from) + 'T00:00:00Z'), d1 = new Date(toISO(to) + 'T00:00:00Z');
+  if (isNaN(d0) || isNaN(d1) || d1 < d0) return json({ error: 'bad-range' }, { status: 400 });
+  const MAX = 400; // tope ~13 meses
+  const ymds = []; // claves de KV en 8 dígitos
+  for (let d = new Date(d0); d <= d1 && ymds.length < MAX; d.setUTCDate(d.getUTCDate() + 1)) {
+    ymds.push(d.toISOString().slice(0, 10).replace(/-/g, ''));
+  }
+  const now = gridNow();
+  const out = {};
+  for (const screen of screens) {
+    const cfg = await gridGetConfig(env, screen);
+    const cap = cfg.bands.reduce((s, b) => s + b.capacity, 0);
+    const rows = await Promise.all(ymds.map(async ymd => {
+      const bookings = await gridGetBookings(env, screen, ymd);
+      const t = gridComputeDay(cfg, bookings, ymd, now).totals;
+      return { date: gridFmtDate(ymd), own: t.ownSlots, paid: t.paidSlots, pending: t.pendingSlots, total: t.totalSlots, occ: t.occupancy };
+    }));
+    out[screen] = { name: cfg.name, capacity: cap, bandsPerDay: cfg.bands.length, days: rows };
+  }
+  return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: ymds.length, screens: out });
+}
 function gridBandSpace(cfg, bookings, bandId, exceptId) {
   const band = cfg.bands.find(x => x.id === bandId); if (!band) return null;
   const used = bookings.filter(x => x.id !== exceptId && x.bandId === bandId && (x.status === 'own' || x.status === 'accepted' || x.status === 'sold')).reduce((s, x) => s + gridSlots(x), 0);
@@ -4261,6 +4293,8 @@ export default {
         res = await audienceRangeHandler(req, env, url);
       } else if (path === '/grid/day' && req.method === 'GET') {
         res = await gridDayHandler(req, env, url);
+      } else if (path === '/grid/range' && req.method === 'GET') {
+        res = await gridRangeHandler(req, env, url);
       } else if (path === '/grid/config') {
         res = await gridConfigHandler(req, env, url);
       } else if (path === '/grid/book' && req.method === 'POST') {
