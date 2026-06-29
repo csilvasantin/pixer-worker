@@ -586,6 +586,30 @@ async function gridSalesHandler(req, env, url) {
   let revenue = 0; sales.forEach(s => revenue += s.revenue);
   return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: sales.length, revenue: Math.round(revenue * 100) / 100, sales });
 }
+// Alertas: dispositivo programado hoy pero SIN emitir (player caído). Corre en el cron
+// */10; avisa a Telegram una vez por dispositivo/día (dedup en KV). Watchlist fija v1.
+const ALERT_WATCH = [{ loc: 'xtanco-valencia', screens: ['xtanco-valencia-a', 'xtanco-valencia-b', 'xtanco-valencia-c', 'xtanco-valencia-d', 'xtanco-valencia-musica'] }];
+async function gridAlertsCheck(env, ctx) {
+  if (!env.SIGNAGE_KV) return;
+  const now = gridNow(); const hh = parseInt(now.hhmm, 10) || 0;
+  if (hh < 13 || hh > 23) return; // solo de tarde/noche, cuando ya debería haber emitido
+  for (const w of ALERT_WATCH) {
+    for (const screen of w.screens) {
+      try {
+        const flagKey = `alert:noemit:${screen}:${now.ymd}`;
+        if (await env.SIGNAGE_KV.get(flagKey)) continue;
+        const bookings = await gridGetBookings(env, screen, now.ymd);
+        const programmed = bookings.some(b => b.status === 'own' || b.status === 'accepted' || b.status === 'sold');
+        if (!programmed) continue;
+        let plays = 0; try { const e = JSON.parse(await env.SIGNAGE_KV.get(`emit:${w.loc}:${screen}:${now.ymd}`) || 'null'); plays = (e && e.totalPlays) || 0; } catch (_) {}
+        if (plays === 0) {
+          notify(ctx, env, `🚨 <b>Alerta de emisión</b>\n<code>${screen}</code> está <b>programado</b> pero <b>no ha emitido nada</b> a las ${now.hhmm} (¿player caído?).\nXpacio: ${w.loc}`);
+          await env.SIGNAGE_KV.put(flagKey, '1', { expirationTtl: 129600 });
+        }
+      } catch (_) {}
+    }
+  }
+}
 function gridBandSpace(cfg, bookings, bandId, exceptId) {
   const band = cfg.bands.find(x => x.id === bandId); if (!band) return null;
   const used = bookings.filter(x => x.id !== exceptId && x.bandId === bandId && (x.status === 'own' || x.status === 'accepted' || x.status === 'sold')).reduce((s, x) => s + gridSlots(x), 0);
@@ -4273,6 +4297,7 @@ export default {
     } else {
       ctx.waitUntil(rebuildStockIndex(env));
       ctx.waitUntil(maybeDailyReport(env));
+      ctx.waitUntil(gridAlertsCheck(env, ctx));
     }
   },
 
