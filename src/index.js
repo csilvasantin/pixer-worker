@@ -586,6 +586,52 @@ async function gridSalesHandler(req, env, url) {
   let revenue = 0; sales.forEach(s => revenue += s.revenue);
   return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: sales.length, revenue: Math.round(revenue * 100) / 100, sales });
 }
+// Exporta la parrilla como iCalendar (.ics) — para suscribir/importar en Google Calendar.
+async function gridIcsHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return new Response('kv-not-bound', { status: 500 });
+  const raw = url.searchParams.get('screens') || url.searchParams.get('screen') || '';
+  const screens = raw.split(',').map(s => gridScreen(s.trim())).filter(Boolean);
+  if (!screens.length) return new Response('missing-screen', { status: 400 });
+  const now = gridNow();
+  let from = gridDate(url.searchParams.get('from')) || now.ymd;
+  const toISO = s => s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+  let to = gridDate(url.searchParams.get('to'));
+  if (!to) { const d = new Date(toISO(from) + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 60); to = d.toISOString().slice(0, 10).replace(/-/g, ''); }
+  const d0 = new Date(toISO(from) + 'T00:00:00Z'), d1 = new Date(toISO(to) + 'T00:00:00Z');
+  const MAX = 120, ymds = [];
+  for (let d = new Date(d0); d <= d1 && ymds.length < MAX; d.setUTCDate(d.getUTCDate() + 1)) ymds.push(d.toISOString().slice(0, 10).replace(/-/g, ''));
+  const esc = s => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+  const hm = t => String(t || '00:00').replace(':', '') + '00';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Admira//CMS Emision//ES', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Admira · Emisión', 'X-WR-TIMEZONE:Europe/Madrid'];
+  const stamp = now.ymd + 'T' + hm(now.hhmm).slice(0, 4) + '00Z';
+  for (const screen of screens) {
+    const cfg = await gridGetConfig(env, screen); const bandMap = {}; cfg.bands.forEach(b => bandMap[b.id] = b);
+    for (const ymd of ymds) {
+      const bks = await gridGetBookings(env, screen, ymd);
+      for (const b of bks) {
+        if (!(b.status === 'own' || b.status === 'accepted' || b.status === 'sold')) continue;
+        const band = bandMap[b.bandId]; if (!band) continue;
+        const cr = b.creative || {}; const kind = b.status === 'own' ? 'propio' : 'vendido';
+        lines.push('BEGIN:VEVENT',
+          'UID:' + esc((b.id || (screen + '-' + ymd + '-' + b.bandId))) + '@admira.tv',
+          'DTSTAMP:' + stamp,
+          'DTSTART;TZID=Europe/Madrid:' + ymd + 'T' + hm(band.from),
+          'DTEND;TZID=Europe/Madrid:' + ymd + 'T' + hm(band.to),
+          'SUMMARY:' + esc((cfg.name || screen) + ' · ' + (b.title || kind)),
+          'DESCRIPTION:' + esc(kind + (b.advertiser ? (' · ' + b.advertiser) : '') + (cr.url ? ('\n' + cr.url) : '')),
+          'CATEGORIES:' + esc(cfg.circuit || 'admira'),
+          'X-ADMIRA-SCREEN:' + esc(screen),
+          'X-ADMIRA-BAND:' + esc(b.bandId),
+          'X-ADMIRA-KIND:' + esc(b.status),
+          'X-ADMIRA-CREATIVE-URL:' + esc(cr.url || ''),
+          'X-ADMIRA-CREATIVE-TYPE:' + esc(cr.type || ''),
+          'END:VEVENT');
+      }
+    }
+  }
+  lines.push('END:VCALENDAR');
+  return new Response(lines.join('\r\n'), { headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' } });
+}
 // Alertas: dispositivo programado hoy pero SIN emitir (player caído). Corre en el cron
 // */10; avisa a Telegram una vez por dispositivo/día (dedup en KV). Watchlist fija v1.
 const ALERT_WATCH = [{ loc: 'xtanco-valencia', screens: ['xtanco-valencia-a', 'xtanco-valencia-b', 'xtanco-valencia-c', 'xtanco-valencia-d', 'xtanco-valencia-musica'] }];
@@ -4351,6 +4397,8 @@ export default {
         res = await gridRangeHandler(req, env, url);
       } else if (path === '/grid/sales' && req.method === 'GET') {
         res = await gridSalesHandler(req, env, url);
+      } else if (path === '/grid/ics' && req.method === 'GET') {
+        res = await gridIcsHandler(req, env, url);
       } else if (path === '/grid/config') {
         res = await gridConfigHandler(req, env, url);
       } else if (path === '/grid/book' && req.method === 'POST') {
