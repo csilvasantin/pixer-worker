@@ -551,7 +551,7 @@ async function gridRangeHandler(req, env, url) {
     const rows = await Promise.all(ymds.map(async ymd => {
       const bookings = await gridGetBookings(env, screen, ymd);
       const t = gridComputeDay(cfg, bookings, ymd, now).totals;
-      return { date: gridFmtDate(ymd), own: t.ownSlots, paid: t.paidSlots, pending: t.pendingSlots, total: t.totalSlots, occ: t.occupancy };
+      return { date: gridFmtDate(ymd), own: t.ownSlots, paid: t.paidSlots, pending: t.pendingSlots, total: t.totalSlots, occ: t.occupancy, revenue: t.revenue };
     }));
     out[screen] = { name: cfg.name, capacity: cap, bandsPerDay: cfg.bands.length, days: rows };
   }
