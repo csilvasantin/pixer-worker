@@ -464,7 +464,7 @@ function gridNow() {
 }
 function gridCleanCreative(c) {
   if (!c || typeof c !== 'object') return null;
-  const type = ['video', 'image', 'audio'].includes(c.type) ? c.type : 'image';
+  const type = ['video', 'image', 'audio', 'animation', 'music', 'locucion'].includes(c.type) ? c.type : 'image';
   const url = (typeof c.url === 'string' && /^https?:\/\//.test(c.url)) ? c.url.slice(0, 500) : '';
   if (!url) return null;
   return { type, url, name: String(c.name || '').slice(0, 120) };
