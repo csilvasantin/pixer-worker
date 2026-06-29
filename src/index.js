@@ -557,6 +557,35 @@ async function gridRangeHandler(req, env, url) {
   }
   return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: ymds.length, screens: out });
 }
+// Detalle de VENTAS (slots accepted/sold) por rango — para el informe del CMS.
+async function gridSalesHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 400 });
+  const raw = url.searchParams.get('screens') || url.searchParams.get('screen') || '';
+  const screens = raw.split(',').map(s => gridScreen(s.trim())).filter(Boolean);
+  if (!screens.length) return json({ error: 'missing-screen' }, { status: 400 });
+  const from = gridDate(url.searchParams.get('from')), to = gridDate(url.searchParams.get('to'));
+  if (!from || !to) return json({ error: 'missing-from-to' }, { status: 400 });
+  const toISO = s => s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8);
+  const d0 = new Date(toISO(from) + 'T00:00:00Z'), d1 = new Date(toISO(to) + 'T00:00:00Z');
+  if (isNaN(d0) || isNaN(d1) || d1 < d0) return json({ error: 'bad-range' }, { status: 400 });
+  const MAX = 400, ymds = [];
+  for (let d = new Date(d0); d <= d1 && ymds.length < MAX; d.setUTCDate(d.getUTCDate() + 1)) ymds.push(d.toISOString().slice(0, 10).replace(/-/g, ''));
+  const sales = [];
+  for (const screen of screens) {
+    const cfg = await gridGetConfig(env, screen);
+    await Promise.all(ymds.map(async ymd => {
+      const bks = await gridGetBookings(env, screen, ymd);
+      for (const b of bks) {
+        if (b.status === 'accepted' || b.status === 'sold') {
+          const rev = (+b.price || 0) || ((+b.cpm || 0) * gridSlots(b));
+          sales.push({ date: gridFmtDate(ymd), screen, screenName: cfg.name, bandId: b.bandId, advertiser: b.advertiser || '—', title: b.title || '', category: b.category || null, cpm: +b.cpm || 0, slots: gridSlots(b), revenue: Math.round(rev * 100) / 100, offer: !!b.offer });
+        }
+      }
+    }));
+  }
+  let revenue = 0; sales.forEach(s => revenue += s.revenue);
+  return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: sales.length, revenue: Math.round(revenue * 100) / 100, sales });
+}
 function gridBandSpace(cfg, bookings, bandId, exceptId) {
   const band = cfg.bands.find(x => x.id === bandId); if (!band) return null;
   const used = bookings.filter(x => x.id !== exceptId && x.bandId === bandId && (x.status === 'own' || x.status === 'accepted' || x.status === 'sold')).reduce((s, x) => s + gridSlots(x), 0);
@@ -4295,6 +4324,8 @@ export default {
         res = await gridDayHandler(req, env, url);
       } else if (path === '/grid/range' && req.method === 'GET') {
         res = await gridRangeHandler(req, env, url);
+      } else if (path === '/grid/sales' && req.method === 'GET') {
+        res = await gridSalesHandler(req, env, url);
       } else if (path === '/grid/config') {
         res = await gridConfigHandler(req, env, url);
       } else if (path === '/grid/book' && req.method === 'POST') {
