@@ -601,10 +601,29 @@ async function payHandler(req, env, ctx) {
   const declined = last4 === '0002'; // tarjeta de prueba de rechazo (Stripe 4000 0000 0000 0002)
   const status = declined ? 'declined' : 'paid';
   const rec = { id, amount, currency: 'EUR', brand, last4, status, advertiser: String(b.advertiser || '').slice(0, 80), order: b.order || null, createdAt: new Date(ts).toISOString() };
+  if (declined) {
+    if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('pay:' + ts + ':' + id, JSON.stringify(rec), { expirationTtl: 60 * 60 * 24 * 365 });
+    notify(ctx, env, `💳 <b>PAGO</b> ❌ rechazado · €${amount} · ${escHtml(brand)} ••${last4}`);
+    return json({ ok: false, status, id, error: 'card-declined' }, { status: 402 });
+  }
+  // aprobado → reservar los slots pagados en el servidor (sin exponer GRID_KEY al comprador)
+  let booked = 0; const o = b.order || {};
+  try {
+    const screens = (o.screens || []).map(gridScreen).filter(Boolean);
+    const dates = (o.dates || []).map(gridDate).filter(Boolean);
+    const bands = (o.bands || []).map(x => String(x));
+    if (env.SIGNAGE_KV && screens.length && dates.length && bands.length && o.creative) {
+      for (const screen of screens) for (const date of dates) {
+        const bookings = await gridGetBookings(env, screen, date);
+        for (const bandId of bands) { bookings.push({ id: 'bk_' + gridRid(), bandId, slots: 1, status: 'sold', advertiser: rec.advertiser || 'Anunciante', title: o.creative.name || 'Campaña', category: o.creative.category || null, creative: gridCleanCreative(o.creative), cpm: +o.cpm || 0, price: +o.price || 0, paymentId: id, createdAt: Date.now() }); booked++; }
+        await gridPutBookings(env, screen, date, bookings);
+      }
+    }
+  } catch (_) {}
+  rec.booked = booked;
   if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('pay:' + ts + ':' + id, JSON.stringify(rec), { expirationTtl: 60 * 60 * 24 * 365 });
-  notify(ctx, env, `💳 <b>PAGO</b> ${declined ? '❌ rechazado' : '✅ cobrado'} · €${amount} · ${escHtml(brand)} ••${last4}${rec.advertiser ? (' · ' + escHtml(rec.advertiser)) : ''}`);
-  if (declined) return json({ ok: false, status, id, error: 'card-declined' }, { status: 402 });
-  return json({ ok: true, status, id, amount, last4, brand, receipt: rec });
+  notify(ctx, env, `💳 <b>PAGO</b> ✅ cobrado · €${amount} · ${escHtml(brand)} ••${last4}${rec.advertiser ? (' · ' + escHtml(rec.advertiser)) : ''} · ${booked} pase(s)`);
+  return json({ ok: true, status, id, amount, last4, brand, booked, receipt: rec });
 }
 async function payListHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ ok: true, payments: [] });
