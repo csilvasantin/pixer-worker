@@ -586,6 +586,35 @@ async function gridSalesHandler(req, env, url) {
   let revenue = 0; sales.forEach(s => revenue += s.revenue);
   return json({ ok: true, from: gridFmtDate(from), to: gridFmtDate(to), count: sales.length, revenue: Math.round(revenue * 100) / 100, sales });
 }
+// ─── Pago con tarjeta (compra de campañas por anunciantes) ───────────────────
+// Procesador propio verificable: aprueba tarjetas válidas (Luhn lo valida el front),
+// rechaza la tarjeta de prueba ••0002, registra el pago en KV y avisa por Telegram.
+// NUNCA recibe el PAN completo (solo brand+last4). Si algún día hay STRIPE_SECRET_KEY,
+// aquí se haría el PaymentIntent real (mismo contrato de salida).
+async function payHandler(req, env, ctx) {
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const amount = Math.round((+b.amount || 0) * 100) / 100;
+  const last4 = String(b.last4 || '').replace(/\D/g, '').slice(-4);
+  const brand = String(b.brand || 'card').slice(0, 20);
+  if (amount <= 0 || last4.length !== 4) return json({ error: 'bad-amount-or-card' }, { status: 400 });
+  const id = 'pay_' + gridRid(), ts = Date.now();
+  const declined = last4 === '0002'; // tarjeta de prueba de rechazo (Stripe 4000 0000 0000 0002)
+  const status = declined ? 'declined' : 'paid';
+  const rec = { id, amount, currency: 'EUR', brand, last4, status, advertiser: String(b.advertiser || '').slice(0, 80), order: b.order || null, createdAt: new Date(ts).toISOString() };
+  if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('pay:' + ts + ':' + id, JSON.stringify(rec), { expirationTtl: 60 * 60 * 24 * 365 });
+  notify(ctx, env, `💳 <b>PAGO</b> ${declined ? '❌ rechazado' : '✅ cobrado'} · €${amount} · ${escHtml(brand)} ••${last4}${rec.advertiser ? (' · ' + escHtml(rec.advertiser)) : ''}`);
+  if (declined) return json({ ok: false, status, id, error: 'card-declined' }, { status: 402 });
+  return json({ ok: true, status, id, amount, last4, brand, receipt: rec });
+}
+async function payListHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ ok: true, payments: [] });
+  const list = await env.SIGNAGE_KV.list({ prefix: 'pay:', limit: 200 });
+  const keys = list.keys.map(k => k.name).sort().reverse().slice(0, 100);
+  const payments = [];
+  for (const k of keys) { try { payments.push(JSON.parse(await env.SIGNAGE_KV.get(k))); } catch (_) {} }
+  let total = 0; payments.forEach(p => { if (p.status === 'paid') total += p.amount || 0; });
+  return json({ ok: true, count: payments.length, total: Math.round(total * 100) / 100, payments });
+}
 // Exporta la parrilla como iCalendar (.ics) — para suscribir/importar en Google Calendar.
 async function gridIcsHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return new Response('kv-not-bound', { status: 500 });
@@ -4399,6 +4428,10 @@ export default {
         res = await gridSalesHandler(req, env, url);
       } else if (path === '/grid/ics' && req.method === 'GET') {
         res = await gridIcsHandler(req, env, url);
+      } else if (path === '/pay' && req.method === 'POST') {
+        res = await payHandler(req, env, ctx);
+      } else if (path === '/pay/list' && req.method === 'GET') {
+        res = await payListHandler(req, env, url);
       } else if (path === '/grid/config') {
         res = await gridConfigHandler(req, env, url);
       } else if (path === '/grid/book' && req.method === 'POST') {
