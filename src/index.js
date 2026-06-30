@@ -634,6 +634,33 @@ async function payListHandler(req, env, url) {
   let total = 0; payments.forEach(p => { if (p.status === 'paid') total += p.amount || 0; });
   return json({ ok: true, count: payments.length, total: Math.round(total * 100) / 100, payments });
 }
+// ─── Segmentación (cámara→contenido): matriz de reglas por target en KV ───────
+const segKey = t => 'seg:rules:' + String(t || 'all').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 80);
+async function segmentationHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const target = url.searchParams.get('target') || 'all';
+  if (req.method === 'POST') {
+    let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    const rules = Array.isArray(b.rules) ? b.rules.slice(0, 200) : [];
+    await env.SIGNAGE_KV.put(segKey(target), JSON.stringify({ target, rules, updatedAt: Date.now() }).slice(0, 100000));
+    return json({ ok: true, target, count: rules.length });
+  }
+  let rec = null; try { rec = JSON.parse(await env.SIGNAGE_KV.get(segKey(target)) || 'null'); } catch (_) {}
+  return json(rec || { target, rules: [] });
+}
+async function segAssignedHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ assigned: [] });
+  const l = await env.SIGNAGE_KV.list({ prefix: 'seg:rules:', limit: 500 });
+  return json({ assigned: l.keys.map(k => k.name.slice('seg:rules:'.length)) });
+}
+async function segHitsHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ hits: [] });
+  if (req.method === 'POST') { let b; try { b = await req.json(); } catch { b = {}; } const ts = Date.now(); await env.SIGNAGE_KV.put('seg:hit:' + ts, JSON.stringify(Object.assign({}, b, { ts })).slice(0, 4000), { expirationTtl: 172800 }); return json({ ok: true }); }
+  const l = await env.SIGNAGE_KV.list({ prefix: 'seg:hit:', limit: 50 });
+  const keys = l.keys.map(k => k.name).sort().reverse().slice(0, 40); const hits = [];
+  for (const k of keys) { try { hits.push(JSON.parse(await env.SIGNAGE_KV.get(k))); } catch (_) {} }
+  return json({ hits });
+}
 // Exporta la parrilla como iCalendar (.ics) — para suscribir/importar en Google Calendar.
 async function gridIcsHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return new Response('kv-not-bound', { status: 500 });
@@ -4323,11 +4350,9 @@ async function gridStockIndexMap(env) {
     const m = new Map(); for (const it of arr) if (it && it.id) m.set(String(it.id), it); return m;
   } catch (e) { return new Map(); }
 }
-async function gridFetchSeg(target) {
-  try {
-    const r = await fetch(GRID_OMNIP_API + '/segmentation?target=' + encodeURIComponent(target) + '&t=' + Date.now(), { cf: { cacheTtl: 10 } });
-    if (!r.ok) return null; return await r.json();
-  } catch (e) { return null; }
+async function gridFetchSeg(target, env) {
+  try { if (env && env.SIGNAGE_KV) return JSON.parse(await env.SIGNAGE_KV.get(segKey(target)) || 'null'); } catch (e) {}
+  return null;
 }
 async function gridPlaylistHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -4345,8 +4370,8 @@ async function gridPlaylistHandler(req, env, url) {
   }
   // 2) Segmentación: los assets concretos de sus reglas (propias o, si no, la global).
   if (seg) {
-    let mtx = await gridFetchSeg(seg);
-    if (!mtx || !(mtx.rules || []).length) mtx = await gridFetchSeg('all');
+    let mtx = await gridFetchSeg(seg, env);
+    if (!mtx || !(mtx.rules || []).length) mtx = await gridFetchSeg('all', env);
     const ids = new Set();
     if (mtx) {
       for (const r of (mtx.rules || [])) for (const a of (r.assets || [])) ids.add(String(a));
@@ -4447,6 +4472,12 @@ export default {
         res = await gridSalesHandler(req, env, url);
       } else if (path === '/grid/ics' && req.method === 'GET') {
         res = await gridIcsHandler(req, env, url);
+      } else if (path === '/segmentation/assigned' && req.method === 'GET') {
+        res = await segAssignedHandler(req, env);
+      } else if (path === '/segmentation/hits') {
+        res = await segHitsHandler(req, env);
+      } else if (path === '/segmentation') {
+        res = await segmentationHandler(req, env, url);
       } else if (path === '/pay' && req.method === 'POST') {
         res = await payHandler(req, env, ctx);
       } else if (path === '/pay/list' && req.method === 'GET') {
