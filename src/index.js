@@ -328,6 +328,41 @@ async function daProxyHandler(req, env) {
 
 // ── Resumen diario del Xpacio (calendario histórico del gemelo) ────
 // El gemelo guarda al cerrar cada día sus KPIs reales en KV (day:<loc>:<YYYYMMDD>);
+// ─── Newsletter Pixeria (captura de emails del radar) ──────────────────────
+// Guarda en SIGNAGE_KV: `newsletter:sub:<email>` = registro; `newsletter:count`
+// = entero (prueba social). Lo consume pixeria.com/assets/newsletter.js.
+function newsletterValidEmail(e) {
+  return typeof e === 'string' && e.length <= 160 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+async function newsletterSubscribeHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const email = String(b.email || '').trim().toLowerCase();
+  if (!newsletterValidEmail(email)) return json({ error: 'bad-email' }, { status: 400 });
+  const key = `newsletter:sub:${email}`;
+  const existing = await env.SIGNAGE_KV.get(key);
+  if (existing) return json({ ok: true, status: 'already' });
+  const rec = {
+    email,
+    source: String(b.source || 'pixeria').slice(0, 40),
+    ref: String(b.ref || '').slice(0, 120),
+    ts: Date.now(),
+  };
+  try { await env.SIGNAGE_KV.put(key, JSON.stringify(rec)); }
+  catch (e) { return json({ error: 'kv-put-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  // Contador best-effort (KV no es atómico; suficiente para la prueba social).
+  try {
+    const n = parseInt(await env.SIGNAGE_KV.get('newsletter:count'), 10) || 0;
+    await env.SIGNAGE_KV.put('newsletter:count', String(n + 1));
+  } catch { /* no bloquea el alta */ }
+  return json({ ok: true, status: 'subscribed' });
+}
+async function newsletterCountHandler(req, env) {
+  let n = 0;
+  try { n = parseInt(await env.SIGNAGE_KV.get('newsletter:count'), 10) || 0; } catch { /* 0 */ }
+  return json({ count: n });
+}
+
 // el calendario los lee por rango para mostrar datos reales en vez de estimación.
 async function daySaveHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -4560,6 +4595,10 @@ export default {
         res = await geminiHandler(req, env);
       } else if (path === '/idea' && req.method === 'POST') {
         res = await ideaHandler(req, env);
+      } else if (path === '/newsletter/subscribe' && req.method === 'POST') {
+        res = await newsletterSubscribeHandler(req, env);
+      } else if (path === '/newsletter/count' && req.method === 'GET') {
+        res = await newsletterCountHandler(req, env);
       } else if (path === '/agora/presence') {
         res = await agoraPresenceHandler(req, env, url);
       } else if (path === '/agora/feed') {
