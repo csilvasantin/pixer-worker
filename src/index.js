@@ -2027,6 +2027,45 @@ async function signageNowGetHandler(req, env, url) {
   return json({ ok: true, screen, item: item || null, ip: (stored && stored.__ip) || null, lastSeen: (stored && stored.__w) || null });
 }
 
+// EMISIÓN VISIBLE — cuando /signage/now trae loc/locName (el player de canal.html
+// ya sabe su circuito), reflejamos la pantalla en el MISMO registro screen:<id>
+// que escribe el heartbeat de signage.html y que sirve /signage/screens. Así el
+// player de canal aparece en la vista viva unificada "qué equipo emite qué ahora"
+// sin necesitar un heartbeat aparte. Reutiliza la ruta de código del heartbeat
+// (change-detection + reserveKvWrite + índice). Retrocompatible: sin loc/locName
+// es un no-op y el POST sigue comportándose exactamente igual que antes.
+async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
+  const loc = (body && body.loc || '').toString().slice(0, 60);
+  const locName = (body && body.locName || '').toString().slice(0, 80);
+  if (!loc && !locName) return;                 // sin loc → no tocamos el registro
+  let prev = null;
+  try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
+  const data = Object.assign({}, prev || {}, {
+    screen,
+    last_seen: now,
+    user_agent: ((req && req.headers.get('User-Agent')) || (prev && prev.user_agent) || '').slice(0, 200),
+    showing_id: (item && item.id) || (prev && prev.showing_id) || null,
+    role: (body.role || (prev && prev.role) || 'canal').toString().slice(0, 40),
+    version: (body.version || (prev && prev.version) || '').toString().slice(0, 40),
+    loc,
+    locName,
+  });
+  const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.showing_id !== data.showing_id;
+  const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
+  if (!changed && !stale) return;               // igual y reciente → no gastamos KV
+  if (!(await reserveKvWrite(env, now))) return;
+  try {
+    await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
+    let index = [];
+    try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
+    if (!index.includes(screen)) {
+      index.push(screen);
+      if (index.length > 100) index = index.slice(-100);
+      if (await reserveKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+    }
+  } catch {}
+}
+
 async function signageNowPostHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   let body;
@@ -2053,7 +2092,10 @@ async function signageNowPostHandler(req, env) {
   } catch (e) {
     return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
   }
-  return json({ ok: true, screen });
+  // Emisión visible: si el POST trae loc/locName, refleja la pantalla en el
+  // registro screen:<id> que sirve /signage/screens. No rompe el POST si falla.
+  try { await nowUpsertScreenLoc(env, screen, body, item, now, req); } catch {}
+  return json({ ok: true, screen, loc: (body.loc || '').toString().slice(0, 60) || null });
 }
 
 // ─── /notify — endpoint para la rutina "actualización" ──────────────
