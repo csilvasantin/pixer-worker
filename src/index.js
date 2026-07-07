@@ -326,6 +326,30 @@ async function daProxyHandler(req, env) {
   return new Response(await up.arrayBuffer(), { status: up.status, headers });
 }
 
+// ── Passthrough /locations* → omnipublicity-api (tarea #4) ─────────
+// El registro de sitios (alta.html) y la vista de flota (cms.html) hablan con
+// omnipublicity-api.csilvasantin.workers.dev/locations*, que Cloudflare/el ISP
+// BLOQUEA a las máquinas españolas. Este proxy lo re-sirve por api.admira.store
+// (mismo dominio que el resto del backbone /grid, no bloqueado). Reenvía método,
+// query, headers relevantes y body tal cual, y devuelve la respuesta sin tocar.
+// Usa el service binding env.OMNI (misma malla interna que /da/*) para esquivar
+// el error 1042 worker→worker; si no está, cae a fetch directo. La CORS la pone
+// el wrapper de fetch() (corsHeaders, por whitelist) igual que el resto.
+async function locationsProxyHandler(req, env) {
+  const u = new URL(req.url);
+  const target = DA_UPSTREAM + u.pathname + u.search;   // p.ej. /locations/register?selfreg=1
+  const init = { method: req.method, headers: {} };
+  const ct = req.headers.get('Content-Type'); if (ct) init.headers['Content-Type'] = ct;
+  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.arrayBuffer();
+  let up;
+  try { up = (env && env.OMNI) ? await env.OMNI.fetch(new Request(target, init)) : await fetch(target, init); }
+  catch (e) { return json({ ok: false, error: 'locations-upstream-failed', detail: String(e).slice(0, 160) }, { status: 502 }); }
+  const headers = new Headers();
+  const upct = up.headers.get('Content-Type'); if (upct) headers.set('Content-Type', upct);
+  headers.set('Cache-Control', 'no-store');
+  return new Response(await up.arrayBuffer(), { status: up.status, headers });
+}
+
 // ── Resumen diario del Xpacio (calendario histórico del gemelo) ────
 // El gemelo guarda al cerrar cada día sus KPIs reales en KV (day:<loc>:<YYYYMMDD>);
 // ─── Newsletter Pixeria (captura de emails del radar) ──────────────────────
@@ -2096,6 +2120,33 @@ async function signageNowPostHandler(req, env) {
   // registro screen:<id> que sirve /signage/screens. No rompe el POST si falla.
   try { await nowUpsertScreenLoc(env, screen, body, item, now, req); } catch {}
   return json({ ok: true, screen, loc: (body.loc || '').toString().slice(0, 60) || null });
+}
+
+// ─── /signage/assign — cablear un player huérfano a su circuito (tarea #4) ──
+// POST { key, screen, loc, locName? } → fija loc/locName en el registro
+// screen:<id> SIN falsear una emisión (no toca el puntero now:). Reutiliza
+// nowUpsertScreenLoc (lee-modifica-escribe sobre el registro existente), así el
+// player huérfano aparece en la vista viva "EN EMISIÓN — AHORA" con su circuito.
+// Mismo patrón de auth que /grid/book (GRID_KEY). Idempotente y retrocompatible:
+// si el registro ya tiene ese loc y es reciente, es un no-op (sin gasto de KV).
+async function signageAssignHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
+  const screen = String(b.screen || '').slice(0, 60);
+  if (!/^[a-z0-9_-]+$/i.test(screen)) return json({ error: 'bad-screen' }, { status: 400 });
+  const loc = (b.loc || '').toString().slice(0, 60);
+  const locName = (b.locName || '').toString().slice(0, 80);
+  if (!loc && !locName) return json({ error: 'missing-loc' }, { status: 400 });
+  // Sólo tiene sentido cablear un player que ya existe en el registro (huérfano).
+  // Si no existe screen:<id>, nowUpsertScreenLoc lo crea igualmente (merge sobre {}),
+  // lo cual es aceptable: fija identidad para cuando ese player empiece a latir.
+  const now = Date.now();
+  try { await nowUpsertScreenLoc(env, screen, b, null, now, req); } catch (e) {
+    return json({ ok: false, error: 'assign-failed', detail: String(e).slice(0, 120) }, { status: 502 });
+  }
+  let rec = null; try { rec = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
+  return json({ ok: true, screen, loc, locName, record: rec });
 }
 
 // ─── /notify — endpoint para la rutina "actualización" ──────────────
@@ -4527,6 +4578,8 @@ export default {
         res = await ttsHandler(req, env);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
         res = await daProxyHandler(req, env);
+      } else if ((path === '/locations' || path.startsWith('/locations/')) && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE' || req.method === 'PUT')) {
+        res = await locationsProxyHandler(req, env);
       } else if (path === '/day/save' && req.method === 'POST') {
         res = await daySaveHandler(req, env);
       } else if (path === '/day/range' && req.method === 'GET') {
@@ -4693,6 +4746,8 @@ export default {
         res = await signageNowGetHandler(req, env, url);
       } else if (path === '/signage/now' && req.method === 'POST') {
         res = await signageNowPostHandler(req, env);
+      } else if (path === '/signage/assign' && req.method === 'POST') {
+        res = await signageAssignHandler(req, env);
       } else if (path === '/notify' && req.method === 'POST') {
         res = await notifyHandler(req, env, ctx);
       } else if (path === '/telegram/webhook' && req.method === 'POST') {
