@@ -1951,6 +1951,13 @@ async function signageHeartbeatHandler(req, env) {
     // aunque el cliente pingue cada 20s, KV se escribe como mucho ~1 vez/90s.
     let prev = null;
     try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
+    // loc/locName PEGAJOSOS (sticky): un heartbeat sin loc explícito NO debe
+    // blanquear la asignación de /signage/assign. Solo un body con loc/locName
+    // no-vacío puede cambiarlos; si el beat no los trae, conservamos el previo.
+    // Retrocompatible: players viejos (role xtore-game) que no mandan loc dejan
+    // de deshacer las asignaciones en su siguiente latido.
+    if (!data.loc && prev && prev.loc) data.loc = prev.loc;
+    if (!data.locName && prev && prev.locName) data.locName = prev.locName;
     const changed = !prev || prev.showing_id !== data.showing_id ||
                     prev.role !== data.role || prev.version !== data.version ||
                     prev.loc !== data.loc;
