@@ -1912,8 +1912,16 @@ async function reserveKvWrite(env, now) {
     const wkey = 'kvbudget-warned:' + new Date(now).toISOString().slice(0, 10);
     try {
       if (!(await env.SIGNAGE_KV.get(wkey))) {
+        // IMPORTANTE: AWAIT el envío antes de marcar el flag. Antes se lanzaba
+        // fire-and-forget (sendTelegram(...).catch()) SIN ctx.waitUntil — pero
+        // reserveKvWrite no recibe ctx, así que al devolver la Response el
+        // runtime de Workers cancelaba el fetch a Telegram a medio vuelo. El
+        // flag "warned" ya quedaba persistido → nunca reintentaba → el aviso
+        // del 80% no llegaba (esto pasó hoy con el runaway). sendTelegram/
+        // sendTelegramVia no lanzan (try/catch interno + no-op sin token), así
+        // que awaitear es seguro y el flag se marca después pase lo que pase.
+        await sendTelegram(env, `⚠️ <b>KV writes al 80%</b> — ${used}/${cap} hoy (tope diario del cortacircuitos). Al llegar a ${cap} se pausan hasta el reset (00:00 UTC). Si es por escala real, sube <code>KV_DAILY_WRITE_CAP</code>; si no, revisa qué dispara escrituras.`);
         await env.SIGNAGE_KV.put(wkey, '1', { expirationTtl: 172800 });
-        sendTelegram(env, `⚠️ <b>KV writes al 80%</b> — ${used}/${cap} hoy (tope diario del cortacircuitos). Al llegar a ${cap} se pausan hasta el reset (00:00 UTC). Si es por escala real, sube <code>KV_DAILY_WRITE_CAP</code>; si no, revisa qué dispara escrituras.`).catch(() => {});
       }
     } catch {}
   }
@@ -2039,11 +2047,21 @@ async function signageClearHandler(req, env) {
 const SIGNAGE_NOW_TTL = 180;        // 3 min sin escritura → el puntero caduca
 const NOW_REFRESH_MS = 90 * 1000;   // si el item no cambió, reescribe como mucho cada 90s
 
-// Firma estable del item ignorando el campo volátil `ts` (que cambia en cada
-// keepalive aunque el contenido sea el mismo).
+// Firma de IDENTIDAD del item: SOLO campos estables que definen "qué pieza es"
+// (id/type/url y, si existe, dur). Se construye por allowlist para EXCLUIR
+// explícitamente todo campo volátil — `ts` (keepalive), `aud` (audiencia en vivo
+// de la cámara: faces/gender/age parpadean cada beat), `startedAt`, y cualquier
+// otro que el emisor añada. Así un keepalive de la MISMA pieza no dispara write
+// KV aunque la audiencia cambie; solo un cambio real de pieza (id/type/url/dur)
+// mueve la firma. La audiencia sigue viajando en el payload guardado (item), solo
+// queda fuera de la FIRMA de cambio. Este fix corta el runaway de escrituras KV.
+const NOW_SIG_FIELDS = ['id', 'type', 'url', 'dur'];
 function nowItemSig(item) {
   if (!item || typeof item !== 'object') return '';
-  const it = { ...item }; delete it.ts;
+  const it = {};
+  for (const k of NOW_SIG_FIELDS) {
+    if (item[k] !== undefined && item[k] !== null) it[k] = item[k];
+  }
   return JSON.stringify(it);
 }
 
