@@ -1928,6 +1928,17 @@ async function reserveKvWrite(env, now) {
   try { await env.SIGNAGE_KV.put(key, String(used + 2), { expirationTtl: 172800 }); } catch {}
   return true;
 }
+// Causa por la que reserveKvWrite acaba de devolver false, para que la respuesta
+// no mienta: durante el incidente del 2026-07-08 el kill-switch KV_WRITES_OFF
+// se reportó como throttled:'budget' con el contador diario a 72, y el
+// diagnóstico salió por el camino equivocado. Síncrono a propósito: kill-switch
+// y binding se leen de env, y si no es ninguno de los dos la única causa
+// restante en reserveKvWrite es el tope diario.
+function kvWriteDenyReason(env) {
+  if (String(env.KV_WRITES_OFF || '') === '1') return 'kill-switch';
+  if (!env.SIGNAGE_KV) return 'kv-not-bound';
+  return 'budget';
+}
 
 async function signageHeartbeatHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -1974,7 +1985,7 @@ async function signageHeartbeatHandler(req, env) {
       return json({ ok: true, last_seen: prev.last_seen, throttled: 'unchanged' });
     }
     if (!(await reserveKvWrite(env, now))) {
-      return json({ ok: true, last_seen: now, throttled: 'budget' });
+      return json({ ok: true, last_seen: now, throttled: kvWriteDenyReason(env) });
     }
     await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
     // Índice de pantallas: solo se escribe al aparecer una pantalla nueva (raro).
@@ -2134,7 +2145,7 @@ async function signageNowPostHandler(req, env) {
     return json({ ok: true, screen, throttled: 'unchanged' });
   }
   if (!(await reserveKvWrite(env, now))) {
-    return json({ ok: true, screen, throttled: 'budget' });
+    return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   }
   try {
     await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig, __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
@@ -4553,7 +4564,7 @@ async function screenCacheHandler(req, env, url) {
   let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
   if (prev && prev.__sig === sig && (now - (prev.at || 0)) < 60000) return json({ ok: true, screen, throttled: 'unchanged' });
   rec.__sig = sig;
-  if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: 'budget' });
+  if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: 600 }); } catch (e) {}
   return json({ ok: true, screen, readyCount: rec.readyCount, total: rec.total });
 }
