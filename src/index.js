@@ -980,8 +980,20 @@ async function campaignCreateHandler(req, env) {
     advertiser: String(b.advertiser || '').slice(0, 80),
     medio: String(b.medio || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20),
     stockId: String(b.stockId || '').replace(/[^a-z0-9]/gi, '').slice(0, 40),
-    category: String(b.category || '').toLowerCase().slice(0, 40),
-    slot: String(b.slot || '').toLowerCase().slice(0, 20) };
+    category: '', slot: '',
+    circuit: String(b.circuit || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) };
+  // slot/category contra enums (normalizando tildes/ñ: "mañana"→"manana").
+  // 400 con mensaje claro si no casan — antes era texto libre y fallaba en silencio.
+  if (b.slot) {
+    const slot = rtbNormEnum(b.slot);
+    if (!RTB_SLOTS.includes(slot)) return json({ error: 'bad-slot', got: String(b.slot).slice(0, 40), expected: RTB_SLOTS }, { status: 400 });
+    rec.slot = slot;
+  }
+  if (b.category) {
+    const category = rtbNormEnum(b.category);
+    if (!RTB_CATEGORIES.includes(category)) return json({ error: 'bad-category', got: String(b.category).slice(0, 40), expected: RTB_CATEGORIES }, { status: 400 });
+    rec.category = category;
+  }
   try { await env.SIGNAGE_KV.put(`camp:${loc}:${id}`, JSON.stringify(rec)); } catch (e) { return json({ error: 'kv-put-failed' }, { status: 502 }); }
   return json({ ok: true, campaign: rec });
 }
@@ -1025,12 +1037,21 @@ async function campaignDeleteHandler(req, env) {
 //       sustituye su feed simulado por esto).
 // CORS: admira.tv y clearchannel.tv ya están en ALLOWED_ORIGINS (wrapper global).
 
+// Enums de slot/category (los que emite el canal). Se comparan tras rtbNormEnum.
+const RTB_SLOTS = ['manana', 'mediodia', 'tarde', 'noche'];
+const RTB_CATEGORIES = ['atraer', 'producto', 'promo', 'marca'];
+// Normaliza texto libre a clave de enum: minúsculas, sin tildes/ñ ("mañana"→"manana").
+function rtbNormEnum(v) {
+  return String(v || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, '').slice(0, 20);
+}
 // Normaliza el age libre que manda el reproductor a las claves del gemelo.
+// 'vejez' (bucket 75+ de la cámara del canal) → senior: decisión de Neo — NO se
+// amplía SEG_CPM_KEYS hoy, senior absorbe 75+.
 function rtbNormAge(a) {
   const s = String(a || '').toLowerCase();
   if (/nin|child|kid|infan/.test(s)) return 'nino';
   if (/jov|young|teen/.test(s)) return 'joven';
-  if (/sen|elder|old|mayor|abuel/.test(s)) return 'senior';
+  if (/sen|elder|old|mayor|abuel|vejez/.test(s)) return 'senior';
   if (/adult|mid/.test(s)) return 'adulto';
   return '';
 }
@@ -1049,16 +1070,23 @@ function rtbSegKey(segment) {
   return (age && gen) ? `${age}_${gen}` : '';
 }
 // ¿La campaña c es candidata para esta impresión?
-function rtbMatch(c, reqSeg, segment) {
+function rtbMatch(c, reqSeg, segment, circuit) {
   if (!c || c.active === false) return false;
   if (!(+c.budget > 0)) return false;
   if (c.seg) {                          // campaña con targeting demográfico
-    if (reqSeg && c.seg !== reqSeg) return false;
+    // Segmento del request incompleto o no reconocido (reqSeg vacío) → EXCLUIR:
+    // una campaña targeted no puede colarse en impresiones sin segmento válido
+    // (bypass detectado por infraNeo en E2E; solo las catch-all sin seg compiten).
+    if (!reqSeg || c.seg !== reqSeg) return false;
   }
-  const cat = segment && String(segment.category || '').toLowerCase();
-  if (c.category && cat && c.category !== cat) return false;
-  const slot = segment && String(segment.slot || '').toLowerCase();
-  if (c.slot && slot && c.slot !== slot) return false;
+  // circuit OPCIONAL en la campaña: si lo declara, solo casa en ese circuito.
+  if (c.circuit && rtbNormEnum(circuit) !== c.circuit) return false;
+  // category/slot: misma normalización de enums a AMBOS lados (defensa en
+  // profundidad para campañas guardadas antes de la validación por enum).
+  const cat = segment ? rtbNormEnum(segment.category) : '';
+  if (c.category && cat && rtbNormEnum(c.category) !== cat) return false;
+  const slot = segment ? rtbNormEnum(segment.slot) : '';
+  if (c.slot && slot && rtbNormEnum(c.slot) !== slot) return false;
   return true;
 }
 async function rtbLoadCampaigns(env) {
@@ -1085,7 +1113,7 @@ async function rtbDecideHandler(req, env, url) {
   const reqSeg = rtbSegKey(segment);
 
   const cands = (await rtbLoadCampaigns(env))
-    .filter(c => rtbMatch(c, reqSeg, segment))
+    .filter(c => rtbMatch(c, reqSeg, segment, circuit))
     .sort((a, z) => (+z.cpm || 0) - (+a.cpm || 0));
   if (!cands.length) return json({ ok: false, reason: 'no_demand' });
 

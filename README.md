@@ -91,8 +91,21 @@ Más recientes primero; rellena con las de ayer al cruzar medianoche (zona Europ
 
 ### Campos opcionales de /campaign para RTB (retrocompatibles)
 `advertiser`, `medio` (p.ej. `led`,`dooh`,`totem`), `stockId` (resuelve `creativeUrl`
-contra el Stock si la campaña no trae uno propio), `category`, `slot`. `seg` pasa a ser
-**opcional** (vacío = sin targeting demográfico); si se envía uno debe seguir siendo válido.
+contra el Stock si la campaña no trae uno propio), `category`, `slot`, `circuit`. `seg` pasa
+a ser **opcional** (vacío = sin targeting demográfico); si se envía uno debe seguir siendo válido.
+
+- `slot` y `category` se validan contra **enums** (400 `bad-slot`/`bad-category` si no casan,
+  normalizando tildes/ñ — `"mañana"` se acepta y guarda como `manana`):
+  - `slot`: `manana` | `mediodia` | `tarde` | `noche`
+  - `category`: `atraer` | `producto` | `promo` | `marca`
+  La misma normalización se aplica en `/rtb/decide` al comparar (defensa en profundidad
+  para campañas guardadas antes de esta validación).
+- `circuit`: si la campaña lo declara, **solo casa** en decides de ese circuito (incluye
+  excluirla de decides sin `circuit`). Sin él, la campaña es run-of-network: compite en
+  todo circuito (comportamiento por defecto, decisión de Neo).
+- Buckets de edad del canal: `vejez` (cámara 75+) se normaliza a `senior` — no se amplía
+  `SEG_CPM_KEYS`. Un segmento **incompleto o irreconocible** en el decide NUNCA gana
+  campañas con targeting demográfico: solo compiten las catch-all sin `seg`.
 
 CORS: `admira.tv` y `clearchannel.tv` ya están en `ALLOWED_ORIGINS` (GET/POST + preflight).
 
