@@ -185,6 +185,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
+  '/signage/shot', // captura real de pantalla: POST ~1/8s por player + GET polling del panel — no spamear
   '/emit', // proof-of-play de admira.tv: POST cada ~12s por pantalla — no spamear Telegram
   '/emit/range', // lectura del informe (GET) — no notificar
   '/screen/cache', // estado de pre-descarga del player (pseudo-streaming): POST cada ~30s por pantalla — no spamear Telegram
@@ -2057,6 +2058,95 @@ async function signageMediaHandler(req, env, key) {
   }
   const status = object.body ? (req.headers.get('range') ? 206 : 200) : 304;
   return new Response(object.body, { status, headers });
+}
+
+// ─── /signage/shot — CAPTURA REAL de pantalla del player (fase 2) ─────────
+// El canal (admira.tv/canal.html) es PÚBLICO → no puede llevar token secreto.
+// Por eso SIN auth pero con validación FUERTE + rate-limit:
+//   POST { screen, img:"data:image/jpeg;base64,…" }
+//     · img DEBE empezar por data:image/jpeg;base64,
+//     · tamaño decodificado ≤ 150 KB
+//     · screen = slug corto no vacío
+//     · rate-limit ~1 subida / 8 s por screen (429 si va demasiado seguido)
+//     → R2 StockBucket key shots/<screen>.jpg (sobrescribe) + KV shotmeta:<screen> {ts,bytes}
+//     → { ok:true, ts }
+//   GET ?screen=X         → image/jpeg directa (Cache-Control:no-store, CORS). 404 {ok:false,reason:"no_shot"} si no hay.
+//   GET ?screen=X&meta=1  → { ok, ts, ageSeconds, bytes } (JSON, sin descargar la imagen)
+const SHOT_MAX_BYTES = 150 * 1024;          // 150 KB decodificado
+const SHOT_MIN_INTERVAL_MS = 8000;          // 1 subida / 8 s por screen
+const SHOT_PREFIX = 'data:image/jpeg;base64,';
+const SHOT_SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+// Bytes reales que codifica un base64 (sin decodificarlo), para validar tamaño barato.
+function b64DecodedLen(b64) {
+  const len = b64.length;
+  if (len < 4) return 0;
+  let pad = 0;
+  if (b64[len - 1] === '=') pad++;
+  if (b64[len - 2] === '=') pad++;
+  return Math.floor(len * 3 / 4) - pad;
+}
+
+async function signageShotPostHandler(req, env) {
+  if (!env.STOCK_BUCKET || !env.SIGNAGE_KV) return json({ ok: false, reason: 'storage-not-bound' }, { status: 500 });
+  let body = {};
+  try { body = await req.json(); } catch { return json({ ok: false, reason: 'bad-json' }, { status: 400 }); }
+  const screen = String(body.screen || '').trim();
+  const img = String(body.img || '');
+  if (!SHOT_SLUG_RE.test(screen)) return json({ ok: false, reason: 'bad-screen' }, { status: 400 });
+  if (!img.startsWith(SHOT_PREFIX)) return json({ ok: false, reason: 'bad-mime', expected: SHOT_PREFIX }, { status: 400 });
+  const b64 = img.slice(SHOT_PREFIX.length);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return json({ ok: false, reason: 'bad-base64' }, { status: 400 });
+  const bytes = b64DecodedLen(b64);
+  if (bytes <= 0) return json({ ok: false, reason: 'empty' }, { status: 400 });
+  if (bytes > SHOT_MAX_BYTES) return json({ ok: false, reason: 'too-large', bytes, max: SHOT_MAX_BYTES }, { status: 413 });
+
+  // Rate-limit por screen (KV shotmeta:<screen>.ts). KV es eventualmente
+  // consistente, pero para 1/8s basta: bloquea ráfagas del mismo player.
+  const metaKey = `shotmeta:${screen}`;
+  const now = Date.now();
+  let prev = null;
+  try { prev = await env.SIGNAGE_KV.get(metaKey, 'json'); } catch {}
+  if (prev && prev.ts && (now - prev.ts) < SHOT_MIN_INTERVAL_MS) {
+    return json({ ok: false, reason: 'rate-limited', retryMs: SHOT_MIN_INTERVAL_MS - (now - prev.ts) }, { status: 429 });
+  }
+
+  // Decodifica base64 → bytes reales para R2.
+  let raw;
+  try {
+    const bin = atob(b64);
+    raw = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+  } catch { return json({ ok: false, reason: 'decode-failed' }, { status: 400 }); }
+
+  await env.STOCK_BUCKET.put(`shots/${screen}.jpg`, raw, {
+    httpMetadata: { contentType: 'image/jpeg', cacheControl: 'no-store' },
+  });
+  await env.SIGNAGE_KV.put(metaKey, JSON.stringify({ ts: now, bytes }), { expirationTtl: 604800 });
+  return json({ ok: true, ts: now });
+}
+
+async function signageShotGetHandler(req, env, url) {
+  if (!env.STOCK_BUCKET || !env.SIGNAGE_KV) return json({ ok: false, reason: 'storage-not-bound' }, { status: 500 });
+  const screen = String(url.searchParams.get('screen') || '').trim();
+  if (!SHOT_SLUG_RE.test(screen)) return json({ ok: false, reason: 'bad-screen' }, { status: 400 });
+
+  if (url.searchParams.get('meta') === '1') {
+    let meta = null;
+    try { meta = await env.SIGNAGE_KV.get(`shotmeta:${screen}`, 'json'); } catch {}
+    if (!meta || !meta.ts) return json({ ok: false, reason: 'no_shot' }, { status: 404 });
+    return json({ ok: true, ts: meta.ts, ageSeconds: Math.round((Date.now() - meta.ts) / 1000), bytes: meta.bytes || 0 });
+  }
+
+  const obj = await env.STOCK_BUCKET.get(`shots/${screen}.jpg`);
+  if (!obj) return json({ ok: false, reason: 'no_shot' }, { status: 404 });
+  const headers = new Headers();
+  headers.set('Content-Type', 'image/jpeg');
+  headers.set('Cache-Control', 'no-store');
+  // ACAO:* para que el panel/canal pueda pintar la captura en <canvas> sin
+  // "tintarlo". El wrapper global respeta un ACAO:* puesto a propósito.
+  headers.set('Access-Control-Allow-Origin', '*');
+  return new Response(obj.body, { status: 200, headers });
 }
 
 // Heartbeat: cada signage.html abierto pinga periódicamente para que sepamos qué pantallas están vivas.
@@ -4967,6 +5057,10 @@ export default {
         res = await signageNowPostHandler(req, env);
       } else if (path === '/signage/assign' && req.method === 'POST') {
         res = await signageAssignHandler(req, env);
+      } else if (path === '/signage/shot' && req.method === 'POST') {
+        res = await signageShotPostHandler(req, env);
+      } else if (path === '/signage/shot' && req.method === 'GET') {
+        res = await signageShotGetHandler(req, env, url);
       } else if (path === '/notify' && req.method === 'POST') {
         res = await notifyHandler(req, env, ctx);
       } else if (path === '/telegram/webhook' && req.method === 'POST') {
