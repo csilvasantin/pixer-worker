@@ -2631,6 +2631,83 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
   const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
   await tgSend(env, chatId, `⚠️ La importación sigue sin resultado tras 9 min.\n<code>${escHtml(link)}</code>${savedLine}`);
 }
+// Detecta media ADJUNTA en un mensaje de Telegram (foto/vídeo/documento/animación/
+// audio pegados directamente, NO por URL). Devuelve {kind, fileId, mime} o null.
+// - photo: array de tamaños ordenado de menor a mayor → cogemos el ÚLTIMO (máx. resolución).
+// - document: respeta su mime_type (una imagen enviada «como archivo» conserva calidad).
+function pickTelegramMedia(msg) {
+  if (!msg) return null;
+  if (Array.isArray(msg.photo) && msg.photo.length) {
+    const big = msg.photo[msg.photo.length - 1];
+    return { kind: 'image', fileId: big.file_id, mime: 'image/jpeg' };
+  }
+  if (msg.document && msg.document.file_id) {
+    const mt = String(msg.document.mime_type || '').toLowerCase();
+    const kind = mt.startsWith('video/') ? 'video' : mt.startsWith('audio/') ? 'audio' : 'image';
+    return { kind, fileId: msg.document.file_id, mime: mt || 'application/octet-stream' };
+  }
+  if (msg.video && msg.video.file_id)     return { kind: 'video', fileId: msg.video.file_id, mime: msg.video.mime_type || 'video/mp4' };
+  if (msg.animation && msg.animation.file_id) return { kind: 'video', fileId: msg.animation.file_id, mime: msg.animation.mime_type || 'video/mp4' };
+  if (msg.audio && msg.audio.file_id)     return { kind: 'audio', fileId: msg.audio.file_id, mime: msg.audio.mime_type || 'audio/mpeg' };
+  if (msg.voice && msg.voice.file_id)     return { kind: 'audio', fileId: msg.voice.file_id, mime: msg.voice.mime_type || 'audio/ogg' };
+  return null;
+}
+
+// Descarga un adjunto de Telegram (getFile → file/bot<token>/<path>) y lo publica
+// en el Stock reutilizando /stock/publish (auto-tags Gemini, R2, índice). Base64 en
+// vez de sourceUrl para NO exponer el token del bot en la URL de origen.
+// Límite de la Bot API para descargas: 20 MB (los vídeos grandes van por URL/yt-dlp).
+async function handleTelegramAttachment(env, ctx, req, chatId, msg, media) {
+  const emoji = media.kind === 'image' ? '🖼️' : media.kind === 'video' ? '🎬' : '🎵';
+  const caption = (msg.caption || '').trim() || null;
+  await tgSend(env, chatId, `📥 Importando ${media.kind === 'image' ? 'imagen' : media.kind === 'video' ? 'vídeo' : 'audio'} ${emoji} adjunto…\n<i>te aviso al publicar en Stock.</i>`);
+  try {
+    const token = env.TELEGRAM_BOT_TOKEN;
+    const gf = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(media.fileId)}`);
+    const gj = await gf.json().catch(() => null);
+    if (!gf.ok || !gj || !gj.ok || !gj.result || !gj.result.file_path) {
+      const detail = `getFile ${gf.status} ${gj && gj.description ? gj.description : ''}`.trim();
+      await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-getfile', detail }).catch(() => null);
+      await tgSend(env, chatId, `⚠️ No pude leer el archivo adjunto: <code>${escHtml(detail)}</code>`);
+      return;
+    }
+    const filePath = gj.result.file_path;
+    const dl = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`);
+    if (!dl.ok) {
+      const detail = `download ${dl.status}`;
+      await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-download', detail }).catch(() => null);
+      await tgSend(env, chatId, `⚠️ No pude descargar el adjunto de Telegram (${dl.status}).`);
+      return;
+    }
+    const bytes = new Uint8Array(await dl.arrayBuffer());
+    if (bytes.length > 190 * 1024 * 1024) {
+      await tgSend(env, chatId, `⚠️ El adjunto pesa demasiado para el Stock (${(bytes.length/1024/1024).toFixed(1)} MB).`);
+      return;
+    }
+    // mime: el de Telegram si es fiable, si no lo deducimos de la extensión del file_path.
+    let mime = media.mime;
+    if (!mime || mime === 'application/octet-stream') {
+      const ext = (filePath.split('.').pop() || '').toLowerCase();
+      mime = ({ jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png', webp:'image/webp', gif:'image/gif',
+                mp4:'video/mp4', mov:'video/quicktime', webm:'video/webm',
+                mp3:'audio/mpeg', ogg:'audio/ogg', oga:'audio/ogg', wav:'audio/wav' })[ext] || mime || 'application/octet-stream';
+    }
+    const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: media.kind, motor: 'Telegram Import', base64: bytesToB64(bytes), mime, comment: caption, title: caption ? caption.slice(0, 80) : null }),
+    });
+    const pr = await stockPublishHandler(pubReq, env, ctx); // notifica el éxito él mismo
+    if (!pr.ok) {
+      const t = await pr.text().catch(() => '');
+      await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-publish', detail: `${pr.status} ${t}` }).catch(() => null);
+      await tgSend(env, chatId, `⚠️ No pude publicar el adjunto (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+    }
+  } catch (e) {
+    await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-exception', detail: String(e) }).catch(() => null);
+    await tgSend(env, chatId, `🚨 Error importando el adjunto: <code>${escHtml(String(e).slice(0, 180))}</code>`);
+  }
+}
+
 async function telegramWebhookHandler(req, env, ctx) {
   // Verificación del secret de Telegram (cabecera fijada en setWebhook)
   const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
@@ -2656,6 +2733,14 @@ async function telegramWebhookHandler(req, env, ctx) {
     })());
   }
   if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
+  // MEDIA ADJUNTA (foto/vídeo/documento pegado directo): antes solo se importaba
+  // por URL, así que las imágenes —que se suelen ADJUNTAR, no enlazar— se perdían.
+  // Se comprueba ANTES que el texto: un adjunto es una intención clara de importar.
+  const media = pickTelegramMedia(msg);
+  if (media) {
+    ctx.waitUntil(handleTelegramAttachment(env, ctx, req, chatId, msg, media));
+    return json({ ok: true });
+  }
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
   const m = text.match(/https?:\/\/[^\s]+/i);
@@ -2676,7 +2761,15 @@ async function telegramWebhookHandler(req, env, ctx) {
   try {
     const lu = new URL(link);
     host = lu.hostname;
-    isImage = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|tiff?)$/i.test(lu.pathname);
+    // 1) extensión en el path (ignora ?query: "council.jpg?v=2" ya casa por el path)
+    isImage = /\.(jpe?g|png|gif|webp|bmp|svg|avif|heic|heif|tiff?)$/i.test(lu.pathname);
+    // 2) extensión declarada en el query ("?format=jpg", "?ext=png") — CDNs sin ext en el path
+    if (!isImage) isImage = /[?&](?:format|ext|type)=(?:jpe?g|png|gif|webp|avif|heic)\b/i.test(lu.search);
+    // 3) sin extensión en el path pero el mensaje dice claramente que es imagen, y NO es
+    //    un host de vídeo conocido → tratamos como imagen (antes caía a yt-dlp y se perdía).
+    const noExt = !/\.[a-z0-9]{2,5}$/i.test(lu.pathname);
+    const videoHost = /(youtube\.com|youtu\.be|vimeo\.com|tiktok\.com|instagram\.com|twitter\.com|x\.com|facebook\.com|dailymotion\.com)$/i.test(host);
+    if (!isImage && noExt && !videoHost && /\b(imagen|image|foto|photo|png|jpe?g|webp)\b/i.test(text)) isImage = true;
     imgName = (lu.pathname.split('/').pop() || '').replace(/\.[^.]+$/, '');
   } catch {}
 
@@ -2973,8 +3066,11 @@ function extForMime(mime) {
     'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm',
     'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
     'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+    'image/avif': 'avif', 'image/heic': 'heic', 'image/heif': 'heic', 'image/bmp': 'bmp', 'image/svg+xml': 'svg', 'image/tiff': 'tiff',
   };
-  return map[mime] || 'bin';
+  // Content-Type con parámetros ("image/jpeg; charset=binary") → nos quedamos con el tipo base.
+  const base = String(mime || '').split(';')[0].trim().toLowerCase();
+  return map[base] || 'bin';
 }
 
 async function stockPublishHandler(req, env, ctx) {
