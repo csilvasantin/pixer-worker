@@ -48,6 +48,54 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 { "prompt": "...", "duration": 8, "aspect_ratio": "16:9", "resolution": "720p" }
 ```
 
+## RTB · Motor de decisión programática (subasta de segundo precio)
+
+El "hueco del medio" entre inventario (`/campaign`) y emisión (`/emit`, `/signage`):
+dada una impresión concreta (pantalla + circuito + segmento) decide en tiempo real
+qué campaña gana y a qué precio con **second-price REAL** (no `Math.random`).
+
+| Método | Path | Descripción |
+|---|---|---|
+| POST | `/rtb/decide` | Subasta una impresión entre las campañas activas |
+| GET  | `/rtb/feed?limit=20` | Últimas decisiones (para que el reproductor sustituya su feed simulado) |
+
+### POST /rtb/decide
+```json
+{ "screen": "scr-001", "circuit": "xtanco-madrid",
+  "segment": { "audience": "female", "age": "adulto", "category": "", "slot": "" },
+  "floor": 0 }
+```
+- **Candidatas**: campañas de `/campaign` con `active !== false` y `budget > 0` cuyo
+  targeting case con el segmento. `audience`/`age` se normalizan a la clave del gemelo
+  (`joven_m`,`adulto_f`,`senior_m`,`nino_f`…). Campaña con `seg` vacío = run-of-network
+  (elegible para cualquier segmento). `category`/`slot` filtran solo si ambos lados los declaran.
+- **Precio (second-price)**: gana el mayor CPM y paga `max(floor, 2º-CPM + 0.01)`
+  (nunca por encima de su propia puja); si es la única candidata paga `max(floor, CPM*0.6)`.
+- **Efectos**: descuenta `price` del `budget` de la ganadora y apunta la decisión en
+  KV `rtb:day:<YYYYMMDD>` (array circular, máx 500).
+
+Respuesta con demanda (200):
+```json
+{ "ok": true, "decision": {
+  "id": "…", "advertiser": "Coca-Cola", "title": "Coca-Cola Zero",
+  "creativeUrl": "https://…", "medio": "led",
+  "cpm": 12, "price": 9.01, "currency": "EUR", "ttlSec": 300 } }
+```
+Sin demanda (200): `{ "ok": false, "reason": "no_demand" }`.
+
+### GET /rtb/feed?limit=20
+```json
+{ "ok": true, "count": 2, "decisions": [ { …decision, "screen", "circuit", "seg", "budgetLeft", "ts" } ] }
+```
+Más recientes primero; rellena con las de ayer al cruzar medianoche (zona Europe/Madrid).
+
+### Campos opcionales de /campaign para RTB (retrocompatibles)
+`advertiser`, `medio` (p.ej. `led`,`dooh`,`totem`), `stockId` (resuelve `creativeUrl`
+contra el Stock si la campaña no trae uno propio), `category`, `slot`. `seg` pasa a ser
+**opcional** (vacío = sin targeting demográfico); si se envía uno debe seguir siendo válido.
+
+CORS: `admira.tv` y `clearchannel.tv` ya están en `ALLOWED_ORIGINS` (GET/POST + preflight).
+
 ## Rotar keys
 
 ```bash

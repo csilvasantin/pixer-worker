@@ -192,6 +192,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
+  '/rtb/decide', // subasta programática: POST muy frecuente (una por impresión) — no spamear Telegram
+  '/rtb/feed',   // lectura del feed de decisiones (GET) — polling del reproductor
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
   '/stock/reasset', // reproceso de transparencia en lote: no notificar cada uno
   '/notify',        // este endpoint YA envía un mensaje al chat — no duplicar
@@ -962,8 +964,10 @@ async function campaignCreateHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const loc = String(b.loc || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40) || 'xtanco-generic';
+  // seg OPCIONAL (RTB): vacío = campaña sin targeting demográfico (run-of-network).
+  // Si se envía uno, sigue teniendo que ser válido (retrocompatible con admira.app).
   const seg = String(b.seg || '').toLowerCase().replace(/[^a-z_]/g, '').slice(0, 16);
-  if (!SEG_CPM_KEYS.includes(seg)) return json({ error: 'bad-seg', expected: SEG_CPM_KEYS }, { status: 400 });
+  if (seg && !SEG_CPM_KEYS.includes(seg)) return json({ error: 'bad-seg', expected: SEG_CPM_KEYS }, { status: 400 });
   const budget = Math.max(1, Math.min(1e7, +b.budget || 0));
   const cpm = Math.max(0.1, Math.min(200, +b.cpm || 8));
   const d = new Date();
@@ -971,7 +975,13 @@ async function campaignCreateHandler(req, env) {
     ('' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0'));
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const rec = { id, loc, seg, name: String(b.name || 'Campaña').slice(0, 80), product: String(b.product || '').slice(0, 80),
-    creativeUrl: String(b.creativeUrl || '').slice(0, 300), budget, cpm, startDate, active: true, createdAt: Date.now() };
+    creativeUrl: String(b.creativeUrl || '').slice(0, 300), budget, cpm, startDate, active: true, createdAt: Date.now(),
+    // Campos opcionales para el motor RTB (/rtb/decide) — todos retrocompatibles.
+    advertiser: String(b.advertiser || '').slice(0, 80),
+    medio: String(b.medio || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20),
+    stockId: String(b.stockId || '').replace(/[^a-z0-9]/gi, '').slice(0, 40),
+    category: String(b.category || '').toLowerCase().slice(0, 40),
+    slot: String(b.slot || '').toLowerCase().slice(0, 20) };
   try { await env.SIGNAGE_KV.put(`camp:${loc}:${id}`, JSON.stringify(rec)); } catch (e) { return json({ error: 'kv-put-failed' }, { status: 502 }); }
   return json({ ok: true, campaign: rec });
 }
@@ -997,6 +1007,147 @@ async function campaignDeleteHandler(req, env) {
   if (!loc || !id) return json({ error: 'missing-loc-or-id' }, { status: 400 });
   try { await env.SIGNAGE_KV.delete(`camp:${loc}:${id}`); } catch (e) { return json({ error: 'kv-delete-failed' }, { status: 502 }); }
   return json({ ok: true, deleted: `camp:${loc}:${id}` });
+}
+
+// ══════ RTB · MOTOR DE DECISIÓN PROGRAMÁTICA (subasta de segundo precio) ══════
+// El "hueco del medio" entre inventario (/campaign) y emisión (/emit,/signage):
+// dada una impresión concreta (pantalla + circuito + segmento), decide en tiempo
+// real qué campaña gana y a qué precio, second-price REAL (no Math.random).
+//
+//   POST /rtb/decide  { screen, circuit, segment?:{audience,age,category,slot}, floor?:number }
+//     → candidatas = campañas ACTIVAS con presupuesto>0 cuyo targeting case con el
+//       segmento; gana la de mayor CPM; paga max(floor, 2ºCPM+0.01) (o max(floor,
+//       cpm*0.6) si es la única). Descuenta price del presupuesto ganador y apunta
+//       la decisión en KV rtb:day:<YYYYMMDD> (array circular, máx 500).
+//     → 200 {ok:true, decision:{id,advertiser,title,creativeUrl,medio,cpm,price,currency:"EUR",ttlSec:300}}
+//     → 200 {ok:false, reason:"no_demand"} si no hay candidatas.
+//   GET  /rtb/feed?limit=20 → {ok:true, decisions:[últimas]} (clearchannel.tv
+//       sustituye su feed simulado por esto).
+// CORS: admira.tv y clearchannel.tv ya están en ALLOWED_ORIGINS (wrapper global).
+
+// Normaliza el age libre que manda el reproductor a las claves del gemelo.
+function rtbNormAge(a) {
+  const s = String(a || '').toLowerCase();
+  if (/nin|child|kid|infan/.test(s)) return 'nino';
+  if (/jov|young|teen/.test(s)) return 'joven';
+  if (/sen|elder|old|mayor|abuel/.test(s)) return 'senior';
+  if (/adult|mid/.test(s)) return 'adulto';
+  return '';
+}
+function rtbNormGender(g) {
+  const s = String(g || '').toLowerCase();
+  // Femenino PRIMERO: 'female' contiene la subcadena 'male'.
+  if (/female|mujer|fem|woman|^f$|^f[ae]/.test(s)) return 'f';
+  if (/male|hombre|masc|man|^m$|^m[ae]/.test(s)) return 'm';
+  return '';
+}
+// Clave de segmento pedida (p.ej. 'adulto_m') o '' si el segmento es incompleto.
+function rtbSegKey(segment) {
+  if (!segment || typeof segment !== 'object') return '';
+  const age = rtbNormAge(segment.age);
+  const gen = rtbNormGender(segment.audience != null ? segment.audience : (segment.gender || segment.sex));
+  return (age && gen) ? `${age}_${gen}` : '';
+}
+// ¿La campaña c es candidata para esta impresión?
+function rtbMatch(c, reqSeg, segment) {
+  if (!c || c.active === false) return false;
+  if (!(+c.budget > 0)) return false;
+  if (c.seg) {                          // campaña con targeting demográfico
+    if (reqSeg && c.seg !== reqSeg) return false;
+  }
+  const cat = segment && String(segment.category || '').toLowerCase();
+  if (c.category && cat && c.category !== cat) return false;
+  const slot = segment && String(segment.slot || '').toLowerCase();
+  if (c.slot && slot && c.slot !== slot) return false;
+  return true;
+}
+async function rtbLoadCampaigns(env) {
+  const out = []; let cursor, n = 0;
+  do {
+    const list = await env.SIGNAGE_KV.list({ prefix: 'camp:', cursor, limit: 1000 });
+    for (const k of list.keys) {
+      if (n++ > 500) break;
+      let v; try { v = await env.SIGNAGE_KV.get(k.name); } catch { continue; }
+      if (!v) continue;
+      try { const c = JSON.parse(v); c._key = k.name; out.push(c); } catch {}
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor && n <= 500);
+  return out;
+}
+async function rtbDecideHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const screen = String(b.screen || '').slice(0, 60);
+  const circuit = String(b.circuit || '').slice(0, 40);
+  const floor = Math.max(0, Math.min(500, +b.floor || 0));
+  const segment = (b.segment && typeof b.segment === 'object') ? b.segment : null;
+  const reqSeg = rtbSegKey(segment);
+
+  const cands = (await rtbLoadCampaigns(env))
+    .filter(c => rtbMatch(c, reqSeg, segment))
+    .sort((a, z) => (+z.cpm || 0) - (+a.cpm || 0));
+  if (!cands.length) return json({ ok: false, reason: 'no_demand' });
+
+  const winner = cands[0];
+  const wCpm = +winner.cpm || 0;
+  let price;
+  if (cands.length >= 2) {
+    const second = +cands[1].cpm || 0;
+    price = Math.min(wCpm, Math.max(floor, second + 0.01)); // second-price, nunca sobre la puja
+  } else {
+    price = Math.max(floor, wCpm * 0.6);
+  }
+  price = Math.round(price * 100) / 100;
+
+  // creativeUrl: de la campaña, o resuelto contra el Stock si referencia stockId.
+  const origin = new URL(req.url).origin;
+  let creativeUrl = winner.creativeUrl || '';
+  if (!creativeUrl && winner.stockId) creativeUrl = `${origin}/stock/asset/${winner.stockId}`;
+
+  const decision = {
+    id: winner.id,
+    advertiser: winner.advertiser || winner.product || winner.name || 'Anunciante',
+    title: winner.name || 'Campaña',
+    creativeUrl,
+    medio: winner.medio || 'dooh',
+    cpm: Math.round(wCpm * 100) / 100,
+    price,
+    currency: 'EUR',
+    ttlSec: 300,
+  };
+
+  // Descuenta el price del presupuesto de la ganadora (persistente en su registro).
+  const newBudget = Math.max(0, Math.round(((+winner.budget || 0) - price) * 100) / 100);
+  const updated = { ...winner }; delete updated._key; updated.budget = newBudget;
+  try { await env.SIGNAGE_KV.put(winner._key, JSON.stringify(updated)); } catch {}
+
+  // Apunta la decisión en rtb:day:<ymd> (array circular, máx 500).
+  const ymd = madridParts().ymd;
+  const dayKey = `rtb:day:${ymd}`;
+  let arr = [];
+  try { arr = JSON.parse(await env.SIGNAGE_KV.get(dayKey) || '[]'); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+  arr.push({ ...decision, screen, circuit, seg: reqSeg || null, budgetLeft: newBudget, ts: Date.now() });
+  if (arr.length > 500) arr = arr.slice(arr.length - 500);
+  try { await env.SIGNAGE_KV.put(dayKey, JSON.stringify(arr)); } catch {}
+
+  return json({ ok: true, decision });
+}
+async function rtbFeedHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '20', 10)));
+  const { ymd } = madridParts();
+  const yd = new Date(Date.now() - 24 * 3600 * 1000);
+  const yesterday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(yd).replace(/-/g, '');
+  let arr = [];
+  try { arr = JSON.parse(await env.SIGNAGE_KV.get(`rtb:day:${ymd}`) || '[]'); if (!Array.isArray(arr)) arr = []; } catch { arr = []; }
+  if (arr.length < limit && yesterday !== ymd) {   // al cruzar medianoche, rellena con ayer
+    let prev = [];
+    try { prev = JSON.parse(await env.SIGNAGE_KV.get(`rtb:day:${yesterday}`) || '[]'); if (!Array.isArray(prev)) prev = []; } catch {}
+    arr = prev.concat(arr);
+  }
+  const decisions = arr.slice(-limit).reverse(); // más recientes primero
+  return json({ ok: true, count: decisions.length, decisions });
 }
 
 // "Web Speech" de pixeria para que la locución gratis produzca un FICHERO y se
@@ -4687,6 +4838,10 @@ export default {
         const ymd = madridParts().ymd;
         const sent = await dailyCampaignReport(env, ymd);
         res = json({ ok: true, sent, ymd });
+      } else if (path === '/rtb/decide' && req.method === 'POST') {
+        res = await rtbDecideHandler(req, env, url);
+      } else if (path === '/rtb/feed' && req.method === 'GET') {
+        res = await rtbFeedHandler(req, env, url);
       } else if (path === '/tts/free' && req.method === 'POST') {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
