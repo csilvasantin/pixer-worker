@@ -205,6 +205,9 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/veo/download',
 ]);
 const NOTIFY_SKIP_PREFIX = [
+  '/megafonia/', // push (aviso) + next (polling del gemelo) + audio — no spamear Telegram
+  '/hilomusical/', // next (polling del gemelo) — no spamear (el push notifica vía /stock/publish)
+  '/segmentado/', // generación de variante segmentada — /stock/publish notifica el asset creado
   '/signage/asset/',
   '/signage/ack/',
   '/stock/asset/',
@@ -299,6 +302,154 @@ async function ttsHandler(req, env) {
     return json({ error: 'elevenlabs-failed', status: r.status, detail: errText.slice(0, 500) }, { status: r.status });
   }
   return new Response(r.body, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
+}
+
+// ─── Megafonía: enlace pixeria → gemelo (aviso de audio TTS multilingüe) ─────
+// pixeria genera el aviso (POST /megafonia/push con texto + voz + idioma), el
+// worker lo sintetiza con ElevenLabs (eleven_multilingual_v2 → cualquier idioma),
+// lo guarda en R2 y lo encola por tienda; el gemelo (admira-xp) sondea
+// /megafonia/next?store= y lo reproduce bajando la música (ducking).
+const MEGAFONIA_PREFIX = 'megafonia/';
+const MEGAFONIA_Q = (store) => 'megafonia:q:' + String(store || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+async function megafoniaPushHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (!env.ELEVENLABS_KEY) return json({ error: 'server-missing-key', service: 'elevenlabs' }, { status: 500 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const store = String(body.store || body.circuit || body.loc || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'default';
+  const text = String(body.text || '').trim();
+  if (!text) return json({ error: 'missing-text' }, { status: 400 });
+  if (text.length > 800) return json({ error: 'text-too-long', max: 800 }, { status: 400 });
+  const voice_id = String(body.voice_id || 'EXAVITQu4vr4xnSDxMaL').replace(/[^A-Za-z0-9]/g, '').slice(0, 40);
+  const model_id = String(body.model_id || 'eleven_multilingual_v2').slice(0, 40);
+  const lang = String(body.lang || '').slice(0, 8);
+  // 1) sintetiza con ElevenLabs (multilingüe: el idioma lo infiere del texto)
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}`, {
+    method: 'POST',
+    headers: { 'xi-api-key': env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
+    body: JSON.stringify({ text, model_id, voice_settings: body.voice_settings || { stability: 0.5, similarity_boost: 0.75 } }),
+  });
+  if (!r.ok) { const e = await r.text(); return json({ error: 'elevenlabs-failed', status: r.status, detail: e.slice(0, 300) }, { status: r.status }); }
+  const buf = await r.arrayBuffer();
+  // 2) guarda el mp3 en R2
+  const id = 'm' + Date.now().toString(36) + '-' + (crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.floor(Math.random() * 1e9).toString(36));
+  try { await env.STOCK_BUCKET.put(MEGAFONIA_PREFIX + id + '.mp3', buf, { httpMetadata: { contentType: 'audio/mpeg' } }); }
+  catch (e) { return json({ error: 'r2-put-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+  const url = `${new URL(req.url).origin}/megafonia/audio/${id}`;
+  // 3) encola por tienda (últimos 20, TTL 6h)
+  const qkey = MEGAFONIA_Q(store);
+  let q = []; try { q = JSON.parse(await env.SIGNAGE_KV.get(qkey)) || []; } catch {}
+  const entry = { id, url, text: text.slice(0, 200), ts: Date.now(), lang, voice: voice_id };
+  q.push(entry); if (q.length > 20) q = q.slice(-20);
+  try { await env.SIGNAGE_KV.put(qkey, JSON.stringify(q), { expirationTtl: 60 * 60 * 6 }); } catch {}
+  return json({ ok: true, ...entry, store });
+}
+async function megafoniaNextHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const store = String(url.searchParams.get('store') || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+  const since = parseInt(url.searchParams.get('since') || '0', 10) || 0;
+  let q = []; try { q = JSON.parse(await env.SIGNAGE_KV.get(MEGAFONIA_Q(store))) || []; } catch {}
+  const pending = q.filter(e => e && e.ts > since);
+  return json({ ok: true, store, now: Date.now(), pending });
+}
+async function megafoniaAudioHandler(req, env, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[a-z0-9-]+$/i.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  const o = await env.STOCK_BUCKET.get(MEGAFONIA_PREFIX + id + '.mp3');
+  if (!o) return json({ error: 'not-found' }, { status: 404 });
+  return new Response(o.body, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'public, max-age=3600', 'Access-Control-Allow-Origin': '*' } });
+}
+
+// ─── Hilo musical: enlace pixeria → gemelo (canción → Stock + hilo del Xpacio) ─
+// pixeria genera/aporta una canción; el worker la PUBLICA EN EL STOCK (type=music,
+// etiquetada 'hilo-<store>' → también enrutable por metatag y vendible como
+// inventario) y la encola para que el gemelo la ponga en su hilo musical al vuelo.
+const HILO_Q = (store) => 'hilomusical:q:' + String(store || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+async function hiloMusicalPushHandler(req, env, ctx) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const store = String(body.store || body.circuit || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'default';
+  const title = String(body.title || 'Canción').slice(0, 80);
+  const motor = String(body.motor || 'suno').slice(0, 40);
+  if (!body.sourceUrl && !body.base64) return json({ error: 'missing-source', hint: 'sourceUrl o base64' }, { status: 400 });
+  // 1) PUBLICA AL STOCK como música, etiquetada con el hilo del punto.
+  const storeTag = ('hilo-' + store).toLowerCase().slice(0, 30);
+  const tags = (Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase()).slice(0, 2) : []).concat(storeTag).slice(0, 3);
+  const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'music', motor, title, tags,
+      base64: body.base64 || undefined, sourceUrl: body.sourceUrl || undefined,
+      mime: body.mime || 'audio/mpeg', prompt: body.prompt || undefined,
+    }),
+  });
+  const pr = await stockPublishHandler(pubReq, env, ctx);
+  const pd = await pr.json().catch(() => ({}));
+  if (!(pr.status < 300) || !pd.id) return json({ error: 'stock-publish-failed', detail: pd.error || ('HTTP ' + pr.status) }, { status: 502 });
+  // 2) ENCOLA para el hilo del gemelo (reproducción al vuelo).
+  const entry = { id: pd.id, url: pd.url, title, ts: Date.now(), tag: storeTag, motor };
+  const qkey = HILO_Q(store);
+  let q = []; try { q = JSON.parse(await env.SIGNAGE_KV.get(qkey)) || []; } catch {}
+  q.push(entry); if (q.length > 30) q = q.slice(-30);
+  try { await env.SIGNAGE_KV.put(qkey, JSON.stringify(q), { expirationTtl: 60 * 60 * 24 }); } catch {}
+  return json({ ok: true, ...entry, store });
+}
+async function hiloMusicalNextHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  const store = String(url.searchParams.get('store') || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+  const since = parseInt(url.searchParams.get('since') || '0', 10) || 0;
+  let q = []; try { q = JSON.parse(await env.SIGNAGE_KV.get(HILO_Q(store))) || []; } catch {}
+  return json({ ok: true, store, now: Date.now(), pending: q.filter(e => e && e.ts > since), playlist: q.slice(-12) });
+}
+
+// ─── Contenido segmentado: creación AUTOMÁTICA de una variante por segmento ───
+// pixeria pide una variante para un segmento (audiencia f/m + edad); el worker la
+// GENERA con Imagen 4.0 con un prompt adaptado al segmento y la PUBLICA en el Stock
+// con audience + segmentation + tag `seg-<aud>-<edad>`. El routing por cámara que ya
+// vive en canal.html (matchesSeg) y en el gemelo (XPLStock.pick) la emite sola cuando
+// la cámara detecta ese público. Cierra el bucle "la pantalla te ve → contenido a medida".
+const SEG_AUD_DESC = { f: 'una mujer', m: 'un hombre', all: 'público general' };
+const SEG_AGE_DESC = { nino: 'de público infantil', joven: 'joven (13-30 años)', adulto: 'adulto (30-55)', senior: 'sénior (55-70)', vejez: 'de tercera edad (70+)' };
+async function segmentadoGenerateHandler(req, env, ctx) {
+  if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key', service: 'gemini' }, { status: 500 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const store = String(body.store || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'default';
+  const brief = String(body.prompt || body.brief || '').trim();
+  if (!brief) return json({ error: 'missing-prompt' }, { status: 400 });
+  const audience = ['f', 'm', 'all'].includes(body.audience) ? body.audience : 'all';
+  const age = ['nino', 'joven', 'adulto', 'senior', 'vejez'].includes(body.age) ? body.age : '';
+  const category = ['atraer', 'producto', 'promo', 'marca'].includes(body.category) ? body.category : 'promo';
+  const aspectRatio = ['1:1', '9:16', '16:9', '3:4', '4:3'].includes(body.aspectRatio) ? body.aspectRatio : '9:16';
+  // 1) prompt adaptado al segmento
+  const audD = SEG_AUD_DESC[audience], ageD = age ? (' ' + SEG_AGE_DESC[age]) : '';
+  const segPrompt = `${brief}. Cartel publicitario vertical de digital signage para tienda, pensado para atraer a ${audD}${ageD}. Estética premium y actual, un único mensaje claro, mucho espacio negativo, composición limpia, sin texto ilegible.`;
+  // 2) genera con Imagen 4.0
+  const gr = await fetch('https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict', {
+    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instances: [{ prompt: segPrompt }], parameters: { sampleCount: 1, aspectRatio, personGeneration: 'allow_adult' } }),
+  });
+  const gd = await gr.json().catch(() => ({}));
+  const pred = gd && gd.predictions && gd.predictions[0];
+  const b64 = pred && (pred.bytesBase64Encoded || pred.image);
+  if (!gr.ok || !b64) return json({ error: 'imagen-failed', status: gr.status, detail: String((gd && gd.error && gd.error.message) || 'sin imagen').slice(0, 200) }, { status: 502 });
+  // 3) publica al Stock con segmentación + tag de segmento
+  const segTag = ('seg-' + audience + (age ? '-' + age : '')).toLowerCase().slice(0, 30);
+  const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'image', motor: 'Imagen 4.0 · segmentado', base64: b64, mime: 'image/png',
+      title: brief.slice(0, 46) + ' · ' + audience + (age ? '-' + age : ''),
+      audience, category, tags: [segTag, 'seg-' + store].slice(0, 3),
+      segmentation: { audiences: [audience], ageBuckets: age ? [age] : [], timeSlots: [], typologies: ['interior'] },
+      prompt: segPrompt,
+    }),
+  });
+  const pr = await stockPublishHandler(pubReq, env, ctx);
+  const pd = await pr.json().catch(() => ({}));
+  if (!(pr.status < 300) || !pd.id) return json({ error: 'stock-publish-failed', detail: pd.error || ('HTTP ' + pr.status) }, { status: 502 });
+  return json({ ok: true, id: pd.id, url: pd.url, audience, age, category, segTag, store });
 }
 
 // TTS GRATIS (sin key) vía Google Translate TTS → MP3. Da soporte al motor
@@ -2294,6 +2445,52 @@ async function signageScreensHandler(req, env) {
   });
 }
 
+// ─── Monitor de salud de pantallas ────────────────────────────────────────
+// Avisa por Telegram cuando una pantalla que estaba emitiendo deja de reportar
+// (>SIGNAGE_STALE_MS). Detecta el tótem del iPhone pausado por iOS en segundo
+// plano y cualquier kiosko caído. Guarda el estado previo en KV para alertar solo
+// en la TRANSICIÓN (online→muda y muda→recuperada), sin spam. Corre en el cron.
+const SIGNAGE_HEALTH_KEY = 'signage:health:state';
+const SIGNAGE_STALE_MS = 4 * 60 * 1000;   // muda si no reporta hace > 4 min
+async function signageHealthMonitor(env) {
+  if (!env.SIGNAGE_KV) return;
+  let index = [];
+  try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
+  const now = Date.now();
+  const cur = {};
+  for (const s of index) {
+    try {
+      const raw = await env.SIGNAGE_KV.get(`screen:${s}`);
+      if (!raw) { cur[s] = { online: false, loc: '', machine: '', name: s }; continue; }
+      const d = JSON.parse(raw);
+      cur[s] = {
+        online: (now - (d.last_seen || 0)) < SIGNAGE_STALE_MS,
+        loc: d.loc || '', machine: d.machine || '', name: d.locName || s,
+      };
+    } catch { cur[s] = { online: false, loc: '', machine: '', name: s }; }
+  }
+  let prev = {};
+  try { prev = JSON.parse(await env.SIGNAGE_KV.get(SIGNAGE_HEALTH_KEY)) || {}; } catch {}
+  const down = [], up = [];
+  for (const s of Object.keys(cur)) {
+    const was = prev[s] && prev[s].online;
+    const is = cur[s].online;
+    if (was === true && !is) down.push(cur[s]);
+    else if (was === false && is) up.push(cur[s]);
+    // primera aparición (sin estado previo): no alerta → evita ruido de arranque
+  }
+  const tag = c => `• ${c.name}${c.loc ? ` (${c.loc})` : ''}${c.machine ? ` · ${c.machine}` : ''}`;
+  if (down.length) {
+    await sendTelegram(env, `🩺⚠️ Pantalla(s) de signage MUDAS (dejaron de emitir hace >4 min):\n${down.map(tag).join('\n')}\n\n¿Tótem iOS en segundo plano o kiosko caído? Panel: https://www.admira.live/control`);
+  }
+  if (up.length) {
+    await sendTelegram(env, `🩺✅ Pantalla(s) de signage de vuelta emitiendo:\n${up.map(tag).join('\n')}`);
+  }
+  const save = {};
+  for (const s of Object.keys(cur)) save[s] = { online: cur[s].online };
+  try { await env.SIGNAGE_KV.put(SIGNAGE_HEALTH_KEY, JSON.stringify(save), { expirationTtl: 60 * 60 * 24 * 7 }); } catch {}
+}
+
 async function signageAckHandler(req, env, id) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
@@ -2366,7 +2563,8 @@ async function signageNowGetHandler(req, env, url) {
 async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
   const loc = (body && body.loc || '').toString().slice(0, 60);
   const locName = (body && body.locName || '').toString().slice(0, 80);
-  if (!loc && !locName) return;                 // sin loc → no tocamos el registro
+  const machine = (body && body.machine || '').toString().slice(0, 60);
+  if (!loc && !locName && !machine) return;     // sin loc/machine → no tocamos el registro
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
   const data = Object.assign({}, prev || {}, {
@@ -2378,8 +2576,10 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
     version: (body.version || (prev && prev.version) || '').toString().slice(0, 40),
     loc,
     locName,
+    // id del equipo donde corre el player → admira.live/control mapea pantalla↔máquina.
+    machine: machine || (prev && prev.machine) || '',
   });
-  const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.showing_id !== data.showing_id;
+  const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine || prev.showing_id !== data.showing_id;
   const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
   if (!changed && !stale) return;               // igual y reciente → no gastamos KV
   if (!(await reserveKvWrite(env, now))) return;
@@ -3436,7 +3636,7 @@ async function stockEditTagsHandler(req, env, ctx, id) {
   const cleaned = body.tags
     .map(t => String(t).toLowerCase().trim().replace(/^[#·.\s]+|[#·.\s]+$/g, ''))
     .filter(t => t && t.length <= 30)
-    .slice(0, 8); // máximo 8 etiquetas
+    .slice(0, 12); // hasta 12 etiquetas (auto ~4 + metatags propias para agrupar)
 
   const metaKey = `stock/${id}/meta.json`;
   const obj = await env.STOCK_BUCKET.get(metaKey);
@@ -4942,6 +5142,7 @@ export default {
   async scheduled(event, env, ctx) {
     if (event && event.cron === '*/2 * * * *') {
       ctx.waitUntil(agoraActivityMonitor(env));
+      ctx.waitUntil(signageHealthMonitor(env));
     } else {
       ctx.waitUntil(rebuildStockIndex(env));
       ctx.waitUntil(maybeDailyReport(env));
@@ -4977,6 +5178,24 @@ export default {
         res = await grokAgentAckHandler(req);
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
+      } else if (path === '/megafonia/push' && req.method === 'POST') {
+        res = await megafoniaPushHandler(req, env);
+      } else if (path === '/megafonia/next' && req.method === 'GET') {
+        res = await megafoniaNextHandler(req, env, url);
+      } else if (path.startsWith('/megafonia/audio/') && req.method === 'GET') {
+        res = await megafoniaAudioHandler(req, env, path.slice('/megafonia/audio/'.length));
+      } else if (path === '/hilomusical/push' && req.method === 'POST') {
+        res = await hiloMusicalPushHandler(req, env, ctx);
+      } else if (path === '/hilomusical/next' && req.method === 'GET') {
+        res = await hiloMusicalNextHandler(req, env, url);
+      } else if ((path === '/hilomusical/next' || path === '/megafonia/next') && req.method === 'DELETE') {
+        // Reset de cola por tienda (limpieza / reinicio de demo).
+        const st = String(url.searchParams.get('store') || 'default').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
+        const key = (path === '/megafonia/next' ? 'megafonia:q:' : 'hilomusical:q:') + st;
+        if (env.SIGNAGE_KV) await env.SIGNAGE_KV.delete(key);
+        res = json({ ok: true, cleared: key });
+      } else if (path === '/segmentado/generate' && req.method === 'POST') {
+        res = await segmentadoGenerateHandler(req, env, ctx);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
         res = await daProxyHandler(req, env);
       } else if ((path === '/locations' || path.startsWith('/locations/')) && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE' || req.method === 'PUT')) {
