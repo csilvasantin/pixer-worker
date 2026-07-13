@@ -667,6 +667,11 @@ function gridScreen(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9_
 function gridCircuit(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40); }
 function gridDate(s) { const d = String(s || '').replace(/[^0-9]/g, '').slice(0, 8); return /^\d{8}$/.test(d) ? d : ''; }
 function gridFmtDate(ymd) { return ymd.slice(0, 4) + '-' + ymd.slice(4, 6) + '-' + ymd.slice(6, 8); }
+function gridShiftDate(ymd, days) {
+  const d = new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)));
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10).replace(/-/g, '');
+}
 function gridRid() { try { return crypto.randomUUID().slice(0, 8); } catch (e) { return 'x' + (Date.now() % 1e8).toString(36); } }
 function gridKeyOk(env, body) { if (!env.GRID_KEY) return false; return body && String(body.key || '') === String(env.GRID_KEY); }
 function gridHhmm(s) { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '')); return m ? (+m[1]) * 60 + (+m[2]) : 0; }
@@ -1017,6 +1022,24 @@ const GRID_TAG_TARGETS = [
 function gridStockTags(item) {
   return new Set((Array.isArray(item && item.tags) ? item.tags : []).map(t => String(t).toLowerCase().trim().replace(/^#/, '')));
 }
+async function gridEnsureDailyTaggedRundown(env, screen, date) {
+  const current = await gridGetBookings(env, screen, date);
+  const cfg = await gridGetConfig(env, screen);
+  const missingBands = cfg.bands.filter(b => !current.some(x => x.bandId === b.id && x.playlistId === GRID_TAG_PLAYLIST));
+  if (!missingBands.length) return { bookings: current, carried: 0 };
+  let previous = [];
+  for (let days = 1; days <= 7 && !previous.length; days++) {
+    previous = (await gridGetBookings(env, screen, gridShiftDate(date, -days))).filter(x => x.playlistId === GRID_TAG_PLAYLIST);
+  }
+  if (!previous.length) return { bookings: current, carried: 0 };
+  const missingIds = new Set(missingBands.map(b => b.id));
+  const carried = previous.filter(x => missingIds.has(x.bandId)).map((x, i) => Object.assign({}, x, {
+    id: 'bk_' + gridRid(),
+    createdAt: Date.now() + i,
+  }));
+  if (carried.length) await gridPutBookings(env, screen, date, current.concat(carried));
+  return { bookings: current.concat(carried), carried: carried.length };
+}
 async function gridSyncTaggedStock(env, stockItems) {
   if (!env.SIGNAGE_KV) return { ok: false, error: 'kv-not-bound', targets: [] };
   const items = (Array.isArray(stockItems) ? stockItems : [])
@@ -1025,7 +1048,7 @@ async function gridSyncTaggedStock(env, stockItems) {
   const date = gridNow().ymd, results = [];
   for (const target of GRID_TAG_TARGETS) {
     const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 5);
-    const bookings = await gridGetBookings(env, target.screen, date), before = JSON.stringify(bookings);
+    const ensured = await gridEnsureDailyTaggedRundown(env, target.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
     let laneSlots = 0;
     for (const band of (await gridGetConfig(env, target.screen)).bands) {
       const slots = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === target.lane)
@@ -1057,7 +1080,7 @@ async function gridSyncTaggedStock(env, stockItems) {
     }
     const changed = JSON.stringify(bookings) !== before;
     if (changed) await gridPutBookings(env, target.screen, date, bookings);
-    results.push({ screen: target.screen, tag: '#' + target.tag, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
+    results.push({ screen: target.screen, tag: '#' + target.tag, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
   }
   const status = { ok: true, date: gridFmtDate(date), syncedAt: Date.now(), targets: results };
   await env.SIGNAGE_KV.put('grid:tag-sync:status', JSON.stringify(status).slice(0, 16000));
