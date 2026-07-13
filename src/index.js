@@ -190,6 +190,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/emit/range', // lectura del informe (GET) — no notificar
   '/screen/cache', // estado de pre-descarga del player (pseudo-streaming): POST cada ~30s por pantalla — no spamear Telegram
   '/grid/playlist', // lista del player que acompaña a /screen/cache — polling frecuente
+  '/grid/tag-sync', // sincronización automática Pixeria→slots publicitarios
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
@@ -711,7 +712,7 @@ function gridComputeDay(config, bookings, date, now) {
     const bb = bookings.filter(x => x.bandId === b.id);
     const own = bb.filter(x => x.status === 'own'), paid = bb.filter(x => x.status === 'accepted' || x.status === 'sold'), pending = bb.filter(x => x.status === 'pending');
     const slots = [];
-    const push = (x, kind) => { for (let i = 0; i < gridSlots(x); i++) slots.push({ kind, status: kind === 'own' ? 'own' : kind === 'pending' ? 'pending' : 'sold', bookingId: x.id, advertiser: x.advertiser || null, title: x.title || '', category: x.category || null, creative: x.creative || null, playlistId: x.playlistId || null, position: Number.isFinite(x.position) ? x.position : null, lane: x.lane || null }); };
+    const push = (x, kind) => { for (let i = 0; i < gridSlots(x); i++) slots.push({ kind, status: kind === 'own' ? 'own' : kind === 'pending' ? 'pending' : 'sold', bookingId: x.id, advertiser: x.advertiser || null, title: x.title || '', category: x.category || null, creative: x.creative || null, playlistId: x.playlistId || null, position: Number.isFinite(x.position) ? x.position : null, lane: x.lane || null, stockId: x.stockId || null, sourceTag: x.sourceTag || null }); };
     // Las parrillas editoriales pueden declarar `position` para conservar un rundown
     // exacto (p.ej. municipal/publicidad alternado). Las reservas antiguas mantienen
     // el comportamiento histórico: primero propio, después vendido y pendiente.
@@ -1004,6 +1005,64 @@ async function gridRundownHandler(req, env) {
   await env.SIGNAGE_KV.put('grid:cfg:' + screen, JSON.stringify(cfg).slice(0, 16000));
   await gridPutBookings(env, screen, date, kept.concat(made));
   return json({ ok: true, screen, date: gridFmtDate(date), playlistId, bands: cfg.bands.length, passes: made.length, replaced: prior.length - kept.length });
+}
+const GRID_TAG_PLAYLIST = 'municipal-50-50';
+const GRID_TAG_TARGETS = [
+  { screen: 'sim-gracia-kiosko', tag: 'canalkioskpubli' },
+  { screen: 'xtore-escaparate-pn1w', tag: 'xtancovalenciapubli' },
+];
+function gridStockTags(item) {
+  return new Set((Array.isArray(item && item.tags) ? item.tags : []).map(t => String(t).toLowerCase().trim().replace(/^#/, '')));
+}
+async function gridSyncTaggedStock(env, stockItems) {
+  if (!env.SIGNAGE_KV) return { ok: false, error: 'kv-not-bound', targets: [] };
+  const items = (Array.isArray(stockItems) ? stockItems : [])
+    .filter(x => x && x.id && x.url && (x.type === 'image' || x.type === 'video'))
+    .sort((a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const date = gridNow().ymd, results = [];
+  for (const target of GRID_TAG_TARGETS) {
+    const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 4);
+    const bookings = await gridGetBookings(env, target.screen, date), before = JSON.stringify(bookings);
+    let adSlots = 0;
+    for (const band of (await gridGetConfig(env, target.screen)).bands) {
+      const ads = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === 'publicidad')
+        .sort((a, z) => (+a.position || 0) - (+z.position || 0));
+      adSlots += ads.length;
+      for (let i = 0; i < ads.length; i++) {
+        const slot = ads[i], stock = tagged[i];
+        if (stock) {
+          slot.title = String(stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id))).slice(0, 120);
+          slot.advertiser = 'Pixeria'; slot.category = 'publicidad';
+          slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
+          slot.stockId = String(stock.id); slot.sourceTag = target.tag;
+        } else if (slot.sourceTag === target.tag) {
+          slot.title = 'Publicidad local ' + String.fromCharCode(65 + i);
+          slot.advertiser = 'Publicidad local'; slot.category = 'publicidad';
+          slot.creative = { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: slot.title };
+          delete slot.stockId; delete slot.sourceTag;
+        }
+      }
+    }
+    const changed = JSON.stringify(bookings) !== before;
+    if (changed) await gridPutBookings(env, target.screen, date, bookings);
+    results.push({ screen: target.screen, tag: '#' + target.tag, matched: tagged.length, adSlots, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
+  }
+  const status = { ok: true, date: gridFmtDate(date), syncedAt: Date.now(), targets: results };
+  await env.SIGNAGE_KV.put('grid:tag-sync:status', JSON.stringify(status).slice(0, 16000));
+  return status;
+}
+async function gridReadStockIndex(env) {
+  if (!env.STOCK_BUCKET) return [];
+  try { const obj = await env.STOCK_BUCKET.get('stock/index.json'); const data = obj ? await obj.json() : null; return Array.isArray(data) ? data : ((data && data.items) || []); } catch { return []; }
+}
+async function gridTagSyncHandler(req, env) {
+  if (req.method === 'GET') {
+    let status = null; try { status = JSON.parse(await env.SIGNAGE_KV.get('grid:tag-sync:status') || 'null'); } catch (e) {}
+    return json(status || { ok: true, syncedAt: null, targets: GRID_TAG_TARGETS.map(x => ({ screen: x.screen, tag: '#' + x.tag, matched: 0, adSlots: 0, items: [] })) });
+  }
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
+  return json(await gridSyncTaggedStock(env, await gridReadStockIndex(env)));
 }
 async function gridOfferHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -3456,7 +3515,7 @@ async function stockPublishHandler(req, env, ctx) {
   });
 
   // Regenera el índice estático sin retrasar la respuesta del publish
-  ctx.waitUntil(rebuildStockIndex(env));
+  ctx.waitUntil(rebuildAndSyncTaggedStock(env));
 
   // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
   const mbStr = (bytes.length / 1024 / 1024).toFixed(2);
@@ -3612,6 +3671,11 @@ async function rebuildStockIndex(env) {
   await env.STOCK_BUCKET.put('stock/index.json', JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=60' },
   });
+  return items;
+}
+async function rebuildAndSyncTaggedStock(env) {
+  const items = await rebuildStockIndex(env);
+  return gridSyncTaggedStock(env, items || []);
 }
 
 // POST /stock/recategorize { secret, limit?, force? }
@@ -3694,7 +3758,7 @@ async function stockEditTagsHandler(req, env, ctx, id) {
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
-  ctx.waitUntil(rebuildStockIndex(env));
+  ctx.waitUntil(rebuildAndSyncTaggedStock(env));
 
   // Notify (silencioso si los tags no han cambiado)
   const changed = JSON.stringify(before) !== JSON.stringify(cleaned);
@@ -5186,7 +5250,7 @@ export default {
       ctx.waitUntil(agoraActivityMonitor(env));
       ctx.waitUntil(signageHealthMonitor(env));
     } else {
-      ctx.waitUntil(rebuildStockIndex(env));
+      ctx.waitUntil(rebuildAndSyncTaggedStock(env));
       ctx.waitUntil(maybeDailyReport(env));
       ctx.waitUntil(gridAlertsCheck(env, ctx));
     }
@@ -5280,6 +5344,8 @@ export default {
         res = await gridBookHandler(req, env);
       } else if (path === '/grid/rundown' && req.method === 'POST') {
         res = await gridRundownHandler(req, env);
+      } else if (path === '/grid/tag-sync') {
+        res = await gridTagSyncHandler(req, env);
       } else if (path === '/grid/unbook' && req.method === 'POST') {
         res = await gridUnbookHandler(req, env);
       } else if (path === '/grid/offer' && req.method === 'POST') {
