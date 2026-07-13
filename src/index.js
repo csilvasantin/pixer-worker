@@ -1000,7 +1000,8 @@ async function gridRundownHandler(req, env) {
       const x = source[i] || {}, lane = ['municipal', 'publicidad', 'atemporal'].includes(String(x.lane || '')) ? String(x.lane) : 'municipal';
       const creative = gridCleanCreative(x.creative); if (!creative) return json({ error: 'bad-creative', position: i }, { status: 400 });
       const titleOverride = String(x.titleOverride || '').trim().slice(0, 120) || null;
-      made.push({ id: 'bk_' + gridRid(), bandId: band.id, slots: 1, status: lane === 'publicidad' ? 'sold' : 'own', advertiser: String(x.advertiser || (lane === 'publicidad' ? 'Publicidad local' : 'Ajuntament')).slice(0, 80), title: String(titleOverride || x.title || creative.name || '').slice(0, 120), titleOverride, category: lane, creative, cpm: 0, price: 0, createdAt: Date.now() + i, playlistId, position: i, lane });
+      const titleOverrideFor = titleOverride ? String(x.titleOverrideFor || '').trim().slice(0, 160) || null : null;
+      made.push({ id: 'bk_' + gridRid(), bandId: band.id, slots: 1, status: lane === 'publicidad' ? 'sold' : 'own', advertiser: String(x.advertiser || (lane === 'publicidad' ? 'Publicidad local' : 'Ajuntament')).slice(0, 80), title: String(titleOverride || x.title || creative.name || '').slice(0, 120), titleOverride, titleOverrideFor, category: lane, creative, cpm: 0, price: 0, createdAt: Date.now() + i, playlistId, position: i, lane });
     }
   }
   await env.SIGNAGE_KV.put('grid:cfg:' + screen, JSON.stringify(cfg).slice(0, 16000));
@@ -1029,6 +1030,7 @@ async function gridSyncTaggedStock(env, stockItems) {
     for (const band of (await gridGetConfig(env, target.screen)).bands) {
       const slots = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === target.lane)
         .sort((a, z) => (+a.position || 0) - (+z.position || 0));
+      const overridesByContent = new Map(slots.filter(x => x.titleOverride && x.titleOverrideFor).map(x => [String(x.titleOverrideFor), String(x.titleOverride).slice(0, 120)]));
       laneSlots += slots.length;
       for (let i = 0; i < slots.length; i++) {
         const slot = slots[i], stock = tagged[i];
@@ -1037,7 +1039,10 @@ async function gridSyncTaggedStock(env, stockItems) {
             slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
           }
           const stockTitle = stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id));
-          slot.title = String(slot.titleOverride || stockTitle).slice(0, 120);
+          const contentKey = 'stock:' + stock.id, carriedTitle = overridesByContent.get(contentKey) || null;
+          if (carriedTitle) { slot.titleOverride = carriedTitle; slot.titleOverrideFor = contentKey; }
+          else { delete slot.titleOverride; delete slot.titleOverrideFor; }
+          slot.title = String(carriedTitle || stockTitle).slice(0, 120);
           slot.advertiser = target.lane === 'municipal' ? 'Ajuntament de Gràcia' : 'Pixeria'; slot.category = target.lane;
           slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
           slot.stockId = String(stock.id); slot.sourceTag = target.tag;
