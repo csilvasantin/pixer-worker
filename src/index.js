@@ -190,7 +190,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/emit/range', // lectura del informe (GET) — no notificar
   '/screen/cache', // estado de pre-descarga del player (pseudo-streaming): POST cada ~30s por pantalla — no spamear Telegram
   '/grid/playlist', // lista del player que acompaña a /screen/cache — polling frecuente
-  '/grid/tag-sync', // sincronización automática Pixeria→slots publicitarios
+  '/grid/tag-sync', // sincronización automática Pixeria→slots municipales/publicitarios
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
@@ -1008,8 +1008,9 @@ async function gridRundownHandler(req, env) {
 }
 const GRID_TAG_PLAYLIST = 'municipal-50-50';
 const GRID_TAG_TARGETS = [
-  { screen: 'sim-gracia-kiosko', tag: 'canalkioskpubli' },
-  { screen: 'xtore-escaparate-pn1w', tag: 'xtancovalenciapubli' },
+  { screen: 'sim-gracia-kiosko', tag: 'canalkioskpubli', lane: 'publicidad' },
+  { screen: 'sim-gracia-kiosko', tag: 'ayuntamientogracia', lane: 'municipal' },
+  { screen: 'xtore-escaparate-pn1w', tag: 'xtancovalenciapubli', lane: 'publicidad' },
 ];
 function gridStockTags(item) {
   return new Set((Array.isArray(item && item.tags) ? item.tags : []).map(t => String(t).toLowerCase().trim().replace(/^#/, '')));
@@ -1023,29 +1024,33 @@ async function gridSyncTaggedStock(env, stockItems) {
   for (const target of GRID_TAG_TARGETS) {
     const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 4);
     const bookings = await gridGetBookings(env, target.screen, date), before = JSON.stringify(bookings);
-    let adSlots = 0;
+    let laneSlots = 0;
     for (const band of (await gridGetConfig(env, target.screen)).bands) {
-      const ads = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === 'publicidad')
+      const slots = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === target.lane)
         .sort((a, z) => (+a.position || 0) - (+z.position || 0));
-      adSlots += ads.length;
-      for (let i = 0; i < ads.length; i++) {
-        const slot = ads[i], stock = tagged[i];
+      laneSlots += slots.length;
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i], stock = tagged[i];
         if (stock) {
+          if (!slot.tagFallback && slot.sourceTag !== target.tag) {
+            slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
+          }
           slot.title = String(stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id))).slice(0, 120);
-          slot.advertiser = 'Pixeria'; slot.category = 'publicidad';
+          slot.advertiser = target.lane === 'municipal' ? 'Ajuntament de Gràcia' : 'Pixeria'; slot.category = target.lane;
           slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
           slot.stockId = String(stock.id); slot.sourceTag = target.tag;
         } else if (slot.sourceTag === target.tag) {
-          slot.title = 'Publicidad local ' + String.fromCharCode(65 + i);
-          slot.advertiser = 'Publicidad local'; slot.category = 'publicidad';
-          slot.creative = { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: slot.title };
-          delete slot.stockId; delete slot.sourceTag;
+          const fallback = slot.tagFallback || (target.lane === 'municipal'
+            ? { title: 'Contenido del Ayuntamiento', advertiser: 'Ajuntament de Gràcia', category: 'municipal', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/sabias.svg', name: 'Contenido del Ayuntamiento' } }
+            : { title: 'Publicidad local ' + String.fromCharCode(65 + i), advertiser: 'Publicidad local', category: 'publicidad', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: 'Publicidad local' } });
+          slot.title = fallback.title; slot.advertiser = fallback.advertiser; slot.category = fallback.category; slot.creative = fallback.creative;
+          delete slot.stockId; delete slot.sourceTag; delete slot.tagFallback;
         }
       }
     }
     const changed = JSON.stringify(bookings) !== before;
     if (changed) await gridPutBookings(env, target.screen, date, bookings);
-    results.push({ screen: target.screen, tag: '#' + target.tag, matched: tagged.length, adSlots, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
+    results.push({ screen: target.screen, tag: '#' + target.tag, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
   }
   const status = { ok: true, date: gridFmtDate(date), syncedAt: Date.now(), targets: results };
   await env.SIGNAGE_KV.put('grid:tag-sync:status', JSON.stringify(status).slice(0, 16000));
@@ -1058,7 +1063,7 @@ async function gridReadStockIndex(env) {
 async function gridTagSyncHandler(req, env) {
   if (req.method === 'GET') {
     let status = null; try { status = JSON.parse(await env.SIGNAGE_KV.get('grid:tag-sync:status') || 'null'); } catch (e) {}
-    return json(status || { ok: true, syncedAt: null, targets: GRID_TAG_TARGETS.map(x => ({ screen: x.screen, tag: '#' + x.tag, matched: 0, adSlots: 0, items: [] })) });
+    return json(status || { ok: true, syncedAt: null, targets: GRID_TAG_TARGETS.map(x => ({ screen: x.screen, tag: '#' + x.tag, lane: x.lane, matched: 0, laneSlots: 0, adSlots: 0, items: [] })) });
   }
   let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
