@@ -711,8 +711,18 @@ function gridComputeDay(config, bookings, date, now) {
     const bb = bookings.filter(x => x.bandId === b.id);
     const own = bb.filter(x => x.status === 'own'), paid = bb.filter(x => x.status === 'accepted' || x.status === 'sold'), pending = bb.filter(x => x.status === 'pending');
     const slots = [];
-    const push = (x, kind) => { for (let i = 0; i < gridSlots(x); i++) slots.push({ kind, status: kind === 'own' ? 'own' : kind === 'pending' ? 'pending' : 'sold', bookingId: x.id, advertiser: x.advertiser || null, title: x.title || '', category: x.category || null, creative: x.creative || null }); };
-    own.forEach(x => push(x, 'own')); paid.forEach(x => push(x, 'paid')); pending.forEach(x => push(x, 'pending'));
+    const push = (x, kind) => { for (let i = 0; i < gridSlots(x); i++) slots.push({ kind, status: kind === 'own' ? 'own' : kind === 'pending' ? 'pending' : 'sold', bookingId: x.id, advertiser: x.advertiser || null, title: x.title || '', category: x.category || null, creative: x.creative || null, playlistId: x.playlistId || null, position: Number.isFinite(x.position) ? x.position : null, lane: x.lane || null }); };
+    // Las parrillas editoriales pueden declarar `position` para conservar un rundown
+    // exacto (p.ej. municipal/publicidad alternado). Las reservas antiguas mantienen
+    // el comportamiento histórico: primero propio, después vendido y pendiente.
+    const sequenced = bb.some(x => x.playlistId && Number.isFinite(x.position));
+    if (sequenced) {
+      bb.filter(x => x.status === 'own' || x.status === 'accepted' || x.status === 'sold' || x.status === 'pending')
+        .slice().sort((a, z) => (Number.isFinite(a.position) ? a.position : 9999) - (Number.isFinite(z.position) ? z.position : 9999) || (+a.createdAt || 0) - (+z.createdAt || 0))
+        .forEach(x => push(x, x.status === 'own' ? 'own' : x.status === 'pending' ? 'pending' : 'paid'));
+    } else {
+      own.forEach(x => push(x, 'own')); paid.forEach(x => push(x, 'paid')); pending.forEach(x => push(x, 'pending'));
+    }
     const ownN = own.reduce((s, x) => s + gridSlots(x), 0), paidN = paid.reduce((s, x) => s + gridSlots(x), 0), pendN = pending.reduce((s, x) => s + gridSlots(x), 0);
     const free = Math.max(0, b.capacity - ownN - paidN);
     for (let i = 0; i < free; i++) slots.push({ kind: 'free', status: 'free' });
@@ -959,7 +969,9 @@ async function gridBookHandler(req, env) {
   const want = Math.max(1, parseInt(b.slots, 10) || 1);
   const sp = gridBandSpace(cfg, bookings, b.bandId); if (!sp) return json({ error: 'bad-band' }, { status: 400 });
   if (sp.freeN < want) return json({ error: 'no-space' }, { status: 409 });
-  const bk = { id: 'bk_' + gridRid(), bandId: sp.band.id, slots: want, status, advertiser: String(b.advertiser || '').slice(0, 80) || '—', title: String(b.title || '').slice(0, 120), category: b.category ? String(b.category).slice(0, 40) : null, creative: gridCleanCreative(b.creative), cpm: +b.cpm || 0, price: +b.price || 0, createdAt: Date.now() };
+  const position = Number.isFinite(+b.position) ? Math.max(0, Math.min(999, Math.trunc(+b.position))) : null;
+  const lane = ['municipal', 'publicidad', 'atemporal'].includes(String(b.lane || '')) ? String(b.lane) : null;
+  const bk = { id: 'bk_' + gridRid(), bandId: sp.band.id, slots: want, status, advertiser: String(b.advertiser || '').slice(0, 80) || '—', title: String(b.title || '').slice(0, 120), category: b.category ? String(b.category).slice(0, 40) : null, creative: gridCleanCreative(b.creative), cpm: +b.cpm || 0, price: +b.price || 0, createdAt: Date.now(), playlistId: gridScreen(b.playlistId), position, lane };
   bookings.push(bk); await gridPutBookings(env, screen, date, bookings);
   return json({ ok: true, id: bk.id });
 }
