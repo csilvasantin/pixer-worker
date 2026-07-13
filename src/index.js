@@ -999,7 +999,8 @@ async function gridRundownHandler(req, env) {
     for (let i = 0; i < source.length; i++) {
       const x = source[i] || {}, lane = ['municipal', 'publicidad', 'atemporal'].includes(String(x.lane || '')) ? String(x.lane) : 'municipal';
       const creative = gridCleanCreative(x.creative); if (!creative) return json({ error: 'bad-creative', position: i }, { status: 400 });
-      made.push({ id: 'bk_' + gridRid(), bandId: band.id, slots: 1, status: lane === 'publicidad' ? 'sold' : 'own', advertiser: String(x.advertiser || (lane === 'publicidad' ? 'Publicidad local' : 'Ajuntament')).slice(0, 80), title: String(x.title || creative.name || '').slice(0, 120), category: lane, creative, cpm: 0, price: 0, createdAt: Date.now() + i, playlistId, position: i, lane });
+      const titleOverride = String(x.titleOverride || '').trim().slice(0, 120) || null;
+      made.push({ id: 'bk_' + gridRid(), bandId: band.id, slots: 1, status: lane === 'publicidad' ? 'sold' : 'own', advertiser: String(x.advertiser || (lane === 'publicidad' ? 'Publicidad local' : 'Ajuntament')).slice(0, 80), title: String(titleOverride || x.title || creative.name || '').slice(0, 120), titleOverride, category: lane, creative, cpm: 0, price: 0, createdAt: Date.now() + i, playlistId, position: i, lane });
     }
   }
   await env.SIGNAGE_KV.put('grid:cfg:' + screen, JSON.stringify(cfg).slice(0, 16000));
@@ -1035,7 +1036,8 @@ async function gridSyncTaggedStock(env, stockItems) {
           if (!slot.tagFallback && slot.sourceTag !== target.tag) {
             slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
           }
-          slot.title = String(stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id))).slice(0, 120);
+          const stockTitle = stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id));
+          slot.title = String(slot.titleOverride || stockTitle).slice(0, 120);
           slot.advertiser = target.lane === 'municipal' ? 'Ajuntament de Gràcia' : 'Pixeria'; slot.category = target.lane;
           slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
           slot.stockId = String(stock.id); slot.sourceTag = target.tag;
