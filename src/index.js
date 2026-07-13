@@ -1024,7 +1024,7 @@ async function gridSyncTaggedStock(env, stockItems) {
     .sort((a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || '')));
   const date = gridNow().ymd, results = [];
   for (const target of GRID_TAG_TARGETS) {
-    const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 4);
+    const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 5);
     const bookings = await gridGetBookings(env, target.screen, date), before = JSON.stringify(bookings);
     let laneSlots = 0;
     for (const band of (await gridGetConfig(env, target.screen)).bands) {
