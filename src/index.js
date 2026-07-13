@@ -975,6 +975,36 @@ async function gridBookHandler(req, env) {
   bookings.push(bk); await gridPutBookings(env, screen, date, bookings);
   return json({ ok: true, id: bk.id });
 }
+// Sustituye una parrilla editorial completa con una sola escritura KV. Evita que
+// una ráfaga de /grid/book deje el rundown a medias por límites de escritura.
+async function gridRundownHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
+  const screen = gridScreen(b.screen), date = gridDate(b.date), playlistId = gridScreen(b.playlistId);
+  const source = Array.isArray(b.items) ? b.items.slice(0, 60) : [];
+  if (!screen || !date || !playlistId || !source.length) return json({ error: 'missing-screen-date-playlist-or-items' }, { status: 400 });
+  const cfg = await gridGetConfig(env, screen);
+  if (b.name != null) cfg.name = String(b.name).slice(0, 80);
+  if (b.circuit != null) cfg.circuit = gridCircuit(b.circuit);
+  if (Array.isArray(b.pixerScreens)) cfg.pixerScreens = b.pixerScreens.map(s => String(s).slice(0, 60)).slice(0, 20);
+  cfg.policy = 'manual';
+  const prior = await gridGetBookings(env, screen, date);
+  const kept = prior.filter(x => x.playlistId !== playlistId);
+  const made = [];
+  for (const band of cfg.bands) {
+    const occupied = kept.filter(x => x.bandId === band.id && ['own', 'accepted', 'sold'].includes(x.status)).reduce((n, x) => n + gridSlots(x), 0);
+    band.capacity = Math.min(60, Math.max(+band.capacity || 6, occupied + source.length));
+    for (let i = 0; i < source.length; i++) {
+      const x = source[i] || {}, lane = ['municipal', 'publicidad', 'atemporal'].includes(String(x.lane || '')) ? String(x.lane) : 'municipal';
+      const creative = gridCleanCreative(x.creative); if (!creative) return json({ error: 'bad-creative', position: i }, { status: 400 });
+      made.push({ id: 'bk_' + gridRid(), bandId: band.id, slots: 1, status: lane === 'publicidad' ? 'sold' : 'own', advertiser: String(x.advertiser || (lane === 'publicidad' ? 'Publicidad local' : 'Ajuntament')).slice(0, 80), title: String(x.title || creative.name || '').slice(0, 120), category: lane, creative, cpm: 0, price: 0, createdAt: Date.now() + i, playlistId, position: i, lane });
+    }
+  }
+  await env.SIGNAGE_KV.put('grid:cfg:' + screen, JSON.stringify(cfg).slice(0, 16000));
+  await gridPutBookings(env, screen, date, kept.concat(made));
+  return json({ ok: true, screen, date: gridFmtDate(date), playlistId, bands: cfg.bands.length, passes: made.length, replaced: prior.length - kept.length });
+}
 async function gridOfferHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -5248,6 +5278,8 @@ export default {
         res = await gridConfigHandler(req, env, url);
       } else if (path === '/grid/book' && req.method === 'POST') {
         res = await gridBookHandler(req, env);
+      } else if (path === '/grid/rundown' && req.method === 'POST') {
+        res = await gridRundownHandler(req, env);
       } else if (path === '/grid/unbook' && req.method === 'POST') {
         res = await gridUnbookHandler(req, env);
       } else if (path === '/grid/offer' && req.method === 'POST') {
