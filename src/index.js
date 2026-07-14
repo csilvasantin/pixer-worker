@@ -1199,6 +1199,40 @@ async function gridProjectsHandler(req, env) {
   await env.SIGNAGE_KV.put('grid:projects', JSON.stringify(clean).slice(0, 16000));
   return json({ ok: true, projects: clean });
 }
+// ── Borrador COMPARTIDO de la parrilla · GET/POST /grid/draft ─────────────────
+// Mueve el borrador del editor (admira.tv/parrilla) de localStorage a KV para
+// que se comparta entre máquinas y navegadores. Lectura sin key (el site va
+// tras SSO, igual que /grid/projects); escritura con GRID_KEY. Clave KV:
+//   grid:draft:<screen>:<playlist>   { items, titles, rev, updatedAt, by }
+// KV es eventual → aceptamos last-write-wins, PERO si el POST llega con un rev
+// por detrás del guardado devolvemos 409 con el draft vigente, para que el
+// front recargue en vez de pisar a ciegas (misma lección que /grid/book).
+function gridPlaylistId(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 60); }
+async function gridDraftHandler(req, env, url) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (req.method === 'GET') {
+    const screen = gridScreen(url.searchParams.get('screen')), playlist = gridPlaylistId(url.searchParams.get('playlist'));
+    if (!screen || !playlist) return json({ error: 'missing-screen-or-playlist' }, { status: 400 });
+    let d = null; try { d = JSON.parse(await env.SIGNAGE_KV.get('grid:draft:' + screen + ':' + playlist) || 'null'); } catch (e) {}
+    return json({ ok: true, draft: (d && typeof d === 'object') ? d : null });
+  }
+  let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
+  const screen = gridScreen(b.screen), playlist = gridPlaylistId(b.playlist);
+  if (!screen || !playlist) return json({ error: 'missing-screen-or-playlist' }, { status: 400 });
+  if (!Array.isArray(b.items) || b.items.length > 50) return json({ error: 'bad-items' }, { status: 400 });
+  const titles = (b.titles && typeof b.titles === 'object' && !Array.isArray(b.titles)) ? b.titles : {};
+  const kvKey = 'grid:draft:' + screen + ':' + playlist;
+  let stored = null; try { stored = JSON.parse(await env.SIGNAGE_KV.get(kvKey) || 'null'); } catch (e) {}
+  const storedRev = (stored && Number.isFinite(+stored.rev)) ? +stored.rev : 0;
+  const sentRev = Number.isFinite(+b.rev) ? +b.rev : 0;
+  if (sentRev < storedRev) return json({ error: 'stale-rev', draft: stored }, { status: 409 });
+  const rev = storedRev + 1, updatedAt = Date.now(), by = String(b.by || '').slice(0, 60) || null;
+  const payload = JSON.stringify({ items: b.items, titles, rev, updatedAt, by });
+  if (payload.length > 120000) return json({ error: 'too-large' }, { status: 413 });
+  await env.SIGNAGE_KV.put(kvKey, payload);
+  return json({ ok: true, rev, updatedAt });
+}
 async function gridUploadHandler(req, env, url) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!gridKeyOk(env, { key: url.searchParams.get('key') })) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
@@ -5397,6 +5431,8 @@ export default {
         res = await gridScreensHandler(req, env);
       } else if (path === '/grid/projects') {
         res = await gridProjectsHandler(req, env);
+      } else if (path === '/grid/draft') {
+        res = await gridDraftHandler(req, env, url);
       } else if (path === '/grid/playlist' && req.method === 'GET') {
         res = await gridPlaylistHandler(req, env, url);
       } else if (path === '/screen/cache' && (req.method === 'GET' || req.method === 'POST')) {
