@@ -2954,6 +2954,28 @@ async function saveTelegramImportFailure(env, data) {
   await rebuildStockIndex(env);
   return rec;
 }
+// Lee las etiquetas og: de una página para saber si detrás hay un VÍDEO o una IMAGEN.
+// Solo se llama con enlaces ambiguos (sin extensión y en un host que no es de vídeo), así
+// que no penaliza el caso normal. Nace de esto: un post de LinkedIn con un gráfico se
+// mandaba a yt-dlp por defecto y moría con "Unable to extract video" — no había vídeo.
+async function sniffOpenGraph(url) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/1.0; +https://www.pixeria.com)', 'Accept': 'text/html' },
+      redirect: 'follow',
+    });
+    if (!r.ok) return { image: null, video: false };
+    const html = (await r.text()).slice(0, 400000);
+    const meta = (prop) => {
+      const re = new RegExp('<meta[^>]+(?:property|name)=["\']' + prop + '["\'][^>]*content=["\']([^"\']+)', 'i');
+      const m = html.match(re);
+      return m ? m[1].replace(/&amp;/g, '&') : null;
+    };
+    const image = meta('og:image') || meta('twitter:image');
+    const video = !!(meta('og:video') || meta('og:video:url') || meta('og:video:secure_url') || meta('twitter:player'));
+    return { image, video };
+  } catch (e) { return { image: null, video: false }; }
+}
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2977,7 +2999,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
         const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-not-found', detail: 'proxy status 404 repeated' }).catch(() => null);
         const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `⚠️ La importación quedó sin estado final en el proxy.\n<code>${escHtml(link)}</code>${savedLine}`);
-        return;
+        return 'failed';
       }
       continue;
     }
@@ -2992,10 +3014,10 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
     if (status && status.detail) bits.push(String(status.detail));
     if (status && status.stderr) bits.push(String(status.stderr));
     const detail = bits.join(' | ').slice(0, 260) || 'sin detalle';
-    const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: `job-${state}`, detail }).catch(() => null);
-    const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
-    await tgSend(env, chatId, `⚠️ La importación falló en segundo plano (${escHtml(state)}).\n<code>${escHtml(detail)}</code>${savedLine}`);
-    return;
+    // NO se reporta aquí: yt-dlp falla cuando el enlace no tiene vídeo (un post con solo
+    // imagen). Se devuelve el fallo para que el que llama intente rescatar la og:image; si
+    // el rescate tampoco sale, es él quien avisa. Antes esto era un callejón sin salida.
+    return { failed: true, state, detail };
   }
   const saved = await saveTelegramImportFailure(env, { ...meta, chatId, link, phase: 'monitor-timeout', detail: 'sin resultado tras 9 min' }).catch(() => null);
   const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
@@ -3128,6 +3150,7 @@ async function telegramWebhookHandler(req, env, ctx) {
   // en el filtro «Imágenes» del Stock.
   let host = '', imgName = '';
   let isImage = false;
+  let imgSrc = link;   // la imagen REAL a bajar (puede venir de og:image, no del enlace)
   try {
     const lu = new URL(link);
     host = lu.hostname;
@@ -3149,7 +3172,7 @@ async function telegramWebhookHandler(req, env, ctx) {
       try {
         const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'image', motor: 'Telegram Import', sourceUrl: link, comment, title: comment ? comment.slice(0, 80) : (imgName || null) }),
+          body: JSON.stringify({ type: 'image', motor: 'Telegram Import', sourceUrl: imgSrc, comment, title: comment ? comment.slice(0, 80) : (imgName || null) }),
         });
         const pr = await stockPublishHandler(pubReq, env, ctx); // notifica el éxito él mismo
         if (!pr.ok) {
@@ -3200,7 +3223,30 @@ async function telegramWebhookHandler(req, env, ctx) {
         const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>${savedLine}`);
       } else if (acceptedJobId && lastBase) {
-        await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
+        const res = await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
+        if (res && res.failed) {
+          // RESCATE: yt-dlp ha fallado. Si la página trae og:image, es que no había vídeo
+          // (posts de LinkedIn con un gráfico, por ejemplo) → se publica como imagen en vez
+          // de perderla. Se intenta DESPUÉS de fallar, nunca antes: los posts de LinkedIn CON
+          // vídeo también traen og:image (la miniatura con el play), así que decidir por og:
+          // de entrada rompería las importaciones de vídeo que hoy funcionan.
+          const og = await sniffOpenGraph(link);
+          if (og.image) {
+            const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ type: 'image', motor: 'Telegram Import', sourceUrl: og.image, comment, title: comment ? comment.slice(0, 80) : null, prompt: link }),
+            });
+            const pr = await stockPublishHandler(pubReq, env, ctx);
+            if (pr.ok) {
+              await tgSend(env, chatId, `🖼️ No había vídeo en el enlace: rescatada la <b>imagen</b> del post y publicada en Stock.\n<code>${escHtml(link)}</code>`);
+              return;
+            }
+          }
+          // Ni vídeo ni imagen: ahora sí, se reporta con el motivo REAL.
+          const saved = await saveTelegramImportFailure(env, { format: fmt, comment, host, chatId, link, phase: `job-${res.state}`, detail: res.detail }).catch(() => null);
+          const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
+          await tgSend(env, chatId, `⚠️ La importación falló (${escHtml(res.state)}).\n<code>${escHtml(res.detail)}</code>${savedLine}`);
+        }
       }
       // El éxito lo notifica /stock/publish cuando el proxy termina de descargar.
     } catch (e) {
