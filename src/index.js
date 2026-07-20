@@ -305,6 +305,40 @@ async function ttsHandler(req, env) {
   return new Response(r.body, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
 }
 
+// ─── ElevenLabs Dubbing API ────────────────────────────────
+// Proxy privado para trabajos de doblaje profesional. Mantiene ELEVENLABS_KEY
+// exclusivamente en el Worker y exige la GRID_KEY en X-Grid-Key para evitar
+// que un endpoint de coste variable quede expuesto públicamente.
+function dubbingAuthOk(req, env) {
+  return !!env.GRID_KEY && req.headers.get('X-Grid-Key') === String(env.GRID_KEY);
+}
+
+async function dubbingProxy(req, env, upstreamPath, accept = 'application/json') {
+  if (!dubbingAuthOk(req, env)) {
+    return json({ error: env.GRID_KEY ? 'unauthorized' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 401 : 503 });
+  }
+  if (!env.ELEVENLABS_KEY) return json({ error: 'server-missing-key', service: 'elevenlabs' }, { status: 500 });
+
+  const headers = new Headers({
+    'xi-api-key': env.ELEVENLABS_KEY,
+    'Accept': accept,
+  });
+  const contentType = req.headers.get('Content-Type');
+  if (contentType) headers.set('Content-Type', contentType);
+
+  const upstream = await fetch(`https://api.elevenlabs.io/v1${upstreamPath}`, {
+    method: req.method,
+    headers,
+    body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body,
+  });
+  const responseHeaders = new Headers({ 'Cache-Control': 'no-store' });
+  const upstreamType = upstream.headers.get('Content-Type');
+  const disposition = upstream.headers.get('Content-Disposition');
+  if (upstreamType) responseHeaders.set('Content-Type', upstreamType);
+  if (disposition) responseHeaders.set('Content-Disposition', disposition);
+  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+}
+
 // ─── Megafonía: enlace pixeria → gemelo (aviso de audio TTS multilingüe) ─────
 // pixeria genera el aviso (POST /megafonia/push con texto + voz + idioma), el
 // worker lo sintetiza con ElevenLabs (eleven_multilingual_v2 → cualquier idioma),
@@ -5399,6 +5433,12 @@ export default {
         res = await grokAgentAckHandler(req);
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
+      } else if (path === '/dubbing' && req.method === 'POST') {
+        res = await dubbingProxy(req, env, '/dubbing');
+      } else if (path.match(/^\/dubbing\/[A-Za-z0-9_-]+\/audio\/[A-Za-z0-9_-]+$/) && req.method === 'GET') {
+        res = await dubbingProxy(req, env, path, 'video/mp4, audio/mpeg, application/octet-stream');
+      } else if (path.match(/^\/dubbing\/[A-Za-z0-9_-]+$/) && req.method === 'GET') {
+        res = await dubbingProxy(req, env, path);
       } else if (path === '/megafonia/push' && req.method === 'POST') {
         res = await megafoniaPushHandler(req, env);
       } else if (path === '/megafonia/next' && req.method === 'GET') {
