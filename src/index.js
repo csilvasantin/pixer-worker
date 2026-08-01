@@ -3523,6 +3523,21 @@ function extForMime(mime) {
   return map[base] || 'bin';
 }
 
+async function stockExternalId(value) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return 'auto-' + Array.from(new Uint8Array(bytes)).slice(0, 10).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function stockIngestAuthorized(provided, expected) {
+  if (!provided || !expected) return false;
+  const encoder = new TextEncoder();
+  const [providedHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(String(provided))),
+    crypto.subtle.digest('SHA-256', encoder.encode(String(expected))),
+  ]);
+  return crypto.subtle.timingSafeEqual(providedHash, expectedHash);
+}
+
 async function stockPublishHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
 
@@ -3559,10 +3574,41 @@ async function stockPublishHandler(req, env, ctx) {
   if (!motor || typeof motor !== 'string') return json({ error: 'missing-motor' }, { status: 400 });
   if (!base64 && !sourceUrl) return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
 
-  const ts = Date.now();
-  const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  // Las integraciones servidor→servidor pueden aportar un id externo. Se
+  // convierte en un id opaco y determinista para que reintentar nunca duplique
+  // el asset. Este carril requiere un secreto compartido; el publish manual de
+  // Pixeria conserva su contrato anterior.
+  const externalId = typeof body.externalId === 'string' ? body.externalId.trim() : '';
+  if (externalId && !/^[A-Za-z0-9:_-]{16,160}$/.test(externalId)) return json({ error: 'bad-external-id' }, { status: 400 });
+  if (externalId && !await stockIngestAuthorized(req.headers.get('X-AdmiraNeXT-Ingest'), env.ADMIRANEXT_INGEST_TOKEN)) {
+    return json({ error: 'unauthorized-ingest' }, { status: 401 });
+  }
+  if (externalId) {
+    try {
+      const source = new URL(sourceUrl);
+      if (source.protocol !== 'https:' || (source.hostname !== 'x.ai' && !source.hostname.endsWith('.x.ai'))) {
+        return json({ error: 'bad-ingest-source' }, { status: 400 });
+      }
+    } catch { return json({ error: 'bad-ingest-source' }, { status: 400 }); }
+  }
 
-  let bytes, finalMime;
+  const ts = Date.now();
+  const id = externalId ? await stockExternalId(externalId) : `${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  const metaKey = `stock/${id}/meta.json`;
+  const publicUrl = `${new URL(req.url).origin}/stock/asset/${id}`;
+  if (externalId) {
+    const existing = await env.STOCK_BUCKET.get(metaKey);
+    if (existing) {
+      try {
+        const meta = await existing.json();
+        if (meta && meta.id === id && meta.externalRef === id) {
+          return json({ ok: true, reused: true, id, url: publicUrl, createdAt: meta.createdAt });
+        }
+      } catch {}
+    }
+  }
+
+  let bytes, finalMime, sourceResponse = null;
   try {
     if (base64) {
       bytes = b64ToBytes(base64);
@@ -3587,31 +3633,49 @@ async function stockPublishHandler(req, env, ctx) {
 
       const r = await fetch(fetchUrl, { headers: fetchHeaders });
       if (!r.ok) {
-        const detail = (await r.text().catch(() => '')).slice(0, 200);
-        return json({ error: 'sourceUrl-fetch-failed', status: r.status, detail }, { status: 502 });
+        return json({ error: 'sourceUrl-fetch-failed', status: r.status }, { status: 502 });
       }
-      const buf = await r.arrayBuffer();
-      bytes = new Uint8Array(buf);
+      if (!r.body) return json({ error: 'sourceUrl-empty-body' }, { status: 502 });
+      const declared = Number(r.headers.get('Content-Length') || 0);
+      if (declared > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
+      sourceResponse = r;
       finalMime = mime || r.headers.get('Content-Type') || 'application/octet-stream';
     }
   } catch (e) {
     return json({ error: 'decode-failed', detail: String(e) }, { status: 400 });
   }
 
-  if (bytes.length > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
+  if (bytes && bytes.length > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
 
   const ext = extForMime(finalMime);
   const assetKey = `stock/${id}/asset.${ext}`;
-  const metaKey  = `stock/${id}/meta.json`;
   // URL pública con el origen de la petición (no el hardcodeado): el listado
   // la reescribe igualmente, pero así la notificación Telegram y la respuesta
   // del publish ya salen por un dominio no bloqueado.
-  const publicUrl = `${new URL(req.url).origin}/stock/asset/${id}`;
 
-  await env.STOCK_BUCKET.put(assetKey, bytes, {
+  let assetSize = bytes ? bytes.length : 0;
+  const putOptions = {
     httpMetadata: { contentType: finalMime, cacheControl: 'public, max-age=31536000, immutable' },
     customMetadata: { motor, type, id },
-  });
+  };
+  if (sourceResponse) {
+    let streamedBytes = 0;
+    const bounded = new TransformStream({
+      transform(chunk, controller) {
+        streamedBytes += chunk.byteLength;
+        if (streamedBytes > 200 * 1024 * 1024) throw new Error('stock-source-too-big');
+        controller.enqueue(chunk);
+      },
+    });
+    try { await env.STOCK_BUCKET.put(assetKey, sourceResponse.body.pipeThrough(bounded), putOptions); }
+    catch (error) {
+      const tooBig = String(error && error.message || error).includes('stock-source-too-big');
+      return json({ error: tooBig ? 'too-big' : 'sourceUrl-stream-failed', ...(tooBig ? { max: 200 * 1024 * 1024 } : {}) }, { status: tooBig ? 413 : 502 });
+    }
+    assetSize = streamedBytes;
+  } else {
+    await env.STOCK_BUCKET.put(assetKey, bytes, putOptions);
+  }
 
   // Clasificación automática con Gemini (sincronizada, ~1-2s): tags para la
   // biblioteca + audience/category para publicidad dirigida (/targetPublicity).
@@ -3650,10 +3714,11 @@ async function stockPublishHandler(req, env, ctx) {
     costEst: costEst ? String(costEst).slice(0, 80) : null,
     mime: finalMime,
     ext,
-    size: bytes.length,
+    size: assetSize,
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
     url: publicUrl,
     assetKey,
+    externalRef: externalId ? id : null,
     fp,
     ph,
     price,
@@ -3667,7 +3732,7 @@ async function stockPublishHandler(req, env, ctx) {
   ctx.waitUntil(rebuildAndSyncTaggedStock(env));
 
   // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
-  const mbStr = (bytes.length / 1024 / 1024).toFixed(2);
+  const mbStr = (assetSize / 1024 / 1024).toFixed(2);
   const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
   const commentSnip = meta.comment ? `\n📝 <i>${escHtml(String(meta.comment).slice(0, 140))}${meta.comment.length > 140 ? '…' : ''}</i>` : '';
   const footer = await buildStatsFooter(env);

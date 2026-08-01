@@ -11,6 +11,7 @@ Desde esta carpeta:
 npx wrangler login                          # 1ª vez
 npx wrangler secret put ELEVENLABS_KEY      # pega tu sk_...
 npx wrangler secret put XAI_KEY             # pega tu xai-...
+npx wrangler secret put ADMIRANEXT_INGEST_TOKEN # carril interno ADmiraNeXT → Stock
 npx wrangler deploy
 ```
 
@@ -32,6 +33,7 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | POST | `/xai/image`            | Grok 2 Image (devuelve `{data:[{url}]}`) |
 | POST | `/xai/video`            | Grok Imagine Video — start (devuelve `{request_id}`) |
 | GET  | `/xai/video/{id}`       | Grok Imagine Video — poll status |
+| POST | `/stock/publish`        | Publica en Stock; `externalId` requiere el secreto interno y evita duplicados |
 
 ### POST /tts
 ```json

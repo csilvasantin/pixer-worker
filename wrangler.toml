@@ -5,6 +5,7 @@ compatibility_date = "2026-05-02"
 # Secrets se ponen con: npx wrangler secret put NOMBRE
 # - ELEVENLABS_KEY  (obligatoria)
 # - XAI_KEY         (opcional, para futuras llamadas a Grok)
+# - ADMIRANEXT_INGEST_TOKEN (compartida con admiranext Pages para ingest idempotente)
 
 [observability]
 enabled = true
