@@ -3608,7 +3608,7 @@ async function stockPublishHandler(req, env, ctx) {
     }
   }
 
-  let bytes, finalMime, sourceResponse = null;
+  let bytes, finalMime, sourceResponse = null, sourceDeclaredSize = 0;
   try {
     if (base64) {
       bytes = b64ToBytes(base64);
@@ -3639,6 +3639,7 @@ async function stockPublishHandler(req, env, ctx) {
       const declared = Number(r.headers.get('Content-Length') || 0);
       if (declared > 200 * 1024 * 1024) return json({ error: 'too-big', max: 200 * 1024 * 1024 }, { status: 413 });
       sourceResponse = r;
+      sourceDeclaredSize = declared;
       finalMime = mime || r.headers.get('Content-Type') || 'application/octet-stream';
     }
   } catch (e) {
@@ -3667,10 +3668,23 @@ async function stockPublishHandler(req, env, ctx) {
         controller.enqueue(chunk);
       },
     });
-    try { await env.STOCK_BUCKET.put(assetKey, sourceResponse.body.pipeThrough(bounded), putOptions); }
+    try {
+      const boundedBody = sourceResponse.body.pipeThrough(bounded);
+      if (sourceDeclaredSize > 0) {
+        const fixed = new FixedLengthStream(sourceDeclaredSize);
+        await Promise.all([
+          boundedBody.pipeTo(fixed.writable),
+          env.STOCK_BUCKET.put(assetKey, fixed.readable, putOptions),
+        ]);
+      } else {
+        await env.STOCK_BUCKET.put(assetKey, boundedBody, putOptions);
+      }
+    }
     catch (error) {
-      const tooBig = String(error && error.message || error).includes('stock-source-too-big');
-      return json({ error: tooBig ? 'too-big' : 'sourceUrl-stream-failed', ...(tooBig ? { max: 200 * 1024 * 1024 } : {}) }, { status: tooBig ? 413 : 502 });
+      const detail = String(error && error.message || error).slice(0, 160);
+      const tooBig = detail.includes('stock-source-too-big');
+      console.error(JSON.stringify({ message: 'stock source stream failed', id, declared: sourceDeclaredSize, detail }));
+      return json({ error: tooBig ? 'too-big' : 'sourceUrl-stream-failed', ...(tooBig ? { max: 200 * 1024 * 1024 } : { detail }) }, { status: tooBig ? 413 : 502 });
     }
     assetSize = streamedBytes;
   } else {
