@@ -3586,7 +3586,10 @@ async function stockPublishHandler(req, env, ctx) {
   if (externalId) {
     try {
       const source = new URL(sourceUrl);
-      if (source.protocol !== 'https:' || (source.hostname !== 'x.ai' && !source.hostname.endsWith('.x.ai'))) {
+      const xaiSource = source.hostname === 'x.ai' || source.hostname.endsWith('.x.ai');
+      const admiraPackageSource = source.hostname === 'www.admiranext.com'
+        && /^\/tiktok\/media\/pkg-[a-f0-9]{20}\/[a-f0-9]{64}$/.test(source.pathname);
+      if (source.protocol !== 'https:' || (!xaiSource && !admiraPackageSource)) {
         return json({ error: 'bad-ingest-source' }, { status: 400 });
       }
     } catch { return json({ error: 'bad-ingest-source' }, { status: 400 }); }
