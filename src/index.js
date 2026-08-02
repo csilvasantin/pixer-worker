@@ -3782,18 +3782,33 @@ async function stockListHandler(req, env, url) {
     cursor = result.truncated ? result.cursor : null;
   } while (cursor);
 
-  // Fetch en paralelo (R2 GETs son Class B, baratísimas)
-  const metas = (await Promise.all(allMetaKeys.map(async k => {
+  const readMeta = async k => {
     try {
       const obj = await env.STOCK_BUCKET.get(k);
       if (!obj) return null;
       return await obj.json();
     } catch { return null; }
-  }))).filter(Boolean);
+  };
 
-  let filtered = metas;
-  if (typeFilter)  filtered = filtered.filter(m => m.type === typeFilter);
-  if (motorFilter) filtered = filtered.filter(m => m.motor === motorFilter);
+  // Sin filtros NO hace falta leerlo todo para devolver los N más recientes: el
+  // id empieza por el timestamp en ms (1785665462504-nhgi63), así que ordenando
+  // las CLAVES ya se sabe cuáles son los últimos. Antes se leían los 388
+  // meta.json del Stock aunque pidieras limit=1, y eso son los 11-15 s que tarda
+  // el listado. Con filtro se sigue leyendo todo, porque el criterio vive dentro
+  // del meta y recortar antes cambiaría el filtrado y el total.
+  const total = allMetaKeys.length;
+  let filtered;
+  if (!typeFilter && !motorFilter) {
+    const recientes = [...allMetaKeys].sort((a, b) => b.localeCompare(a)).slice(0, limit);
+    filtered = (await Promise.all(recientes.map(readMeta))).filter(Boolean);
+  } else {
+    const metas = (await Promise.all(allMetaKeys.map(readMeta))).filter(Boolean);
+    filtered = metas;
+    if (typeFilter)  filtered = filtered.filter(m => m.type === typeFilter);
+    if (motorFilter) filtered = filtered.filter(m => m.motor === motorFilter);
+  }
+  // Se sigue ordenando por createdAt: si algún id antiguo no llevara el
+  // timestamp delante, el orden final no depende de la forma de la clave.
   filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   // URLs host-agnósticas: las metas guardan la URL del host con el que se
   // publicaron (workers.dev, bloqueado por ISPs ES desde jun 2026). Se
@@ -3807,7 +3822,10 @@ async function stockListHandler(req, env, url) {
     url: m.assetKey ? `${origin}/stock/asset/${m.id}?v=${m.size || 0}` : m.url,
     thumbnail: m.thumbnail ? m.thumbnail.replace(WORKER_PUBLIC_BASE, origin) : m.thumbnail,
   }));
-  return json({ items, total: filtered.length });
+  // `total` sigue siendo el tamaño del Stock, no el de la página: sin filtros ya
+  // no se leen todos los metas, así que se cuenta por claves. Con filtros es el
+  // número de coincidencias, igual que antes.
+  return json({ items, total: (!typeFilter && !motorFilter) ? total : filtered.length });
 }
 
 // POST /stock/reasset {id, base64, mime}
