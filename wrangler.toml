@@ -34,3 +34,11 @@ bucket_name = "pixer-stock"
 [[services]]
 binding = "OMNI"
 service = "omnipublicity-api"
+
+# Tope diario del cortacircuitos de KV. Se sube de 25.000 a 32.000 con la cuenta
+# hecha: 32.000 x 30 = 960.000/mes, que sigue por debajo del millon incluido.
+# NO se sube mas: 40.000 se pasaria. Esto solo compra aire mientras se localiza
+# el gasto real con /agora/gasto — un tope que se agota a diario no es escala,
+# es un derroche sin identificar (5-ago-2026).
+[vars]
+KV_DAILY_WRITE_CAP = "32000"

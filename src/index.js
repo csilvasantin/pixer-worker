@@ -2521,6 +2521,26 @@ const KV_DAILY_WRITE_CAP_DEFAULT = 25000; // físicas/día → ~750k/mes < 1M in
 function utcDayKey(now) { return 'kvbudget:' + new Date(now).toISOString().slice(0, 10); }
 // Reserva presupuesto para UN write lógico (= 2 físicos: el dato + este contador).
 // Devuelve true si se puede escribir; false si kill-switch o tope alcanzado.
+// Reparto del gasto POR PREFIJO de clave. El contador global decia CUANTO se
+// gastaba pero no QUIEN: el 5-ago-2026 el tope se agoto a media tarde y hubo que
+// deducir el culpable a ojo — y la primera deduccion fue equivocada. Esto lo
+// mide. Una escritura mas al dia por prefijo, a cambio de no volver a adivinar.
+function kvPrefijo(key) {
+  const k = String(key || '');
+  const i = k.indexOf(':');
+  return i > 0 ? k.slice(0, i) : (k.split('/')[0] || 'otros');
+}
+async function contarGastoPorPrefijo(env, key, now) {
+  try {
+    const dia = new Date(now).toISOString().slice(0, 10);
+    const ckey = 'kvgasto:' + dia;
+    const m = JSON.parse((await env.SIGNAGE_KV.get(ckey)) || '{}');
+    const p = kvPrefijo(key);
+    m[p] = (m[p] || 0) + 1;
+    await env.SIGNAGE_KV.put(ckey, JSON.stringify(m), { expirationTtl: 60 * 60 * 24 * 8 });
+  } catch {}
+}
+
 async function reserveKvWrite(env, now) {
   if (String(env.KV_WRITES_OFF || '') === '1') return false;
   if (!env.SIGNAGE_KV) return false;
@@ -4237,8 +4257,11 @@ function kvNoEntro() {
 
 async function agoraKvPut(env, key, value, now) {
   if (!(await reserveKvWrite(env, now))) return false;
-  try { await env.SIGNAGE_KV.put(key, JSON.stringify(value)); return true; }
-  catch { return false; }
+  try {
+    await env.SIGNAGE_KV.put(key, JSON.stringify(value));
+    await contarGastoPorPrefijo(env, key, now);
+    return true;
+  } catch { return false; }
 }
 function agoraChatAllowed(chatId, expectedChat) {
   if (!expectedChat) return true;
@@ -5697,6 +5720,16 @@ export default {
         res = await newsletterSubscribeHandler(req, env);
       } else if (path === '/newsletter/count' && req.method === 'GET') {
         res = await newsletterCountHandler(req, env);
+      } else if (path === '/agora/gasto') {
+        // Solo lectura: en que se van las escrituras de KV hoy. Sin esto, cuando
+        // el tope corta hay que adivinar quien lo gasto (5-ago-2026).
+        if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
+        const hoy = new Date().toISOString().slice(0, 10);
+        const gasto = JSON.parse((await env.SIGNAGE_KV.get('kvgasto:' + hoy)) || '{}');
+        const usado = parseInt(await env.SIGNAGE_KV.get('kvbudget:' + hoy), 10) || 0;
+        const tope = parseInt(env.KV_DAILY_WRITE_CAP, 10) || KV_DAILY_WRITE_CAP_DEFAULT;
+        return json({ dia: hoy, usado, tope, restante: Math.max(0, tope - usado),
+          por_prefijo: Object.fromEntries(Object.entries(gasto).sort((a, b) => b[1] - a[1])) });
       } else if (path === '/agora/presence') {
         res = await agoraPresenceHandler(req, env, url);
       } else if (path === '/agora/feed') {
