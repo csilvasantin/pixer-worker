@@ -4223,6 +4223,18 @@ async function agoraKvGet(env, key, fallback) {
   try { const v = await env.SIGNAGE_KV.get(key); return v ? JSON.parse(v) : fallback; }
   catch { return fallback; }
 }
+// Cuando el cortacircuitos diario de KV corta, agoraKvPut devuelve false y hasta
+// hoy NADIE miraba el resultado: 18 escrituras, 0 comprobaciones. El worker
+// respondia {ok:true} y el cliente imprimia un ✓, mientras la presencia de toda
+// la flota se congelaba y los mensajes del feed se perdian en silencio. Se
+// tardo 83 minutos en notarlo y solo por casualidad (5-ago-2026).
+// Ahora una escritura que no entra se dice, con 503 y motivo.
+function kvNoEntro() {
+  return json({ ok: false, error: 'kv-write-blocked',
+    detail: 'La escritura no ha entrado: tope diario de KV alcanzado o KV_WRITES_OFF activo. Se pierde hasta el reset (00:00 UTC) o hasta subir KV_DAILY_WRITE_CAP.' },
+    { status: 503 });
+}
+
 async function agoraKvPut(env, key, value, now) {
   if (!(await reserveKvWrite(env, now))) return false;
   try { await env.SIGNAGE_KV.put(key, JSON.stringify(value)); return true; }
@@ -4797,7 +4809,7 @@ async function agoraPresenceHandler(req, env, url) {
     if (!b.identity) return json({ error: 'missing-identity' }, { status: 400 });
     const map = await agoraKvGet(env, 'agora:presence', {});
     map[b.identity] = { ts: now, host: b.host || '', tokens: b.tokens || 0, reqs: b.reqs || 0 };
-    await agoraKvPut(env, 'agora:presence', map, now);
+    if (!(await agoraKvPut(env, 'agora:presence', map, now))) return kvNoEntro();
     return json({ ok: true });
   }
   if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
@@ -4819,7 +4831,7 @@ async function agoraFeedHandler(req, env, url, ctx) {
     const text = String(b.text || '').slice(0, 2000);
     const feed = await agoraKvGet(env, 'agora:feed', []);
     feed.push({ ts: now, from, text, kind: b.kind || 'msg', url: b.url || undefined, host: b.host || undefined });
-    await agoraKvPut(env, 'agora:feed', feed.slice(-AGORA_FEED_CAP), now);
+    if (!(await agoraKvPut(env, 'agora:feed', feed.slice(-AGORA_FEED_CAP), now))) return kvNoEntro();
     // Espejo Agora→Telegram (bidireccional, decisión Carlos 2026-06-10): los
     // MENSAJES del feed (agora send) SÍ se reflejan al grupo, para que la
     // conversación entre agentes sea visible. El housekeeping (presence/inbox/
@@ -4850,7 +4862,7 @@ async function agoraConfigHandler(req, env, url) {
     let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
     if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
     const blob = JSON.stringify(b.config || {});
-    await agoraKvPut(env, 'agora:config', { config: b.config || {}, ts: now }, now);
+    if (!(await agoraKvPut(env, 'agora:config', { config: b.config || {}, ts: now }, now))) return kvNoEntro();
     return json({ ok: true, bytes: blob.length });
   }
   if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
