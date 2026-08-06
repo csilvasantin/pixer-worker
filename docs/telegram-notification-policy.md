@@ -15,11 +15,11 @@ normalizada, estado y un código de error controlado por el Worker. Nunca usa el
 | `business_error` | Otros 4xx de operaciones reales | Aviso inmediato saneado | Sin umbral |
 | éxito o ruido conocido | Respuesta esperada o ruta de telemetría | Silenciar salvo aviso explícito del handler | No aplica |
 
-La indisponibilidad de KV no puede esconder un fallo de autenticación: un
-`auth_rejected` se envía entonces de inmediato, saneado y marcado como modo
-degradado. Un `probe_404` conocido sigue silenciado porque su propia
-clasificación ya acredita que es ruido. Los 5xx y errores de negocio no dependen
-de KV.
+Si KV no está disponible, los agregados `auth_rejected` y `probe_404` fallan
+cerrados: no reabren el envío individual a Telegram. La degradación queda
+visible mediante un `console.warn` saneado y
+`healthz.notificationAggregatorAvailable=false`. Los 5xx y errores de negocio
+no dependen de KV y conservan su aviso inmediato.
 
 ## Resumen seguro
 
@@ -27,17 +27,17 @@ Formato orientativo, acotado a 1.200 caracteres:
 
 ```text
 ⚠️ HTTP agrupado · auth_rejected
-· 7 eventos · 2 paths
-· primera 10:02 · última 10:06
-· paths /grid/book ×5 · /grid/publish ×2
+· /grid/book · 7 intentos
+· origen seguro cli:3bdb6c58d6f118baf85e
+· umbral alcanzado · 5 min
 ```
 
 El resumen contiene solo:
 
 - clase y conteo total;
-- número de rutas y rutas normalizadas, con conteo por ruta;
-- primera y última fecha de la ventana;
-- una clase de fuente o fingerprint irreversible si se necesita correlación.
+- ruta normalizada y duración de la ventana;
+- motivo de consolidación (`umbral alcanzado` o `ventana cerrada`);
+- clase de fuente y fingerprint irreversible para correlación.
 
 Quedan prohibidos: `Origin`, IP, user-agent literal, query string, cuerpo de la
 respuesta, cookies, cabeceras de autorización, claves, tokens y secretos. Los
@@ -45,9 +45,10 @@ paths variables se convierten a patrones antes de agregarlos.
 
 ## Persistencia y concurrencia
 
-La clave lógica es `notify:aggregate:v1:<kind>:<fingerprint>` y el registro
-observable incluye `v`, `kind`, `path`, `source`, `count`, `windowStartedAt`,
-`lastSeenAt` y `reportedAt`, con TTL limitado.
+Cada evento usa una clave inmutable
+`notify:aggregate:v1:event:<kind>:<bucket>:<fingerprint>:<timestamp>:<uuid>`.
+El shard contiene `v`, `kind`, `path`, `source`, `fingerprint`, `at` y `bucket`;
+el marker de resumen conserva `reportedAt` y `count`. Ambos tienen TTL limitado.
 
 Un `get` seguido de `put(count + 1)` en Workers KV no es un contador atómico:
 dos peticiones concurrentes pueden leer el mismo valor y sobrescribirse. Por

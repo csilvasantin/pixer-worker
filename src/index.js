@@ -233,6 +233,17 @@ function notificationRouteIsSkipped(path) {
   return NOTIFY_SKIP_EXACT.has(path) || NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p));
 }
 
+function notificationSafePath(path) {
+  const segments = String(path || '/').split('/').map(segment => {
+    if (!segment) return segment;
+    if (/(?:token|secret|password|authorization|api[_-]?key)[=_:-]/i.test(segment)) return ':redacted';
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(segment)) return ':redacted';
+    if (/^[a-f0-9]{32,}$/i.test(segment) || /^[A-Za-z0-9_-]{49,}$/.test(segment)) return ':id';
+    return segment;
+  });
+  return segments.join('/').slice(0, 220) || '/';
+}
+
 async function responseErrorCode(res) {
   if (!res || res.status < 400 || res.status >= 500) return '';
   try {
@@ -242,12 +253,11 @@ async function responseErrorCode(res) {
   } catch { return ''; }
 }
 
-function automaticHttpMessage(req, path, status, ms, errorCode = '') {
+function automaticHttpMessage(req, path, status, ms) {
   const emoji = status >= 500 ? '🚨' : status >= 400 ? '⚠️' : '✅';
-  const error = errorCode ? `\n· error <code>${escHtml(errorCode)}</code>` : '';
-  return `${emoji} <b>${escHtml(req.method)} ${escHtml(path)}</b>\n` +
+  return `${emoji} <b>${escHtml(req.method)} ${escHtml(notificationSafePath(path))}</b>\n` +
     `· ${status} · ${ms}ms\n` +
-    `· origen seguro <code>${escHtml(notificationSourceClass(req))}</code>${error}`;
+    `· origen seguro <code>${escHtml(notificationSourceClass(req))}</code>`;
 }
 
 async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
@@ -262,25 +272,26 @@ async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
   });
   if (policy.action === 'skip') return;
   if (policy.action === 'immediate') {
-    notify(ctx, env, automaticHttpMessage(req, path, status, ms, errorCode));
+    notify(ctx, env, automaticHttpMessage(req, path, status, ms));
     return;
   }
 
   const aggregate = async () => {
     try {
       const identity = await safeSourceFingerprint(req, path);
+      const safePath = notificationSafePath(path);
       const result = await recordNotificationAggregate(env.SIGNAGE_KV, {
         kind: policy.kind,
-        path,
+        path: safePath,
         source: identity.source,
         fingerprint: identity.fingerprint,
       });
       if (result.summary) await sendTelegram(env, result.summary);
       // Fail-closed para no reabrir el spam si KV falta. El healthz expone la
       // degradacion y el log no contiene body, key, IP, Origin ni User-Agent.
-      if (!result.available) console.warn(`notification-aggregator-unavailable kind=${policy.kind} path=${path}`);
+      if (!result.available) console.warn(`notification-aggregator-unavailable kind=${policy.kind} path=${safePath}`);
     } catch {
-      console.warn(`notification-aggregator-failed kind=${policy.kind} path=${path}`);
+      console.warn(`notification-aggregator-failed kind=${policy.kind} path=${notificationSafePath(path)}`);
     }
   };
   if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(aggregate());
