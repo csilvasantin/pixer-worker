@@ -3062,7 +3062,18 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
     try { status = await r.json(); } catch { status = null; }
     const state = status && typeof status.state === 'string' ? status.state : '';
     if (!state || state === 'running' || state === 'done' || state === 'publishing') continue;
-    if (state === 'published') return;
+    // ANTES: `return` a secas. El bot prometía «te aviso al publicar en Stock» y NO
+    // avisaba nunca — ni aquí ni en quien llama, que sólo miraba res.failed. El aviso de
+    // éxito sencillamente no existía, así que toda importación correcta acababa en
+    // silencio y parecía que el importador estaba roto. (Carlos, 6-ago-2026.)
+    if (state === 'published') {
+      return {
+        published: true,
+        title: status && status.title ? String(status.title) : '',
+        size: status && Number(status.size) ? Number(status.size) : 0,
+        assetUrl: status && status.assetUrl ? String(status.assetUrl) : '',
+      };
+    }
     const bits = [];
     if (status && status.error) bits.push(String(status.error));
     if (status && status.detail) bits.push(String(status.detail));
@@ -3278,6 +3289,13 @@ async function telegramWebhookHandler(req, env, ctx) {
         await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>${savedLine}`);
       } else if (acceptedJobId && lastBase) {
         const res = await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
+        if (res && res.published) {
+          const titulo = res.title ? `\n<b>${escHtml(res.title.slice(0, 120))}</b>` : '';
+          const peso = res.size ? ` · ${(res.size / (1024 * 1024)).toFixed(1)} MB` : '';
+          const ficha = res.assetUrl ? `\n<a href="${escHtml(res.assetUrl)}">Verlo en Stock</a>` : '';
+          await tgSend(env, chatId, `✅ Publicado en Stock${peso}.${titulo}${ficha}`);
+          return;
+        }
         if (res && res.failed) {
           // RESCATE: yt-dlp ha fallado. Si la página trae og:image, es que no había vídeo
           // (posts de LinkedIn con un gráfico, por ejemplo) → se publica como imagen en vez
