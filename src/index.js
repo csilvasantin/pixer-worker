@@ -3328,6 +3328,21 @@ async function telegramWebhookHandler(req, env, ctx) {
       } catch {}
     })());
   }
+  const textoMando = String((msg.text || msg.caption || '')).trim();
+  const deDuenno = !env.TELEGRAM_CHAT_ID || String((msg.from && msg.from.id) || '') === String(env.TELEGRAM_CHAT_ID);
+  if (deDuenno && /^\/avisos(aqui|donde)\b/i.test(textoMando)) {
+    const titulo = (msg.chat && (msg.chat.title || msg.chat.username || msg.chat.first_name)) || String(chatId);
+    if (/^\/avisosaqui\b/i.test(textoMando)) {
+      if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('stock-avisos-chat', JSON.stringify({ chatId, titulo, desde: new Date().toISOString() })).catch(() => {});
+      await tgSend(env, chatId, `✅ Hecho. Los avisos de publicación en Stock llegarán a <b>${escHtml(titulo)}</b>.`);
+    } else {
+      const guardado = env.SIGNAGE_KV ? await env.SIGNAGE_KV.get('stock-avisos-chat', { type: 'json' }).catch(() => null) : null;
+      await tgSend(env, chatId, guardado
+        ? `📣 Los avisos de Stock van a <b>${escHtml(guardado.titulo || guardado.chatId)}</b>.`
+        : '📣 No hay destino fijado: salen en el mismo chat desde el que se importa.');
+    }
+    return json({ ok: true });
+  }
   if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
   // MEDIA ADJUNTA (foto/vídeo/documento pegado directo): antes solo se importaba
   // por URL, así que las imágenes —que se suelen ADJUNTAR, no enlazar— se perdían.
@@ -3339,23 +3354,6 @@ async function telegramWebhookHandler(req, env, ctx) {
   }
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
-  // «/avisosaqui» fija ESTE chat como destino de los avisos de publicación. Nació el
-  // 6-ago-2026: el chat privado quedó bloqueado por Telegram (429 de hora y media) y los
-  // avisos no tenían dónde salir. Con esto, un grupo nuevo se convierte en el canal sin
-  // tocar código ni desplegar.
-  if (/^\/avisosaqui\b/i.test(text)) {
-    const titulo = (msg.chat && (msg.chat.title || msg.chat.username || msg.chat.first_name)) || String(chatId);
-    if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('stock-avisos-chat', JSON.stringify({ chatId, titulo, desde: new Date().toISOString() })).catch(() => {});
-    await tgSend(env, chatId, `✅ Hecho. Los avisos de publicación en Stock llegarán a <b>${escHtml(titulo)}</b>.\nPara devolverlos a otro sitio, escribe ahí <code>/avisosaqui</code>.`);
-    return json({ ok: true });
-  }
-  if (/^\/avisosdonde\b/i.test(text)) {
-    const guardado = env.SIGNAGE_KV ? await env.SIGNAGE_KV.get('stock-avisos-chat', { type: 'json' }).catch(() => null) : null;
-    await tgSend(env, chatId, guardado
-      ? `📣 Los avisos de Stock van a <b>${escHtml(guardado.titulo || guardado.chatId)}</b>.`
-      : '📣 No hay destino fijado: los avisos salen en el mismo chat desde el que se importa.');
-    return json({ ok: true });
-  }
   const m = text.match(/https?:\/\/[^\s]+/i);
   if (!m) {
     // AdmiraXPBot es solo para importaciones de Stock por URL. El CLI y los
