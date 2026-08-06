@@ -3067,6 +3067,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
     await tgEdit(env, chatId, progressId,
       `${icono} ${texto} · ${seg}s\n<code>${escHtml(link)}</code>`).catch(() => {});
   };
+  console.log(`[tube] monitor arranca job=${jobId} progressId=${progressId}`);
   while (Date.now() < deadline) {
     await sleepMs(3000);
     if (Date.now() - ultimoParte > 12000) { ultimoParte = Date.now(); }
@@ -3093,6 +3094,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
     let status;
     try { status = await r.json(); } catch { status = null; }
     const state = status && typeof status.state === 'string' ? status.state : '';
+    console.log(`[tube] job=${jobId} state=${state}`);
     if (!state || state === 'running' || state === 'done' || state === 'publishing') {
       if (Date.now() - ultimoParte >= 0 && Date.now() - arranque > 6000) {
         if (state === 'publishing' || state === 'done') await parte('📤', 'Subiendo a Stock');
@@ -3105,6 +3107,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
     // éxito sencillamente no existía, así que toda importación correcta acababa en
     // silencio y parecía que el importador estaba roto. (Carlos, 6-ago-2026.)
     if (state === 'published') {
+      console.log(`[tube] job=${jobId} PUBLICADO, avisando a chat=${chatId}`);
       await parte('✅', 'Publicado en Stock');
       return {
         published: true,
@@ -3337,6 +3340,7 @@ async function telegramWebhookHandler(req, env, ctx) {
           const ficha = res.assetUrl ? `\n<a href="${escHtml(res.assetUrl)}">Verlo en Stock</a>` : '';
           const final = `✅ <b>Publicado en Stock</b>${peso}.${titulo}${ficha}`;
           const editado = await tgEdit(env, chatId, progresoMsgId, final);
+          console.log(`[tube] aviso final editado=${editado} msg=${progresoMsgId}`);
           if (!editado) await tgSend(env, chatId, final);
           return;
         }
