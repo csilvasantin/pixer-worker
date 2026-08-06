@@ -3343,7 +3343,11 @@ async function telegramWebhookHandler(req, env, ctx) {
     }
     return json({ ok: true });
   }
-  if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID)) return json({ ok: true }); // solo el chat autorizado
+  // Se importa desde el chat autorizado de siempre O desde cualquier chat donde escriba
+  // EL DUEÑO. Sin esto, el grupo Pixeria servía para recibir avisos pero no para pegar
+  // enlaces —que es justo para lo que uno crea un grupo llamado Pixeria—: el enlace se
+  // descartaba en silencio. Sigue mandando la identidad del AUTOR, no la del chat.
+  if (env.TELEGRAM_CHAT_ID && chatId !== String(env.TELEGRAM_CHAT_ID) && !deDuenno) return json({ ok: true });
   // MEDIA ADJUNTA (foto/vídeo/documento pegado directo): antes solo se importaba
   // por URL, así que las imágenes —que se suelen ADJUNTAR, no enlazar— se perdían.
   // Se comprueba ANTES que el texto: un adjunto es una intención clara de importar.
