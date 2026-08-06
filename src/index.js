@@ -2966,7 +2966,11 @@ async function tgSend(env, chatId, html) {
 // no ponemos algo que demuestre progreso?».) Un fallo al editar no puede tumbar la
 // importación: se traga y se sigue.
 async function tgAvisoSeguro(env, chatId, messageId, html, plano) {
-  if (messageId && await tgEdit(env, chatId, messageId, html)) return 'editado';
+  const edit = messageId ? await tgEdit(env, chatId, messageId, html) : false;
+  if (edit === true) return 'editado';
+  // Si Telegram ya ha pedido frenar, los dos intentos siguientes solo servirían para
+  // alargar el castigo del chat. Se pierde ESTE aviso, no la próxima hora.
+  if (edit === 'rate') return 'rate-limited';
   if (await tgSend(env, chatId, html)) return 'enviado-html';
   // Sin parse_mode no hay entidades que parsear: si esto tampoco llega, el problema
   // no es el formato.
@@ -2992,8 +2996,12 @@ async function tgEdit(env, chatId, messageId, html) {
       body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
     const d = await r.json().catch(() => null);
-    if (!d || !d.ok) console.log(`[tg] editMessageText RECHAZADO chat=${chatId} msg=${messageId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
-    return Boolean(d && d.ok);
+    if (d && d.ok) return true;
+    console.log(`[tg] editMessageText RECHAZADO chat=${chatId} msg=${messageId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
+    // 429 = Telegram pide parar. Devuelve 'rate' para que quien llama DEJE de escribir
+    // en vez de insistir: insistir es lo que convierte un frenazo en un castigo de horas.
+    if (d && d.error_code === 429) return 'rate';
+    return false;
   } catch (e) { console.log(`[tg] editMessageText EXCEPCION: ${String(e).slice(0, 200)}`); return false; }
 }
 function thumbnailForImportLink(link, format) {
@@ -3077,15 +3085,22 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
   const deadline = Date.now() + (9 * 60 * 1000);
   const arranque = Date.now();
   let notFoundCount = 0;
-  let ultimoParte = 0;
+  let ultimoParte = 0, textoParte = '', partesEnPausa = false;
   // El parte se reescribe sobre el MISMO mensaje cada 12 s. Sirve para dos cosas: que se
   // vea que aquello avanza, y que si el seguimiento muere el mensaje quede CONGELADO en el
   // último paso alcanzado — que es exactamente donde hay que mirar. (Carlos, 6-ago-2026.)
-  const parte = async (icono, texto) => {
-    if (!progressId) return;
+  const parte = async (icono, texto, forzar = false) => {
+    if (!progressId || partesEnPausa) return;
+    // 20 s de verdad entre partes. La versión anterior comparaba con `>= 0` —siempre
+    // cierto— y reescribía el mensaje CADA 3 s: Telegram lo tomó por spam y bloqueó el
+    // chat 6.024 s. Un indicador de progreso que tumba el canal no informa de nada.
+    if (!forzar && Date.now() - ultimoParte < 20000) return;
     const seg = Math.round((Date.now() - arranque) / 1000);
-    await tgEdit(env, chatId, progressId,
-      `${icono} ${texto} · ${seg}s\n<code>${escHtml(link)}</code>`).catch(() => {});
+    const nuevo = `${icono} ${texto} · ${seg}s\n<code>${escHtml(link)}</code>`;
+    if (nuevo === textoParte) return;   // editar con el mismo texto es otro 400 gratis
+    ultimoParte = Date.now(); textoParte = nuevo;
+    const r = await tgEdit(env, chatId, progressId, nuevo).catch(() => false);
+    if (r === 'rate') { partesEnPausa = true; console.log('[tg] partes en pausa: Telegram pide frenar'); }
   };
   console.log(`[tube] monitor arranca job=${jobId} progressId=${progressId}`);
   while (Date.now() < deadline) {
@@ -3116,7 +3131,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
     const state = status && typeof status.state === 'string' ? status.state : '';
     console.log(`[tube] job=${jobId} state=${state}`);
     if (!state || state === 'running' || state === 'done' || state === 'publishing') {
-      if (Date.now() - ultimoParte >= 0 && Date.now() - arranque > 6000) {
+      if (Date.now() - arranque > 6000) {
         if (state === 'publishing' || state === 'done') await parte('📤', 'Subiendo a Stock');
         else await parte('⏳', 'Descargando el vídeo');
       }
@@ -3128,7 +3143,7 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
     // silencio y parecía que el importador estaba roto. (Carlos, 6-ago-2026.)
     if (state === 'published') {
       console.log(`[tube] job=${jobId} PUBLICADO, avisando a chat=${chatId}`);
-      await parte('✅', 'Publicado en Stock');
+      await parte('✅', 'Publicado en Stock', true);
       return {
         published: true,
         title: status && status.title ? String(status.title) : '',
