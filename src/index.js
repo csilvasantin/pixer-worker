@@ -1,3 +1,11 @@
+import {
+  classifyHttpNotification,
+  flushNotificationAggregates,
+  notificationSourceClass,
+  recordNotificationAggregate,
+  safeSourceFingerprint,
+} from './notify-policy.mjs';
+
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
 // Las API keys viven como secrets de Cloudflare — nunca se exponen al navegador.
@@ -221,13 +229,62 @@ const NOTIFY_SKIP_PREFIX = [
   '/xpacio',     // monedero/inventario del Xpacio: housekeeping de la UI del Marketplace
 ];
 
-function shouldNotify(path, method, status) {
-  if (NOTIFY_SKIP_EXACT.has(path)) return false;
-  if (NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p))) return false;
-  if (status >= 500) return true; // excepciones reales, tambien en GET
-  if (method === 'GET') return false; // lecturas/polling legacy: no llenar Telegram
-  if (status >= 400) return true; // errores de escrituras/acciones si importan
-  return true;
+function notificationRouteIsSkipped(path) {
+  return NOTIFY_SKIP_EXACT.has(path) || NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p));
+}
+
+async function responseErrorCode(res) {
+  if (!res || res.status < 400 || res.status >= 500) return '';
+  try {
+    const data = await res.clone().json();
+    const code = data && typeof data.error === 'string' ? data.error : '';
+    return /^[a-z0-9_-]{1,80}$/i.test(code) ? code : '';
+  } catch { return ''; }
+}
+
+function automaticHttpMessage(req, path, status, ms, errorCode = '') {
+  const emoji = status >= 500 ? '🚨' : status >= 400 ? '⚠️' : '✅';
+  const error = errorCode ? `\n· error <code>${escHtml(errorCode)}</code>` : '';
+  return `${emoji} <b>${escHtml(req.method)} ${escHtml(path)}</b>\n` +
+    `· ${status} · ${ms}ms\n` +
+    `· origen seguro <code>${escHtml(notificationSourceClass(req))}</code>${error}`;
+}
+
+async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
+  const status = res.status;
+  const errorCode = await responseErrorCode(res);
+  const policy = classifyHttpNotification({
+    path,
+    method: req.method,
+    status,
+    errorCode,
+    skip: notificationRouteIsSkipped(path),
+  });
+  if (policy.action === 'skip') return;
+  if (policy.action === 'immediate') {
+    notify(ctx, env, automaticHttpMessage(req, path, status, ms, errorCode));
+    return;
+  }
+
+  const aggregate = async () => {
+    try {
+      const identity = await safeSourceFingerprint(req, path);
+      const result = await recordNotificationAggregate(env.SIGNAGE_KV, {
+        kind: policy.kind,
+        path,
+        source: identity.source,
+        fingerprint: identity.fingerprint,
+      });
+      if (result.summary) await sendTelegram(env, result.summary);
+      // Fail-closed para no reabrir el spam si KV falta. El healthz expone la
+      // degradacion y el log no contiene body, key, IP, Origin ni User-Agent.
+      if (!result.available) console.warn(`notification-aggregator-unavailable kind=${policy.kind} path=${path}`);
+    } catch {
+      console.warn(`notification-aggregator-failed kind=${policy.kind} path=${path}`);
+    }
+  };
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(aggregate());
+  else await aggregate();
 }
 
 function cleanMetaText(v, max = 120) {
@@ -5719,6 +5776,8 @@ export default {
   // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
   // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
   async scheduled(event, env, ctx) {
+    ctx.waitUntil(flushNotificationAggregates(env.SIGNAGE_KV, text => sendTelegram(env, text))
+      .catch(() => console.warn('notification-aggregator-flush-failed')));
     if (event && event.cron === '*/2 * * * *') {
       ctx.waitUntil(tgEntregarPendientes(env));
       ctx.waitUntil(agoraActivityMonitor(env));
@@ -5747,11 +5806,10 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
     const t0 = Date.now();
-    const origin = req.headers.get('Origin') || req.headers.get('Referer') || 'direct';
     let res;
     try {
       if (path === '/healthz') {
-        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV });
+        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV, notificationAggregatorAvailable: !!env.SIGNAGE_KV });
       } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
         res = grokLatestHandler();
       } else if (path === '/grok/agent-ack' && req.method === 'POST') {
@@ -6052,23 +6110,7 @@ export default {
       res = json({ error: 'worker-exception', message: String(e) }, { status: 500 });
     }
     const ms = Date.now() - t0;
-    const status = res.status;
-    if (shouldNotify(path, req.method, status)) {
-      const emoji = status >= 500 ? '🚨' : status >= 400 ? '⚠️' : '✅';
-      let extra = '';
-      if (status >= 400) {
-        // Para errores intenta extraer mensaje del body sin consumir el response
-        try {
-          const cloned = res.clone();
-          const text = await cloned.text();
-          extra = `\n<code>${escHtml(text.slice(0, 300))}</code>`;
-        } catch {}
-      }
-      const msg = `${emoji} <b>${escHtml(req.method)} ${escHtml(path)}</b>\n` +
-                  `· ${status} · ${ms}ms\n` +
-                  `· from <code>${escHtml(origin)}</code>${extra}`;
-      notify(ctx, env, msg);
-    }
+    await handleAutomaticHttpNotification(ctx, env, req, path, res, ms);
     const cors = corsHeaders(req);
     Object.entries(cors).forEach(([k, v]) => {
       // No pisar un Access-Control-Allow-Origin:* que el handler ponga a propósito
