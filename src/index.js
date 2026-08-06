@@ -2965,12 +2965,63 @@ async function tgSend(env, chatId, html) {
 // promesa muda— en un parte que se va actualizando solo. (Carlos, 6-ago-2026: «¿por qué
 // no ponemos algo que demuestre progreso?».) Un fallo al editar no puede tumbar la
 // importación: se traga y se sigue.
+const TG_PENDIENTE_PREFIJO = 'tg-pendiente:';
+async function tgEncolarAviso(env, chatId, plano, esperaSeg) {
+  if (!env.SIGNAGE_KV) return false;
+  try {
+    const noAntesDe = Date.now() + Math.max(30, Number(esperaSeg) || 60) * 1000;
+    await env.SIGNAGE_KV.put(
+      `${TG_PENDIENTE_PREFIJO}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      JSON.stringify({ chatId, text: plano, noAntesDe }),
+      { expirationTtl: 60 * 60 * 24 },
+    );
+    console.log(`[tg] aviso ENCOLADO para chat=${chatId}, reintento en ${Math.round((noAntesDe - Date.now()) / 1000)}s`);
+    return true;
+  } catch (e) { console.log(`[tg] no se pudo encolar: ${String(e).slice(0, 160)}`); return false; }
+}
+// La recorre el cron de 2 min: en cuanto Telegram acepta, sale todo lo retenido.
+async function tgEntregarPendientes(env) {
+  if (!env.SIGNAGE_KV || !env.TELEGRAM_BOT_TOKEN) return;
+  let listado;
+  try { listado = await env.SIGNAGE_KV.list({ prefix: TG_PENDIENTE_PREFIJO, limit: 30 }); } catch { return; }
+  for (const clave of (listado && listado.keys) || []) {
+    let aviso;
+    try { aviso = await env.SIGNAGE_KV.get(clave.name, { type: 'json' }); } catch { continue; }
+    if (!aviso) { await env.SIGNAGE_KV.delete(clave.name).catch(() => {}); continue; }
+    if (Date.now() < Number(aviso.noAntesDe || 0)) continue;
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: aviso.chatId, text: aviso.text, disable_web_page_preview: true }),
+      });
+      const d = await r.json().catch(() => null);
+      if (d && d.ok) {
+        await env.SIGNAGE_KV.delete(clave.name).catch(() => {});
+        console.log(`[tg] pendiente ENTREGADO a chat=${aviso.chatId}`);
+        continue;
+      }
+      if (d && d.error_code === 429) {
+        // Sigue castigado: se reprograma con lo que ellos mismos piden y se para aquí,
+        // para no gastar el resto de la cola contra un muro.
+        const espera = Number((d.parameters && d.parameters.retry_after) || 60);
+        aviso.noAntesDe = Date.now() + (espera + 5) * 1000;
+        await env.SIGNAGE_KV.put(clave.name, JSON.stringify(aviso), { expirationTtl: 60 * 60 * 24 }).catch(() => {});
+        console.log(`[tg] pendientes siguen bloqueados, reintento en ${espera}s`);
+        return;
+      }
+      await env.SIGNAGE_KV.delete(clave.name).catch(() => {});   // rechazo no recuperable
+    } catch { /* se reintenta en la próxima vuelta */ }
+  }
+}
 async function tgAvisoSeguro(env, chatId, messageId, html, plano) {
   const edit = messageId ? await tgEdit(env, chatId, messageId, html) : false;
   if (edit === true) return 'editado';
   // Si Telegram ya ha pedido frenar, los dos intentos siguientes solo servirían para
   // alargar el castigo del chat. Se pierde ESTE aviso, no la próxima hora.
-  if (edit === 'rate') return 'rate-limited';
+  if (edit === 'rate') {
+    await tgEncolarAviso(env, chatId, plano, 90);
+    return 'rate-limited-encolado';
+  }
   if (await tgSend(env, chatId, html)) return 'enviado-html';
   // Sin parse_mode no hay entidades que parsear: si esto tampoco llega, el problema
   // no es el formato.
@@ -2984,6 +3035,10 @@ async function tgAvisoSeguro(env, chatId, messageId, html, plano) {
     const d = await r.json().catch(() => null);
     if (d && d.ok) return 'enviado-plano';
     console.log(`[tg] texto plano RECHAZADO chat=${chatId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
+    if (d && d.error_code === 429) {
+      await tgEncolarAviso(env, chatId, plano, Number((d.parameters && d.parameters.retry_after) || 90));
+      return 'encolado';
+    }
   } catch (e) { console.log(`[tg] texto plano EXCEPCION: ${String(e).slice(0, 200)}`); }
   return 'fallido';
 }
@@ -5634,6 +5689,7 @@ export default {
   // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
   async scheduled(event, env, ctx) {
     if (event && event.cron === '*/2 * * * *') {
+      ctx.waitUntil(tgEntregarPendientes(env));
       ctx.waitUntil(agoraActivityMonitor(env));
       ctx.waitUntil(signageHealthMonitor(env));
     } else {
