@@ -2957,8 +2957,9 @@ async function tgSend(env, chatId, html) {
     // Devuelve el message_id para poder EDITAR después ese mismo mensaje. Sin esto no
     // hay forma de enseñar progreso: sólo acumular mensajes nuevos.
     const d = await r.json().catch(() => null);
+    if (!d || !d.ok) console.log(`[tg] sendMessage RECHAZADO chat=${chatId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
     return d && d.ok && d.result ? d.result.message_id : null;
-  } catch { return null; }
+  } catch (e) { console.log(`[tg] sendMessage EXCEPCION: ${String(e).slice(0, 200)}`); return null; }
 }
 // Reescribe un mensaje ya enviado. Es lo que convierte «te aviso al publicar» —una
 // promesa muda— en un parte que se va actualizando solo. (Carlos, 6-ago-2026: «¿por qué
@@ -2973,8 +2974,9 @@ async function tgEdit(env, chatId, messageId, html) {
       body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
     const d = await r.json().catch(() => null);
+    if (!d || !d.ok) console.log(`[tg] editMessageText RECHAZADO chat=${chatId} msg=${messageId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
     return Boolean(d && d.ok);
-  } catch { return false; }
+  } catch (e) { console.log(`[tg] editMessageText EXCEPCION: ${String(e).slice(0, 200)}`); return false; }
 }
 function thumbnailForImportLink(link, format) {
   const raw = String(link || '');
