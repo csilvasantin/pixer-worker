@@ -3013,6 +3013,13 @@ async function tgEntregarPendientes(env) {
     } catch { /* se reintenta en la próxima vuelta */ }
   }
 }
+// Destino de los avisos: el chat fijado con /avisosaqui, o el de origen si no hay ninguno.
+async function tgChatDeAvisos(env, chatOrigen) {
+  try {
+    const guardado = env.SIGNAGE_KV ? await env.SIGNAGE_KV.get('stock-avisos-chat', { type: 'json' }) : null;
+    return guardado && guardado.chatId ? guardado.chatId : chatOrigen;
+  } catch { return chatOrigen; }
+}
 async function tgAvisoSeguro(env, chatId, messageId, html, plano) {
   const edit = messageId ? await tgEdit(env, chatId, messageId, html) : false;
   if (edit === true) return 'editado';
@@ -3332,6 +3339,23 @@ async function telegramWebhookHandler(req, env, ctx) {
   }
   const text = (msg.text || msg.caption || '').trim();
   if (!text) return json({ ok: true });
+  // «/avisosaqui» fija ESTE chat como destino de los avisos de publicación. Nació el
+  // 6-ago-2026: el chat privado quedó bloqueado por Telegram (429 de hora y media) y los
+  // avisos no tenían dónde salir. Con esto, un grupo nuevo se convierte en el canal sin
+  // tocar código ni desplegar.
+  if (/^\/avisosaqui\b/i.test(text)) {
+    const titulo = (msg.chat && (msg.chat.title || msg.chat.username || msg.chat.first_name)) || String(chatId);
+    if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put('stock-avisos-chat', JSON.stringify({ chatId, titulo, desde: new Date().toISOString() })).catch(() => {});
+    await tgSend(env, chatId, `✅ Hecho. Los avisos de publicación en Stock llegarán a <b>${escHtml(titulo)}</b>.\nPara devolverlos a otro sitio, escribe ahí <code>/avisosaqui</code>.`);
+    return json({ ok: true });
+  }
+  if (/^\/avisosdonde\b/i.test(text)) {
+    const guardado = env.SIGNAGE_KV ? await env.SIGNAGE_KV.get('stock-avisos-chat', { type: 'json' }).catch(() => null) : null;
+    await tgSend(env, chatId, guardado
+      ? `📣 Los avisos de Stock van a <b>${escHtml(guardado.titulo || guardado.chatId)}</b>.`
+      : '📣 No hay destino fijado: los avisos salen en el mismo chat desde el que se importa.');
+    return json({ ok: true });
+  }
   const m = text.match(/https?:\/\/[^\s]+/i);
   if (!m) {
     // AdmiraXPBot es solo para importaciones de Stock por URL. El CLI y los
@@ -3432,7 +3456,12 @@ async function telegramWebhookHandler(req, env, ctx) {
           const plano = `✅ Publicado en Stock${peso}.` +
             (res.title ? `\n${res.title.slice(0, 120)}` : '') +
             (res.assetUrl ? `\n${res.assetUrl}` : '');
-          const via = await tgAvisoSeguro(env, chatId, progresoMsgId, final, plano);
+          // Si hay un chat de avisos distinto del de origen, allí no existe el mensaje
+          // «Importando…», así que no se edita nada: se envía entero.
+          const destino = await tgChatDeAvisos(env, chatId);
+          const via = destino === chatId
+            ? await tgAvisoSeguro(env, chatId, progresoMsgId, final, plano)
+            : await tgAvisoSeguro(env, destino, null, final, plano);
           console.log(`[tube] aviso final via=${via} msg=${progresoMsgId}`);
           return;
         }
