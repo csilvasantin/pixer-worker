@@ -5,6 +5,7 @@
   "description": "Cloudflare Worker — bridge Pixer.ai (capa 1) ↔ AdmiraXP / XpaceOS (capa 2). ElevenLabs / xAI / GCP / Signage feed.",
   "main": "src/index.js",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "tail": "wrangler tail"
