@@ -2947,14 +2947,34 @@ function admiraTubeBaseCandidates(env) {
   return candidates;
 }
 async function tgSend(env, chatId, html) {
-  if (!env.TELEGRAM_BOT_TOKEN) return;
+  if (!env.TELEGRAM_BOT_TOKEN) return null;
   try {
-    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
     });
-  } catch {}
+    // Devuelve el message_id para poder EDITAR después ese mismo mensaje. Sin esto no
+    // hay forma de enseñar progreso: sólo acumular mensajes nuevos.
+    const d = await r.json().catch(() => null);
+    return d && d.ok && d.result ? d.result.message_id : null;
+  } catch { return null; }
+}
+// Reescribe un mensaje ya enviado. Es lo que convierte «te aviso al publicar» —una
+// promesa muda— en un parte que se va actualizando solo. (Carlos, 6-ago-2026: «¿por qué
+// no ponemos algo que demuestre progreso?».) Un fallo al editar no puede tumbar la
+// importación: se traga y se sigue.
+async function tgEdit(env, chatId, messageId, html) {
+  if (!env.TELEGRAM_BOT_TOKEN || !messageId) return false;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text: html, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    const d = await r.json().catch(() => null);
+    return Boolean(d && d.ok);
+  } catch { return false; }
 }
 function thumbnailForImportLink(link, format) {
   const raw = String(link || '');
@@ -3033,11 +3053,23 @@ async function sniffOpenGraph(url) {
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
+async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, progressId = null) {
   const deadline = Date.now() + (9 * 60 * 1000);
+  const arranque = Date.now();
   let notFoundCount = 0;
+  let ultimoParte = 0;
+  // El parte se reescribe sobre el MISMO mensaje cada 12 s. Sirve para dos cosas: que se
+  // vea que aquello avanza, y que si el seguimiento muere el mensaje quede CONGELADO en el
+  // último paso alcanzado — que es exactamente donde hay que mirar. (Carlos, 6-ago-2026.)
+  const parte = async (icono, texto) => {
+    if (!progressId) return;
+    const seg = Math.round((Date.now() - arranque) / 1000);
+    await tgEdit(env, chatId, progressId,
+      `${icono} ${texto} · ${seg}s\n<code>${escHtml(link)}</code>`).catch(() => {});
+  };
   while (Date.now() < deadline) {
     await sleepMs(3000);
+    if (Date.now() - ultimoParte > 12000) { ultimoParte = Date.now(); }
     let r;
     try {
       r = await fetch(`${base}/tube/status?id=${encodeURIComponent(jobId)}`);
@@ -3061,12 +3093,19 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}) {
     let status;
     try { status = await r.json(); } catch { status = null; }
     const state = status && typeof status.state === 'string' ? status.state : '';
-    if (!state || state === 'running' || state === 'done' || state === 'publishing') continue;
+    if (!state || state === 'running' || state === 'done' || state === 'publishing') {
+      if (Date.now() - ultimoParte >= 0 && Date.now() - arranque > 6000) {
+        if (state === 'publishing' || state === 'done') await parte('📤', 'Subiendo a Stock');
+        else await parte('⏳', 'Descargando el vídeo');
+      }
+      continue;
+    }
     // ANTES: `return` a secas. El bot prometía «te aviso al publicar en Stock» y NO
     // avisaba nunca — ni aquí ni en quien llama, que sólo miraba res.failed. El aviso de
     // éxito sencillamente no existía, así que toda importación correcta acababa en
     // silencio y parecía que el importador estaba roto. (Carlos, 6-ago-2026.)
     if (state === 'published') {
+      await parte('✅', 'Publicado en Stock');
       return {
         published: true,
         title: status && status.title ? String(status.title) : '',
@@ -3257,7 +3296,10 @@ async function telegramWebhookHandler(req, env, ctx) {
 
   const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
   ctx.waitUntil((async () => {
-    await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
+    // Se guarda el id de ESTE mensaje: es el que se irá reescribiendo con el progreso y,
+    // al final, con el resultado. Así la promesa «te aviso» se cumple en el mismo sitio
+    // donde se hizo, en vez de acumular mensajes sueltos.
+    const progresoMsgId = await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
     try {
       const bases = admiraTubeBaseCandidates(env);
       let lastStatus = 0;
@@ -3288,12 +3330,14 @@ async function telegramWebhookHandler(req, env, ctx) {
         const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `⚠️ El proxy rechazó la importación (${lastStatus || 502})${baseNote}: <code>${escHtml(lastBody.slice(0, 180) || 'sin detalle')}</code>${savedLine}`);
       } else if (acceptedJobId && lastBase) {
-        const res = await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host });
+        const res = await monitorTubeImport(env, chatId, lastBase, acceptedJobId, link, { format: fmt, comment, host }, progresoMsgId);
         if (res && res.published) {
           const titulo = res.title ? `\n<b>${escHtml(res.title.slice(0, 120))}</b>` : '';
           const peso = res.size ? ` · ${(res.size / (1024 * 1024)).toFixed(1)} MB` : '';
           const ficha = res.assetUrl ? `\n<a href="${escHtml(res.assetUrl)}">Verlo en Stock</a>` : '';
-          await tgSend(env, chatId, `✅ Publicado en Stock${peso}.${titulo}${ficha}`);
+          const final = `✅ <b>Publicado en Stock</b>${peso}.${titulo}${ficha}`;
+          const editado = await tgEdit(env, chatId, progresoMsgId, final);
+          if (!editado) await tgSend(env, chatId, final);
           return;
         }
         if (res && res.failed) {
