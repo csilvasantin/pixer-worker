@@ -2965,6 +2965,24 @@ async function tgSend(env, chatId, html) {
 // promesa muda— en un parte que se va actualizando solo. (Carlos, 6-ago-2026: «¿por qué
 // no ponemos algo que demuestre progreso?».) Un fallo al editar no puede tumbar la
 // importación: se traga y se sigue.
+async function tgAvisoSeguro(env, chatId, messageId, html, plano) {
+  if (messageId && await tgEdit(env, chatId, messageId, html)) return 'editado';
+  if (await tgSend(env, chatId, html)) return 'enviado-html';
+  // Sin parse_mode no hay entidades que parsear: si esto tampoco llega, el problema
+  // no es el formato.
+  if (!env.TELEGRAM_BOT_TOKEN) return 'sin-token';
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: plano, disable_web_page_preview: true }),
+    });
+    const d = await r.json().catch(() => null);
+    if (d && d.ok) return 'enviado-plano';
+    console.log(`[tg] texto plano RECHAZADO chat=${chatId} -> ${d ? JSON.stringify(d).slice(0, 300) : 'sin cuerpo'}`);
+  } catch (e) { console.log(`[tg] texto plano EXCEPCION: ${String(e).slice(0, 200)}`); }
+  return 'fallido';
+}
 async function tgEdit(env, chatId, messageId, html) {
   if (!env.TELEGRAM_BOT_TOKEN || !messageId) return false;
   try {
@@ -3341,9 +3359,11 @@ async function telegramWebhookHandler(req, env, ctx) {
           const peso = res.size ? ` · ${(res.size / (1024 * 1024)).toFixed(1)} MB` : '';
           const ficha = res.assetUrl ? `\n<a href="${escHtml(res.assetUrl)}">Verlo en Stock</a>` : '';
           const final = `✅ <b>Publicado en Stock</b>${peso}.${titulo}${ficha}`;
-          const editado = await tgEdit(env, chatId, progresoMsgId, final);
-          console.log(`[tube] aviso final editado=${editado} msg=${progresoMsgId}`);
-          if (!editado) await tgSend(env, chatId, final);
+          const plano = `✅ Publicado en Stock${peso}.` +
+            (res.title ? `\n${res.title.slice(0, 120)}` : '') +
+            (res.assetUrl ? `\n${res.assetUrl}` : '');
+          const via = await tgAvisoSeguro(env, chatId, progresoMsgId, final, plano);
+          console.log(`[tube] aviso final via=${via} msg=${progresoMsgId}`);
           return;
         }
         if (res && res.failed) {
