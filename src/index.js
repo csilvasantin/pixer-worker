@@ -3770,7 +3770,11 @@ async function stockTrackHandler(req, env, ctx, id) {
 //                            size, thumbnail, url, createdAt)
 // Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
 // Sin KV → sin límite de 1000 writes/día en Workers Free.
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin'];
+// 'guion' es TEXTO, no un fichero: lo que un vídeo del Stock le enseña a una silla
+// del Consejo. yokup lo espera desde el 7-ago (COUNCIL_GUION_TYPE) y el Stock no lo
+// admitía, así que el circuito de formación estaba abierto por este extremo: había
+// 475 assets y CERO guiones porque no se podían crear.
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'guion'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 function b64ToBytes(b64) {
@@ -3849,7 +3853,17 @@ async function stockPublishHandler(req, env, ctx) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
   }
   if (!motor || typeof motor !== 'string') return json({ error: 'missing-motor' }, { status: 400 });
-  if (!base64 && !sourceUrl) return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
+  // Un guión no tiene fichero que subir: SU TEXTO es el contenido. Se convierte aquí
+  // para que recorra el mismo carril que todo lo demás (R2, índice, firma) en vez de
+  // abrirle una puerta aparte.
+  let base64Efectivo = base64, mimeEfectivo = mime;
+  if (type === 'guion' && !base64 && !sourceUrl) {
+    const texto = String(comment || '').trim();
+    if (!texto) return json({ error: 'guion-sin-texto', detail: 'el conocimiento va en comment' }, { status: 400 });
+    base64Efectivo = btoa(unescape(encodeURIComponent(texto)));
+    mimeEfectivo = 'text/plain';
+  }
+  if (!base64Efectivo && !sourceUrl) return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
 
   // Las integraciones servidor→servidor pueden aportar un id externo. Se
   // convierte en un id opaco y determinista para que reintentar nunca duplique
@@ -3890,9 +3904,11 @@ async function stockPublishHandler(req, env, ctx) {
 
   let bytes, finalMime, sourceResponse = null, sourceDeclaredSize = 0;
   try {
-    if (base64) {
-      bytes = b64ToBytes(base64);
-      finalMime = mime || 'application/octet-stream';
+    if (base64Efectivo) {
+      // Efectivo, no el del body: un guión llega sin adjunto y su texto se convierte
+      // arriba. Si aquí se leyera `base64` a secas, el guión se caería por el camino.
+      bytes = b64ToBytes(base64Efectivo);
+      finalMime = mimeEfectivo || 'application/octet-stream';
     } else {
       // Vídeos Veo: el frontend manda sourceUrl = {worker}/veo/download?uri=<gemini>.
       // Hacer fetch a nuestra propia URL pública (worker→self) es un anti-patrón
@@ -4012,7 +4028,8 @@ async function stockPublishHandler(req, env, ctx) {
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
     url: publicUrl,
     assetKey,
-    externalRef: externalId ? id : null,
+    externalRef: externalId ? id : (typeof body.externalRef === 'string'
+      ? body.externalRef.trim().slice(0, 160) || null : null),
     fp,
     ph,
     price,
