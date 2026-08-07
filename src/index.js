@@ -3853,6 +3853,23 @@ async function stockPublishHandler(req, env, ctx) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
   }
   if (!motor || typeof motor !== 'string') return json({ error: 'missing-motor' }, { status: 400 });
+  // La cara del guión sale de la pieza que explica. Si el vídeo no tiene miniatura
+  // o no se encuentra, el guión se publica igual: la imagen suma, su ausencia no
+  // puede impedir que el conocimiento entre.
+  let thumbHeredada = null;
+  if (type === 'guion' && !thumbnail && typeof body.externalRef === 'string' && body.externalRef.trim()) {
+    try {
+      const refId = body.externalRef.trim();
+      if (/^[A-Za-z0-9-]+$/.test(refId) && env.STOCK_BUCKET) {
+        const refObj = await env.STOCK_BUCKET.get(`stock/${refId}/meta.json`);
+        if (refObj) {
+          const refMeta = await refObj.json();
+          if (refMeta && refMeta.thumbnail) thumbHeredada = String(refMeta.thumbnail).slice(0, 500);
+        }
+      }
+    } catch (e) { /* sin cara, pero con conocimiento */ }
+  }
+
   // Un guión no tiene fichero que subir: SU TEXTO es el contenido. Se convierte aquí
   // para que recorra el mismo carril que todo lo demás (R2, índice, firma) en vez de
   // abrirle una puerta aparte.
@@ -4025,7 +4042,12 @@ async function stockPublishHandler(req, env, ctx) {
     mime: finalMime,
     ext,
     size: assetSize,
-    thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : null,
+    // Un guión hereda la CARA de su vídeo. La miniatura ya existe —es la que
+    // identifica al vídeo en el Stock— y sin ella el guión se veía como un ladrillo
+    // de texto verde, imposible de reconocer de un vistazo entre tarjetas con
+    // imagen. Se resuelve al publicar y no al pintar para que valga en cualquier
+    // sitio que lea el índice, no solo en la galería. (Carlos, 7-ago-2026.)
+    thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : (thumbHeredada || null),
     url: publicUrl,
     assetKey,
     externalRef: externalId ? id : (typeof body.externalRef === 'string'
