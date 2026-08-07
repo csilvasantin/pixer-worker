@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import worker from '../src/index.js';
+import worker, { shouldFlushNotificationAggregates } from '../src/index.js';
 import {
   AGGREGATE_POLICY,
   recordNotificationAggregate,
@@ -46,6 +46,13 @@ async function runRequest(request, env) {
   await ctx.drain();
   return response;
 }
+
+test('solo el cron */2 consolida alertas; el solape */10 no duplica el resumen', () => {
+  assert.equal(shouldFlushNotificationAggregates({ cron: '*/2 * * * *' }), true);
+  assert.equal(shouldFlushNotificationAggregates({ cron: '*/10 * * * *' }), false);
+  assert.equal(shouldFlushNotificationAggregates({ cron: '0 21 * * *' }), false);
+  assert.equal(shouldFlushNotificationAggregates(null), false);
+});
 
 test('la implementación productiva conserva 12/12 shards concurrentes', async () => {
   let sequence = 0;

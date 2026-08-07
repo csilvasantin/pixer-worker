@@ -5787,8 +5787,14 @@ export default {
   // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
   // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(flushNotificationAggregates(env.SIGNAGE_KV, text => sendTelegram(env, text))
-      .catch(() => console.warn('notification-aggregator-flush-failed')));
+    // Hay dos cron (*/2 y */10) y coinciden en cada minuto múltiplo de diez.
+    // Si ambos consolidan, dos isolates pueden ver el marker ausente a la vez y
+    // enviar el mismo resumen antes de que Workers KV propague el put. Un solo
+    // cron es el dueño del flush; el */10 conserva sus otras tareas.
+    if (shouldFlushNotificationAggregates(event)) {
+      ctx.waitUntil(flushNotificationAggregates(env.SIGNAGE_KV, text => sendTelegram(env, text))
+        .catch(() => console.warn('notification-aggregator-flush-failed')));
+    }
     if (event && event.cron === '*/2 * * * *') {
       ctx.waitUntil(tgEntregarPendientes(env));
       ctx.waitUntil(agoraActivityMonitor(env));
@@ -6132,3 +6138,7 @@ export default {
     return res;
   },
 };
+
+export function shouldFlushNotificationAggregates(event) {
+  return !!event && event.cron === '*/2 * * * *';
+}

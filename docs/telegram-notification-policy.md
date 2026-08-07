@@ -50,6 +50,12 @@ Cada evento usa una clave inmutable
 El shard contiene `v`, `kind`, `path`, `source`, `fingerprint`, `at` y `bucket`;
 el marker de resumen conserva `reportedAt` y `count`. Ambos tienen TTL limitado.
 
+La consolidación programada pertenece exclusivamente al cron `*/2`. El Worker
+también tiene un cron `*/10`, pero ambos coinciden en los minutos múltiplos de
+diez y Workers KV no ofrece compare-and-swap: permitir que los dos hicieran el
+flush podía emitir dos resúmenes idénticos de una misma ventana. El cron `*/10`
+mantiene sus otras tareas, pero no consolida alertas.
+
 Un `get` seguido de `put(count + 1)` en Workers KV no es un contador atómico:
 dos peticiones concurrentes pueden leer el mismo valor y sobrescribirse. Por
 eso la implementación de producción debe serializar por clave, usar un Durable
