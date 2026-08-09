@@ -3738,13 +3738,15 @@ async function buildStatsFooter(env) {
   );
 }
 
-// POST /stock/track/:id?event=play  → cuenta una reproducción y notifica
+// POST /stock/track/:id?event=play|consume. `play` conserva el contador global
+// histórico; `consume` cuenta aperturas de una cápsula por sesión sin duplicar
+// refrescos o reaperturas dentro de la misma sesión.
 async function stockTrackHandler(req, env, ctx, id) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
   const url = new URL(req.url);
   const event = url.searchParams.get('event') || 'play';
-  if (event !== 'play') return json({ error: 'unknown-event' }, { status: 400 });
+  if (!['play', 'consume'].includes(event)) return json({ error: 'unknown-event' }, { status: 400 });
 
   // Lee la meta para enriquecer la notificación
   let meta = null;
@@ -3753,6 +3755,35 @@ async function stockTrackHandler(req, env, ctx, id) {
     if (obj) meta = await obj.json();
   } catch {}
   if (!meta) return json({ error: 'asset-not-found' }, { status: 404 });
+
+  if (event === 'consume') {
+    if (!['capsula', 'guion'].includes(String(meta.type || '').toLowerCase())) return json({ error: 'not-a-capsule' }, { status: 409 });
+    let body;
+    try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    const viewerId = String(body.viewerId || '').trim();
+    if (!/^[A-Za-z0-9_-]{16,80}$/.test(viewerId)) return json({ error: 'bad-viewer' }, { status: 400 });
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(viewerId));
+    const viewerHash = Array.from(new Uint8Array(digest)).slice(0, 16).map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const consumptionKey = `stock/${id}/consumptions.json`;
+    const consumptionObj = await env.STOCK_BUCKET.get(consumptionKey);
+    let views = {};
+    if (consumptionObj) { try { views = (await consumptionObj.json()).views || {}; } catch {} }
+    const reused = Object.prototype.hasOwnProperty.call(views, viewerHash);
+    if (!reused && Object.keys(views).length >= 10000) return json({ error: 'consumption-cap-reached' }, { status: 429 });
+    if (!reused) views[viewerHash] = Date.now();
+    const consumptions = Object.keys(views).length;
+    meta.consumptions = consumptions;
+    if (!reused) {
+      await env.STOCK_BUCKET.put(consumptionKey, JSON.stringify({ views }), {
+        httpMetadata: { contentType: 'application/json', cacheControl: 'private, no-store' },
+      });
+    }
+    await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
+      httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+    });
+    ctx.waitUntil(rebuildStockIndex(env));
+    return json({ ok: true, id, consumptions, reused });
+  }
 
   const after = await bumpPlay(env);
   const footer = await buildStatsFooter(env);

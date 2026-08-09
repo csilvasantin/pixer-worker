@@ -18,3 +18,11 @@ test('el índice expone sólo la media y el número de votos', () => {
   assert.match(source, /stock\/\$\{id\}\/ratings\.json/);
   assert.match(source, /path\.match\(\/\^\\\/stock\\\/\[\^\/\]\+\\\/rating\$\//);
 });
+
+test('el consumo de cápsulas cuenta una sola apertura por sesión', () => {
+  assert.match(source, /\['play', 'consume'\]/);
+  assert.match(source, /stock\/\$\{id\}\/consumptions\.json/);
+  assert.match(source, /views\[viewerHash\] = Date\.now\(\)/);
+  assert.match(source, /meta\.consumptions = consumptions/);
+  assert.match(source, /reused = Object\.prototype\.hasOwnProperty\.call\(views, viewerHash\)/);
+});
