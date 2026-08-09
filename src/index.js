@@ -41,6 +41,8 @@ const ALLOWED_ORIGINS = [
   'https://www.admira.tv',
   'https://admiranext.com',
   'https://www.admiranext.com',
+  'https://admira.academy',
+  'https://www.admira.academy',
   'https://carlossilva.info',
   'https://www.carlossilva.info',
   'http://localhost:8765',
@@ -3776,6 +3778,226 @@ async function stockTrackHandler(req, env, ctx, id) {
 const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
+const SITE_CAPSULE_COUNSELORS = new Set([
+  'stevejobs', 'stevewozniak', 'timcook', 'warrenbuffett',
+  'waltdisney', 'dieterrams', 'howardschultz', 'georgelucas',
+]);
+const SITE_CAPSULE_TRACKING_PARAMS = new Set([
+  'ncid', 'mkt_tok', 'fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid',
+]);
+
+function siteCapsuleUrl(value) {
+  let url;
+  try { url = new URL(String(value || '').trim()); } catch { return null; }
+  const host = url.hostname.toLowerCase().replace(/\.$/, '');
+  const forbiddenHost = !host.includes('.') || host === 'localhost' || host.endsWith('.localhost')
+    || host.endsWith('.local') || host.endsWith('.internal') || host === 'metadata.google.internal'
+    || host === '169.254.169.254' || host === '100.100.100.200';
+  const ipLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(':');
+  if (url.protocol !== 'https:' || url.username || url.password || forbiddenHost || ipLiteral) return null;
+  url.hash = '';
+  for (const key of [...url.searchParams.keys()]) {
+    if (key.toLowerCase().startsWith('utm_') || SITE_CAPSULE_TRACKING_PARAMS.has(key.toLowerCase())) url.searchParams.delete(key);
+  }
+  url.searchParams.sort();
+  return url;
+}
+
+function siteCapsuleEntity(value) {
+  return String(value || '')
+    .replace(/&#(\d+);/g, (_m, n) => String.fromCodePoint(Math.min(1114111, Number(n))))
+    .replace(/&#x([\da-f]+);/gi, (_m, n) => String.fromCodePoint(Math.min(1114111, parseInt(n, 16))))
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"')
+    .replace(/&#0?39;|&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+}
+
+function siteCapsuleMeta(html, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patterns = [
+    new RegExp(`<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']+)["']`, 'i'),
+    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${escaped}["']`, 'i'),
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) return siteCapsuleEntity(match[1]).trim();
+  }
+  return '';
+}
+
+function siteCapsuleLink(html, rel) {
+  const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const patterns = [
+    new RegExp(`<link[^>]+rel=["'][^"']*${escaped}[^"']*["'][^>]+href=["']([^"']+)["']`, 'i'),
+    new RegExp(`<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*${escaped}[^"']*["']`, 'i'),
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) return siteCapsuleEntity(match[1]).trim();
+  }
+  return '';
+}
+
+function siteCapsuleText(html) {
+  const preferred = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)
+    || html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i);
+  let text = preferred ? preferred[1] : html;
+  text = text.replace(/<(script|style|noscript|svg|form|nav|footer|header|aside)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(br|\/p|\/div|\/section|\/li|\/h[1-6]|\/blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  return siteCapsuleEntity(text).replace(/[ \t]+/g, ' ').replace(/\n\s+/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 28000);
+}
+
+async function siteCapsuleItems(env) {
+  if (!env.STOCK_BUCKET) return [];
+  const indexed = await gridReadStockIndex(env);
+  if (indexed.length) return indexed;
+  return rebuildStockIndex(env) || [];
+}
+
+function siteCapsuleHasTags(item, counselorTag) {
+  const tags = Array.isArray(item?.tags) ? item.tags : [];
+  return tags.includes('formacion') && tags.includes(counselorTag) && tags.includes('site');
+}
+
+function siteCapsuleFind(items, canonicalUrl, counselorTag, type) {
+  return items.find(item => item && item.type === type && item.prompt === canonicalUrl && siteCapsuleHasTags(item, counselorTag)) || null;
+}
+
+async function siteCapsuleGemini(env, source) {
+  if (!env.GEMINI_API_KEY) throw new Error('server-missing-key');
+  const prompt = `Transforma el artículo siguiente en una cápsula de conocimiento verificable para Admira Academy.\n` +
+    `Devuelve SOLO JSON válido con este esquema exacto: {"carbono":"...","silicio":"...","aplicacion":"..."}.\n` +
+    `carbono: resumen claro en español para una persona, 450-700 caracteres.\n` +
+    `silicio: instrucciones operativas en español para un agente de IA, 450-700 caracteres, con criterios comprobables.\n` +
+    `aplicacion: siguiente experimento concreto, 180-350 caracteres.\n` +
+    `No inventes datos, no cites fuentes ajenas, no uses Markdown y distingue hechos de recomendaciones.\n\n` +
+    `TÍTULO: ${source.title}\nDESCRIPCIÓN: ${source.description}\nAUTOR: ${source.author}\nURL: ${source.url}\n\nTEXTO:\n${source.text}`;
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.15, responseMimeType: 'application/json' },
+    }),
+  });
+  if (!response.ok) throw new Error(`gemini-${response.status}`);
+  const data = await response.json();
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('gemini-invalid-json'); }
+  const clean = key => String(parsed?.[key] || '').replace(/\s+/g, ' ').trim();
+  const result = { carbono: clean('carbono'), silicio: clean('silicio'), aplicacion: clean('aplicacion') };
+  if (result.carbono.length < 260 || result.silicio.length < 260 || result.aplicacion.length < 100) throw new Error('gemini-incomplete-capsule');
+  return result;
+}
+
+async function siteCapsulePublish(req, env, ctx, payload) {
+  const internal = new Request(new URL('/stock/publish', req.url).toString(), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  const response = await stockPublishHandler(internal, env, ctx);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) throw new Error(result.error || `publish-${response.status}`);
+  return result;
+}
+
+async function stockSiteCapsuleHandler(req, env, ctx) {
+  const origin = req.headers.get('Origin') || '';
+  if (origin !== 'https://admira.academy' && origin !== 'https://www.admira.academy' && !LOCAL_ORIGIN_RE.test(origin)) {
+    return json({ error: 'forbidden-origin' }, { status: 403 });
+  }
+  const declared = Number(req.headers.get('Content-Length') || 0);
+  if (declared > 4096) return json({ error: 'body-too-large' }, { status: 413 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const counselorTag = String(body?.counselorTag || '').toLowerCase();
+  const audience = String(body?.audience || '').toLowerCase();
+  const requested = siteCapsuleUrl(body?.url);
+  if (!SITE_CAPSULE_COUNSELORS.has(counselorTag)) return json({ error: 'bad-counselor' }, { status: 400 });
+  if (!['silicio', 'carbono'].includes(audience)) return json({ error: 'bad-audience' }, { status: 400 });
+  if (!requested) return json({ error: 'unsafe-or-invalid-url' }, { status: 400 });
+
+  let items = await siteCapsuleItems(env);
+  let capsule = siteCapsuleFind(items, requested.href, counselorTag, 'capsula');
+  if (capsule) {
+    const preview = items.find(item => item.id === capsule.externalRef && item.type === 'image') || null;
+    if (preview) return json({ ok: true, reused: true, sourceUrl: requested.href, capsule, preview });
+  }
+
+  let response;
+  try {
+    response = await fetch(requested.href, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/2.0; +https://www.pixeria.com)', Accept: 'text/html,application/xhtml+xml' },
+      redirect: 'follow',
+    });
+  } catch { return json({ error: 'source-unreachable' }, { status: 502 }); }
+  if (!response.ok) return json({ error: 'source-fetch-failed', status: response.status }, { status: 502 });
+  const finalUrl = siteCapsuleUrl(response.url);
+  if (!finalUrl) return json({ error: 'unsafe-redirect' }, { status: 400 });
+  const contentType = String(response.headers.get('Content-Type') || '').toLowerCase();
+  const contentLength = Number(response.headers.get('Content-Length') || 0);
+  if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) return json({ error: 'source-not-html' }, { status: 415 });
+  if (contentLength > 1600000) return json({ error: 'source-too-large' }, { status: 413 });
+  const html = (await response.text()).slice(0, 1200000);
+  const canonicalCandidate = siteCapsuleLink(html, 'canonical');
+  let canonical = finalUrl;
+  if (canonicalCandidate) {
+    try { canonical = siteCapsuleUrl(new URL(canonicalCandidate, finalUrl).href) || finalUrl; } catch {}
+  }
+
+  items = await siteCapsuleItems(env);
+  capsule = siteCapsuleFind(items, canonical.href, counselorTag, 'capsula');
+  if (capsule) {
+    const preview = items.find(item => item.id === capsule.externalRef && item.type === 'image') || null;
+    if (preview) return json({ ok: true, reused: true, sourceUrl: canonical.href, capsule, preview });
+  }
+
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = (siteCapsuleMeta(html, 'og:title') || siteCapsuleEntity(titleMatch?.[1] || '')).replace(/\s+/g, ' ').trim().slice(0, 300);
+  const description = (siteCapsuleMeta(html, 'og:description') || siteCapsuleMeta(html, 'description')).replace(/\s+/g, ' ').trim().slice(0, 900);
+  const author = (siteCapsuleMeta(html, 'author') || siteCapsuleMeta(html, 'article:author')).replace(/\s+/g, ' ').trim().slice(0, 200);
+  const publishedAt = siteCapsuleMeta(html, 'article:published_time').slice(0, 80);
+  const text = siteCapsuleText(html);
+  if (!title || text.length < 700) return json({ error: 'source-has-no-readable-article' }, { status: 422 });
+  const imageCandidate = siteCapsuleMeta(html, 'og:image:secure_url') || siteCapsuleMeta(html, 'og:image') || siteCapsuleMeta(html, 'twitter:image');
+  let imageUrl = null;
+  try { imageUrl = siteCapsuleUrl(new URL(imageCandidate, finalUrl).href); } catch {}
+  if (!imageUrl) return json({ error: 'source-has-no-safe-preview-image' }, { status: 422 });
+
+  let summary;
+  try { summary = await siteCapsuleGemini(env, { title, description, author, url: canonical.href, text }); }
+  catch (error) { return json({ error: 'capsule-synthesis-failed', detail: String(error.message || error).slice(0, 120) }, { status: 502 }); }
+
+  items = await siteCapsuleItems(env);
+  let preview = siteCapsuleFind(items, canonical.href, counselorTag, 'image');
+  try {
+    if (!preview) {
+      const published = await siteCapsulePublish(req, env, ctx, {
+        type: 'image', motor: 'Site Capsule · preview', prompt: canonical.href,
+        title: `${title} · previo`, sourceUrl: imageUrl.href,
+        tags: ['formacion', counselorTag, 'site'], quality: 'good',
+      });
+      const object = await env.STOCK_BUCKET.get(`stock/${published.id}/meta.json`);
+      preview = object ? await object.json() : { ...published, type: 'image', prompt: canonical.href, tags: ['formacion', counselorTag, 'site', 'good'] };
+    }
+    const comment = `PARA CARBONO\n${summary.carbono}\n\nPARA SILICIO\n${summary.silicio}\n\nAPLICACIÓN\n${summary.aplicacion}`.slice(0, 2000);
+    const publishedCapsule = await siteCapsulePublish(req, env, ctx, {
+      type: 'capsula', motor: 'Site Capsule · Gemini', prompt: canonical.href, title, comment,
+      externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site'], quality: 'good',
+    });
+    const object = await env.STOCK_BUCKET.get(`stock/${publishedCapsule.id}/meta.json`);
+    capsule = object ? await object.json() : { ...publishedCapsule, type: 'capsula', prompt: canonical.href, title, comment, externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site', 'good'] };
+    await rebuildStockIndex(env);
+    return json({
+      ok: true, reused: false, sourceUrl: canonical.href,
+      source: { title, description, author, publishedAt, imageUrl: imageUrl.href },
+      summary, capsule, preview,
+    });
+  } catch (error) {
+    return json({ error: 'pixeria-publish-failed', detail: String(error.message || error).slice(0, 140) }, { status: 502 });
+  }
+}
+
 function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -6100,6 +6322,8 @@ export default {
         res = await telegramSetupHandler(req, env, url);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
+      } else if (path === '/stock/site-capsule' && req.method === 'POST') {
+        res = await stockSiteCapsuleHandler(req, env, ctx);
       } else if (path === '/stock/reindex' && req.method === 'POST') {
         // Reconstruye el índice (asigna num a los assets sin él) bajo demanda. Auth NOTIFY_KEY.
         let _b = {}; try { _b = await req.json(); } catch {}
@@ -6181,3 +6405,5 @@ export default {
 export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
+
+export { siteCapsuleText, siteCapsuleUrl };
