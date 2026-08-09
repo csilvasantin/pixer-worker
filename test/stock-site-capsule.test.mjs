@@ -32,6 +32,13 @@ test('compacta en una frase completa y no confunde un paso numerado con su final
   assert.doesNotMatch(compact, /\s\d+\.$/);
 });
 
+test('no confunde una abreviatura con el cierre editorial', () => {
+  const text = 'Primera frase completa que alcanza el mínimo requerido. Segunda recomendación completa con ejemplos. 5. Ejecuta un trabajo pequeño (ej. modelo ligero y ocho generaciones por prompt).';
+  const compact = siteCapsuleCompact(text, 40, 145);
+  assert.equal(compact, 'Primera frase completa que alcanza el mínimo requerido. Segunda recomendación completa con ejemplos.');
+  assert.doesNotMatch(compact, /\bej\.$/i);
+});
+
 test('el circuito publica previo y cápsula con tags canónicas y referencia', () => {
   assert.match(source, /path === '\/stock\/site-capsule'/);
   assert.match(source, /type: 'image', motor: 'Site Capsule · preview'/);
@@ -41,7 +48,7 @@ test('el circuito publica previo y cápsula con tags canónicas y referencia', (
   assert.match(source, /PARA CARBONO.*PARA SILICIO.*APLICACIÓN/s);
   assert.match(source, /siteCapsuleComplete\(comment\)/);
   assert.match(source, /siteCapsuleCompact\(clean\('aplicacion'\), 120, 300\)/);
-  assert.match(source, /numberedFragment/);
+  assert.match(source, /incompleteFragment/);
 });
 
 test('solo Academy puede solicitar la síntesis y la respuesta distingue reutilización', () => {
