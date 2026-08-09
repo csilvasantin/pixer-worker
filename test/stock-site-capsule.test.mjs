@@ -32,6 +32,8 @@ test('el circuito publica previo y cápsula con tags canónicas y referencia', (
   assert.match(source, /externalRef: preview\.id, thumbnail: preview\.url/);
   assert.match(source, /tags: \['formacion', counselorTag, 'site'\]/);
   assert.match(source, /PARA CARBONO.*PARA SILICIO.*APLICACIÓN/s);
+  assert.match(source, /siteCapsuleComplete\(comment\)/);
+  assert.match(source, /siteCapsuleCompact\(clean\('aplicacion'\), 120, 300\)/);
 });
 
 test('solo Academy puede solicitar la síntesis y la respuesta distingue reutilización', () => {

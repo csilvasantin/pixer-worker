@@ -3860,7 +3860,24 @@ function siteCapsuleHasTags(item, counselorTag) {
 }
 
 function siteCapsuleFind(items, canonicalUrl, counselorTag, type) {
-  return items.find(item => item && item.type === type && item.prompt === canonicalUrl && siteCapsuleHasTags(item, counselorTag)) || null;
+  return items.find(item => item && item.type === type && item.prompt === canonicalUrl && siteCapsuleHasTags(item, counselorTag)
+    && (type !== 'capsula' || siteCapsuleComplete(item.comment))) || null;
+}
+
+function siteCapsuleComplete(comment) {
+  const text = String(comment || '');
+  const carbon = text.match(/PARA CARBONO\s*\n([\s\S]*?)(?=\n\s*PARA SILICIO|$)/i)?.[1]?.trim() || '';
+  const silicon = text.match(/PARA SILICIO\s*\n([\s\S]*?)(?=\n\s*APLICACIÓN|$)/i)?.[1]?.trim() || '';
+  const application = text.match(/APLICACIÓN\s*\n([\s\S]*)$/i)?.[1]?.trim() || '';
+  return carbon.length >= 260 && silicon.length >= 260 && application.length >= 100 && text.length <= 2000;
+}
+
+function siteCapsuleCompact(value, minimum, maximum) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maximum) return text;
+  const sample = text.slice(0, maximum + 1);
+  const boundaries = [...sample.matchAll(/[.!?](?:\s|$)/g)].map(match => match.index + 1).filter(index => index >= minimum && index <= maximum);
+  return boundaries.length ? sample.slice(0, boundaries.at(-1)).trim() : sample.slice(0, maximum - 1).trimEnd() + '…';
 }
 
 async function siteCapsuleGemini(env, source) {
@@ -3886,7 +3903,11 @@ async function siteCapsuleGemini(env, source) {
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error('gemini-invalid-json'); }
   const clean = key => String(parsed?.[key] || '').replace(/\s+/g, ' ').trim();
-  const result = { carbono: clean('carbono'), silicio: clean('silicio'), aplicacion: clean('aplicacion') };
+  const result = {
+    carbono: siteCapsuleCompact(clean('carbono'), 300, 620),
+    silicio: siteCapsuleCompact(clean('silicio'), 300, 720),
+    aplicacion: siteCapsuleCompact(clean('aplicacion'), 120, 300),
+  };
   if (result.carbono.length < 260 || result.silicio.length < 260 || result.aplicacion.length < 100) throw new Error('gemini-incomplete-capsule');
   return result;
 }
@@ -3980,7 +4001,8 @@ async function stockSiteCapsuleHandler(req, env, ctx) {
       const object = await env.STOCK_BUCKET.get(`stock/${published.id}/meta.json`);
       preview = object ? await object.json() : { ...published, type: 'image', prompt: canonical.href, tags: ['formacion', counselorTag, 'site', 'good'] };
     }
-    const comment = `PARA CARBONO\n${summary.carbono}\n\nPARA SILICIO\n${summary.silicio}\n\nAPLICACIÓN\n${summary.aplicacion}`.slice(0, 2000);
+    const comment = `PARA CARBONO\n${summary.carbono}\n\nPARA SILICIO\n${summary.silicio}\n\nAPLICACIÓN\n${summary.aplicacion}`;
+    if (!siteCapsuleComplete(comment)) throw new Error('capsule-outside-size-contract');
     const publishedCapsule = await siteCapsulePublish(req, env, ctx, {
       type: 'capsula', motor: 'Site Capsule · Gemini', prompt: canonical.href, title, comment,
       externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site'], quality: 'good',
