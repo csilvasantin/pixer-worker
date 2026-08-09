@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl } from '../src/index.js';
+import { capsuleDimensionTag, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl } from '../src/index.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 
@@ -44,11 +44,19 @@ test('el circuito publica previo y cápsula con tags canónicas y referencia', (
   assert.match(source, /type: 'image', motor: 'Site Capsule · preview'/);
   assert.match(source, /type: 'capsula', motor: 'Site Capsule · Gemini'/);
   assert.match(source, /externalRef: preview\.id, thumbnail: preview\.url/);
-  assert.match(source, /tags: \['formacion', counselorTag, 'site'\]/);
+  assert.match(source, /tags: \['formacion', counselorTag, 'site', summary\.dimension\]/);
+  assert.match(source, /"dimension":"tech\|creativity\|business"/);
   assert.match(source, /PARA CARBONO.*PARA SILICIO.*APLICACIÓN/s);
   assert.match(source, /siteCapsuleComplete\(comment\)/);
   assert.match(source, /siteCapsuleCompact\(clean\('aplicacion'\), 120, 300\)/);
   assert.match(source, /incompleteFragment/);
+});
+
+test('normaliza las tres dimensiones a hashtags internacionales', () => {
+  assert.equal(capsuleDimensionTag('tecnologia'), 'tech');
+  assert.equal(capsuleDimensionTag('creatividad'), 'creativity');
+  assert.equal(capsuleDimensionTag('negocio'), 'business');
+  assert.equal(capsuleDimensionTag('otro'), '');
 });
 
 test('solo Academy puede solicitar la síntesis y la respuesta distingue reutilización', () => {

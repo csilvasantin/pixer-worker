@@ -3785,6 +3785,13 @@ const SITE_CAPSULE_COUNSELORS = new Set([
 const SITE_CAPSULE_TRACKING_PARAMS = new Set([
   'ncid', 'mkt_tok', 'fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid',
 ]);
+const CAPSULE_DIMENSION_TAGS = new Set(['tech', 'creativity', 'business']);
+
+function capsuleDimensionTag(value) {
+  const normalized = String(value || '').toLowerCase().trim();
+  const aliases = { tecnologia: 'tech', technology: 'tech', tech: 'tech', creatividad: 'creativity', creativity: 'creativity', negocio: 'business', business: 'business' };
+  return aliases[normalized] || '';
+}
 
 function siteCapsuleUrl(value) {
   let url;
@@ -3891,7 +3898,8 @@ function siteCapsuleCompact(value, minimum, maximum) {
 async function siteCapsuleGemini(env, source) {
   if (!env.GEMINI_API_KEY) throw new Error('server-missing-key');
   const prompt = `Transforma el artículo siguiente en una cápsula de conocimiento verificable para Admira Academy.\n` +
-    `Devuelve SOLO JSON válido con este esquema exacto: {"carbono":"...","silicio":"...","aplicacion":"..."}.\n` +
+    `Devuelve SOLO JSON válido con este esquema exacto: {"dimension":"tech|creativity|business","carbono":"...","silicio":"...","aplicacion":"..."}.\n` +
+    `dimension: elige exactamente tech para tecnología, creativity para creatividad o business para negocio.\n` +
     `carbono: resumen claro en español para una persona, 450-700 caracteres.\n` +
     `silicio: instrucciones operativas en español para un agente de IA, 450-700 caracteres, con criterios comprobables.\n` +
     `aplicacion: siguiente experimento concreto, 180-350 caracteres.\n` +
@@ -3912,11 +3920,12 @@ async function siteCapsuleGemini(env, source) {
   try { parsed = JSON.parse(raw); } catch { throw new Error('gemini-invalid-json'); }
   const clean = key => String(parsed?.[key] || '').replace(/\s+/g, ' ').trim();
   const result = {
+    dimension: capsuleDimensionTag(clean('dimension')),
     carbono: siteCapsuleCompact(clean('carbono'), 300, 620),
     silicio: siteCapsuleCompact(clean('silicio'), 300, 720),
     aplicacion: siteCapsuleCompact(clean('aplicacion'), 120, 300),
   };
-  if (result.carbono.length < 260 || result.silicio.length < 260 || result.aplicacion.length < 100) throw new Error('gemini-incomplete-capsule');
+  if (!CAPSULE_DIMENSION_TAGS.has(result.dimension) || result.carbono.length < 260 || result.silicio.length < 260 || result.aplicacion.length < 100) throw new Error('gemini-incomplete-capsule');
   return result;
 }
 
@@ -4004,19 +4013,19 @@ async function stockSiteCapsuleHandler(req, env, ctx) {
       const published = await siteCapsulePublish(req, env, ctx, {
         type: 'image', motor: 'Site Capsule · preview', prompt: canonical.href,
         title: `${title} · previo`, sourceUrl: imageUrl.href,
-        tags: ['formacion', counselorTag, 'site'], quality: 'good',
+        tags: ['formacion', counselorTag, 'site', summary.dimension], quality: 'good',
       });
       const object = await env.STOCK_BUCKET.get(`stock/${published.id}/meta.json`);
-      preview = object ? await object.json() : { ...published, type: 'image', prompt: canonical.href, tags: ['formacion', counselorTag, 'site', 'good'] };
+      preview = object ? await object.json() : { ...published, type: 'image', prompt: canonical.href, tags: ['formacion', counselorTag, 'site', summary.dimension, 'good'] };
     }
     const comment = `PARA CARBONO\n${summary.carbono}\n\nPARA SILICIO\n${summary.silicio}\n\nAPLICACIÓN\n${summary.aplicacion}`;
     if (!siteCapsuleComplete(comment)) throw new Error('capsule-outside-size-contract');
     const publishedCapsule = await siteCapsulePublish(req, env, ctx, {
       type: 'capsula', motor: 'Site Capsule · Gemini', prompt: canonical.href, title, comment,
-      externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site'], quality: 'good',
+      externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site', summary.dimension], quality: 'good',
     });
     const object = await env.STOCK_BUCKET.get(`stock/${publishedCapsule.id}/meta.json`);
-    capsule = object ? await object.json() : { ...publishedCapsule, type: 'capsula', prompt: canonical.href, title, comment, externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site', 'good'] };
+    capsule = object ? await object.json() : { ...publishedCapsule, type: 'capsula', prompt: canonical.href, title, comment, externalRef: preview.id, thumbnail: preview.url, tags: ['formacion', counselorTag, 'site', summary.dimension, 'good'] };
     await rebuildStockIndex(env);
     return json({
       ok: true, reused: false, sourceUrl: canonical.href,
@@ -4084,7 +4093,7 @@ async function stockPublishHandler(req, env, ctx) {
   const ph = (body.ph != null && isFinite(+body.ph)) ? Math.max(8, Math.min(400, +body.ph)) : null;
   // Precio del mueble (créditos del Xpacio), para el Marketplace.
   const price = (body.price != null && isFinite(+body.price)) ? Math.max(0, Math.min(100000, Math.round(+body.price))) : null;
-  let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,3) : null;
+  let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,4) : null;
   // Calidad del asset (good/better/best, según el motor); default 'good'.
   const QUALITY_TIERS = ['good', 'better', 'best'];
   const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
@@ -4587,6 +4596,46 @@ async function stockEditTagsHandler(req, env, ctx, id) {
   }
 
   return json({ ok: true, id, tags: cleaned });
+}
+
+// POST /stock/:id/rating — un voto persistente de 1–5 por instalación del
+// navegador. El identificador nunca se publica: se guarda sólo su hash en R2 y
+// el índice expone exclusivamente la media y el número de votos.
+async function stockRatingHandler(req, env, ctx, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const value = Number(body.rating);
+  const voterId = String(body.voterId || '').trim();
+  if (!Number.isInteger(value) || value < 1 || value > 5) return json({ error: 'bad-rating', expected: 'integer 1..5' }, { status: 400 });
+  if (!/^[A-Za-z0-9_-]{16,80}$/.test(voterId)) return json({ error: 'bad-voter' }, { status: 400 });
+
+  const metaKey = `stock/${id}/meta.json`;
+  const metaObj = await env.STOCK_BUCKET.get(metaKey);
+  if (!metaObj) return json({ error: 'not-found' }, { status: 404 });
+  let meta;
+  try { meta = await metaObj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
+
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(voterId));
+  const voterHash = Array.from(new Uint8Array(digest)).slice(0, 16).map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const ratingsKey = `stock/${id}/ratings.json`;
+  const ratingsObj = await env.STOCK_BUCKET.get(ratingsKey);
+  let votes = {};
+  if (ratingsObj) { try { votes = (await ratingsObj.json()).votes || {}; } catch {} }
+  if (!Object.prototype.hasOwnProperty.call(votes, voterHash) && Object.keys(votes).length >= 5000) return json({ error: 'rating-cap-reached' }, { status: 429 });
+  votes[voterHash] = value;
+  const values = Object.values(votes).map(Number).filter(item => Number.isInteger(item) && item >= 1 && item <= 5);
+  const rating = { average: Number((values.reduce((sum, item) => sum + item, 0) / values.length).toFixed(2)), count: values.length };
+  meta.rating = rating;
+  await env.STOCK_BUCKET.put(ratingsKey, JSON.stringify({ votes }), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'private, no-store' },
+  });
+  await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
+  ctx.waitUntil(rebuildStockIndex(env));
+  return json({ ok: true, id, rating, yourRating: value });
 }
 
 // DELETE /stock/:id — borra los 2 objetos R2 (asset + meta) de un item.
@@ -6410,6 +6459,9 @@ export default {
       } else if (path.match(/^\/stock\/[^/]+\/tags$/) && req.method === 'POST') {
         const id = path.split('/')[2];
         res = await stockEditTagsHandler(req, env, ctx, id);
+      } else if (path.match(/^\/stock\/[^/]+\/rating$/) && req.method === 'POST') {
+        const id = path.split('/')[2];
+        res = await stockRatingHandler(req, env, ctx, id);
       } else if (path.startsWith('/stock/') && req.method === 'DELETE') {
         const id = path.slice('/stock/'.length);
         res = await stockDeleteHandler(req, env, ctx, id);
@@ -6436,4 +6488,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { capsuleDimensionTag, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
