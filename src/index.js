@@ -3770,11 +3770,10 @@ async function stockTrackHandler(req, env, ctx, id) {
 //                            size, thumbnail, url, createdAt)
 // Listado: R2.list({prefix: 'stock/'}) + filtro por sufijo /meta.json.
 // Sin KV → sin límite de 1000 writes/día en Workers Free.
-// 'guion' es TEXTO, no un fichero: lo que un vídeo del Stock le enseña a una silla
-// del Consejo. yokup lo espera desde el 7-ago (COUNCIL_GUION_TYPE) y el Stock no lo
-// admitía, así que el circuito de formación estaba abierto por este extremo: había
-// 475 assets y CERO guiones porque no se podían crear.
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'guion'];
+// Una `capsula` es TEXTO, no un fichero: lo que un vídeo del Stock enseña a una
+// silla del Consejo. `guion` queda admitido únicamente como tipo histórico para no
+// romper activos anteriores; toda publicación nueva usa el nombre canónico.
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 function b64ToBytes(b64) {
@@ -3825,6 +3824,7 @@ async function stockPublishHandler(req, env, ctx) {
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
+  const isKnowledgeCapsule = type === 'capsula' || type === 'guion';
   // Metadatos de mobiliario (type 'furni'): huella en tiles [w,d] y alto en px.
   const fp = (Array.isArray(body.fp) && body.fp.length === 2)
     ? [Math.max(1, Math.min(6, +body.fp[0] || 1)), Math.max(1, Math.min(6, +body.fp[1] || 1))]
@@ -3853,11 +3853,11 @@ async function stockPublishHandler(req, env, ctx) {
     return json({ error: 'bad-type', expected: STOCK_TYPES }, { status: 400 });
   }
   if (!motor || typeof motor !== 'string') return json({ error: 'missing-motor' }, { status: 400 });
-  // La cara del guión sale de la pieza que explica. Si el vídeo no tiene miniatura
-  // o no se encuentra, el guión se publica igual: la imagen suma, su ausencia no
+  // La cara de la cápsula sale de la pieza que explica. Si el vídeo no tiene miniatura
+  // o no se encuentra, la cápsula se publica igual: la imagen suma, su ausencia no
   // puede impedir que el conocimiento entre.
   let thumbHeredada = null;
-  if (type === 'guion' && !thumbnail && typeof body.externalRef === 'string' && body.externalRef.trim()) {
+  if (isKnowledgeCapsule && !thumbnail && typeof body.externalRef === 'string' && body.externalRef.trim()) {
     try {
       const refId = body.externalRef.trim();
       if (/^[A-Za-z0-9-]+$/.test(refId) && env.STOCK_BUCKET) {
@@ -3870,13 +3870,13 @@ async function stockPublishHandler(req, env, ctx) {
     } catch (e) { /* sin cara, pero con conocimiento */ }
   }
 
-  // Un guión no tiene fichero que subir: SU TEXTO es el contenido. Se convierte aquí
+  // Una cápsula no tiene fichero que subir: SU TEXTO es el contenido. Se convierte aquí
   // para que recorra el mismo carril que todo lo demás (R2, índice, firma) en vez de
   // abrirle una puerta aparte.
   let base64Efectivo = base64, mimeEfectivo = mime;
-  if (type === 'guion' && !base64 && !sourceUrl) {
+  if (isKnowledgeCapsule && !base64 && !sourceUrl) {
     const texto = String(comment || '').trim();
-    if (!texto) return json({ error: 'guion-sin-texto', detail: 'el conocimiento va en comment' }, { status: 400 });
+    if (!texto) return json({ error: 'capsula-sin-texto', detail: 'el conocimiento va en comment' }, { status: 400 });
     base64Efectivo = btoa(unescape(encodeURIComponent(texto)));
     mimeEfectivo = 'text/plain';
   }
@@ -3922,8 +3922,8 @@ async function stockPublishHandler(req, env, ctx) {
   let bytes, finalMime, sourceResponse = null, sourceDeclaredSize = 0;
   try {
     if (base64Efectivo) {
-      // Efectivo, no el del body: un guión llega sin adjunto y su texto se convierte
-      // arriba. Si aquí se leyera `base64` a secas, el guión se caería por el camino.
+      // Efectivo, no el del body: una cápsula llega sin adjunto y su texto se convierte
+      // arriba. Si aquí se leyera `base64` a secas, la cápsula se caería por el camino.
       bytes = b64ToBytes(base64Efectivo);
       finalMime = mimeEfectivo || 'application/octet-stream';
     } else {
@@ -4042,8 +4042,8 @@ async function stockPublishHandler(req, env, ctx) {
     mime: finalMime,
     ext,
     size: assetSize,
-    // Un guión hereda la CARA de su vídeo. La miniatura ya existe —es la que
-    // identifica al vídeo en el Stock— y sin ella el guión se veía como un ladrillo
+    // Una cápsula hereda la CARA de su vídeo. La miniatura ya existe —es la que
+    // identifica al vídeo en el Stock— y sin ella la cápsula se veía como un ladrillo
     // de texto verde, imposible de reconocer de un vistazo entre tarjetas con
     // imagen. Se resuelve al publicar y no al pintar para que valga en cualquier
     // sitio que lea el índice, no solo en la galería. (Carlos, 7-ago-2026.)
