@@ -3869,14 +3869,18 @@ function siteCapsuleComplete(comment) {
   const carbon = text.match(/PARA CARBONO\s*\n([\s\S]*?)(?=\n\s*PARA SILICIO|$)/i)?.[1]?.trim() || '';
   const silicon = text.match(/PARA SILICIO\s*\n([\s\S]*?)(?=\n\s*APLICACIÓN|$)/i)?.[1]?.trim() || '';
   const application = text.match(/APLICACIÓN\s*\n([\s\S]*)$/i)?.[1]?.trim() || '';
-  return carbon.length >= 260 && silicon.length >= 260 && application.length >= 100 && text.length <= 2000;
+  const numberedFragment = value => /(?:^|\s)\d+\.$/.test(value);
+  return carbon.length >= 260 && silicon.length >= 260 && application.length >= 100 && text.length <= 2000
+    && !numberedFragment(carbon) && !numberedFragment(silicon) && !numberedFragment(application);
 }
 
 function siteCapsuleCompact(value, minimum, maximum) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= maximum) return text;
   const sample = text.slice(0, maximum + 1);
-  const boundaries = [...sample.matchAll(/[.!?](?:\s|$)/g)].map(match => match.index + 1).filter(index => index >= minimum && index <= maximum);
+  const boundaries = [...sample.matchAll(/[.!?](?:\s|$)/g)]
+    .filter(match => !/\d/.test(sample[match.index - 1] || ''))
+    .map(match => match.index + 1).filter(index => index >= minimum && index <= maximum);
   return boundaries.length ? sample.slice(0, boundaries.at(-1)).trim() : sample.slice(0, maximum - 1).trimEnd() + '…';
 }
 
@@ -6428,4 +6432,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { siteCapsuleText, siteCapsuleUrl };
+export { siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { siteCapsuleText, siteCapsuleUrl } from '../src/index.js';
+import { siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl } from '../src/index.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 
@@ -25,6 +25,13 @@ test('extrae el contenido editorial y descarta navegación y scripts', () => {
   assert.doesNotMatch(text, /No conservar|secreto/);
 });
 
+test('compacta en una frase completa y no confunde un paso numerado con su final', () => {
+  const text = 'Primera frase suficientemente larga para superar el mínimo. 4. Cuarto paso explicado de forma completa y verificable. 5. Quinto paso que ya queda fuera del presupuesto disponible.';
+  const compact = siteCapsuleCompact(text, 40, 125);
+  assert.equal(compact, 'Primera frase suficientemente larga para superar el mínimo. 4. Cuarto paso explicado de forma completa y verificable.');
+  assert.doesNotMatch(compact, /\s\d+\.$/);
+});
+
 test('el circuito publica previo y cápsula con tags canónicas y referencia', () => {
   assert.match(source, /path === '\/stock\/site-capsule'/);
   assert.match(source, /type: 'image', motor: 'Site Capsule · preview'/);
@@ -34,6 +41,7 @@ test('el circuito publica previo y cápsula con tags canónicas y referencia', (
   assert.match(source, /PARA CARBONO.*PARA SILICIO.*APLICACIÓN/s);
   assert.match(source, /siteCapsuleComplete\(comment\)/);
   assert.match(source, /siteCapsuleCompact\(clean\('aplicacion'\), 120, 300\)/);
+  assert.match(source, /numberedFragment/);
 });
 
 test('solo Academy puede solicitar la síntesis y la respuesta distingue reutilización', () => {
