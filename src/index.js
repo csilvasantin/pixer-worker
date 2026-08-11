@@ -3881,7 +3881,7 @@ async function stockInteractiveHandler(req, env, ctx) {
   return json({ ok: true, id, url: rec.url, category: rec.category, actualizado: !!antes });
 }
 
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive'];
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive', 'animation'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 const SITE_CAPSULE_COUNSELORS = new Set([
@@ -4386,6 +4386,10 @@ async function stockPublishHandler(req, env, ctx) {
   // sobre la clasificación de Gemini (es el segmento exacto de esta versión).
   if (bodyAudience) audience = bodyAudience;
   else if (segmentation && segmentation.audiences.length === 1) audience = segmentation.audiences[0];
+  // Una animacion no se clasifica por funcion publicitaria: su sitio en el
+  // catalogo lo decide el tipo. Gemini la mandaria a 'producto' y no aparecería
+  // donde se la busca.
+  if (type === 'animation' || type === 'interactive') category = 'animaciones';
 
   // El tag de calidad se añade SIEMPRE (además de los de contenido), sin pisar.
   tags = Array.isArray(tags) ? tags : [];
