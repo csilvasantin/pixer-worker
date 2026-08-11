@@ -188,3 +188,64 @@ test('sin KV los probes siguen fail-closed y health expone degradación', async 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('el mando remoto silencia éxitos pero conserva errores en Telegram', async () => {
+  const originalFetch = globalThis.fetch;
+  const telegram = telegramFetchSpy();
+  globalThis.fetch = telegram.fetch;
+  try {
+    let upstreamStatus = 200;
+    const env = {
+      TELEGRAM_BOT_TOKEN: 'fake-token',
+      TELEGRAM_CHAT_ID: 'fake-chat',
+      OMNI: {
+        async fetch() {
+          return new Response(JSON.stringify(upstreamStatus < 400
+            ? { ok: true, cid: 42 }
+            : { ok: false, error: 'invalid-command' }), {
+            status: upstreamStatus,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+      },
+    };
+
+    for (const status of [200, 399]) {
+      upstreamStatus = status;
+      for (const path of ['/locations/cmd', '/locations/cmd/', '/locations/cmd/ack', '/locations/cmd/ack/']) {
+        const response = await runRequest(new Request(`https://worker.test${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+          body: '{}',
+        }), env);
+        assert.equal(response.status, status);
+      }
+    }
+    assert.equal(telegram.calls.length, 0, 'una interacción correcta no ensucia Telegram');
+
+    for (const status of [400, 409, 500]) {
+      upstreamStatus = status;
+      for (const path of ['/locations/cmd', '/locations/cmd/ack']) {
+        const rejected = await runRequest(new Request(`https://worker.test${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+          body: '{}',
+        }), env);
+        assert.equal(rejected.status, status);
+      }
+    }
+    assert.equal(telegram.calls.length, 6, '4xx y 5xx conservan alerta inmediata en ambas rutas');
+    assert.ok(telegram.calls.every(({ body }) => /POST \/locations\/cmd/.test(body.text)));
+
+    upstreamStatus = 200;
+    const put = await runRequest(new Request('https://worker.test/locations/cmd', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: '{}',
+    }), env);
+    assert.equal(put.status, 200);
+    assert.equal(telegram.calls.length, 7, 'otros verbos no heredan el silencio reservado al mando');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

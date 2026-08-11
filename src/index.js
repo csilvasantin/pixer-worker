@@ -215,6 +215,13 @@ const NOTIFY_SKIP_EXACT = new Set([
   // (los prefijos /stock/track/ y /stock/asset/ van en NOTIFY_SKIP_PREFIX abajo)
   '/veo/download',
 ]);
+// Acciones normales que ya enseñan feedback y ACK en su propia interfaz. Sólo
+// se silencia el éxito: un 4xx/5xx sigue llegando a Telegram porque ahí sí hay
+// una orden rechazada o una avería que merece atención.
+const NOTIFY_SKIP_SUCCESS_EXACT = new Set([
+  '/locations/cmd',
+  '/locations/cmd/ack',
+]);
 const NOTIFY_SKIP_PREFIX = [
   '/megafonia/', // push (aviso) + next (polling del gemelo) + audio — no spamear Telegram
   '/hilomusical/', // next (polling del gemelo) — no spamear (el push notifica vía /stock/publish)
@@ -231,8 +238,12 @@ const NOTIFY_SKIP_PREFIX = [
   '/xpacio',     // monedero/inventario del Xpacio: housekeeping de la UI del Marketplace
 ];
 
-function notificationRouteIsSkipped(path) {
-  return NOTIFY_SKIP_EXACT.has(path) || NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p));
+function notificationRouteIsSkipped(path, status, method) {
+  const successPath = String(path || '/').length > 1
+    ? String(path).replace(/\/+$/, '')
+    : String(path || '/');
+  return NOTIFY_SKIP_EXACT.has(path) || NOTIFY_SKIP_PREFIX.some(p => path.startsWith(p)) ||
+    (String(method).toUpperCase() === 'POST' && Number(status) < 400 && NOTIFY_SKIP_SUCCESS_EXACT.has(successPath));
 }
 
 function notificationSafePath(path) {
@@ -270,7 +281,7 @@ async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
     method: req.method,
     status,
     errorCode,
-    skip: notificationRouteIsSkipped(path),
+    skip: notificationRouteIsSkipped(path, status, req.method),
   });
   if (policy.action === 'skip') return;
   if (policy.action === 'immediate') {
