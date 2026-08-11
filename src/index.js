@@ -3604,7 +3604,14 @@ const TAG_SUGGESTIONS = [
 // Taxonomía de segmentación para publicidad dirigida (la consume /targetPublicity
 // en el gemelo): audience = público objetivo · category = función publicitaria.
 const STOCK_AUDIENCES = ['f', 'm', 'all'];
-const STOCK_CATEGORIES = ['atraer', 'producto', 'promo', 'marca'];
+// «animaciones» no es una función publicitaria como las otras cuatro: es la CLASE
+// de pieza — los interactivos (Xperiencias de AInimation Studio) que se emiten en
+// admira.tv. Va aquí porque este enum es lo que gobierna qué se puede asignar desde
+// el CMS de pixeria.com/stock, y hay precedente: «enlace» ya vive en los datos con
+// el mismo espíritu. NO se añade a RTB_CATEGORIES a propósito: esa es la taxonomía
+// de DEMANDA, y meterla allí dejaría que el motor programático eligiera un
+// interactivo como creativo de una campaña.
+const STOCK_CATEGORIES = ['atraer', 'producto', 'promo', 'marca', 'animaciones'];
 
 // Clasificación automática con Gemini: 3 tags + audiencia + categoría de retail.
 // Devuelve siempre un objeto {tags, audience, category} con defaults seguros.
@@ -3806,7 +3813,74 @@ async function stockTrackHandler(req, env, ctx, id) {
 // Una `capsula` es TEXTO, no un fichero: lo que un vídeo del Stock enseña a una
 // silla del Consejo. `guion` queda admitido únicamente como tipo histórico para no
 // romper activos anteriores; toda publicación nueva usa el nombre canónico.
-const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion'];
+
+// ─── Alta de un INTERACTIVO (Xperiencia) en el Stock ───────────────────────────
+// POST /stock/interactive {secret, url, title, motor?, thumbnail?, comment?, tags?}
+//
+// Un interactivo NO es un fichero que se sube: es una PÁGINA autocontenida que
+// exporta AInimation Studio (Archivo > Publicar Xperiencia) y que vive en su
+// dominio. Por eso no pasa por /stock/publish, que existe para bajar un asset a
+// R2 y firmarlo: aquí no hay nada que bajar, y forzarlo por ese carril solo
+// serviría para guardar una copia muerta del HTML.
+//
+// Se guarda el meta con `type:'interactive'` (lo que el canal de admira.tv sabe
+// emitir desde r54) y `category:'animaciones'`, que es el sitio del catálogo donde
+// Carlos quiere ver estas piezas. La duración NO se guarda aquí a propósito: la
+// declara la propia Xperiencia al cargarse (canal r55).
+async function stockInteractiveHandler(req, env, ctx) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!env.NOTIFY_KEY || body.secret !== env.NOTIFY_KEY) return json({ error: 'unauthorized' }, { status: 401 });
+
+  // Solo https y solo dominios propios: esto entra en la ANTENA, dentro de un
+  // iframe a pantalla completa. Un interactivo de un tercero no se cuela por aquí.
+  let destino;
+  try { destino = new URL(String(body.url || '')); } catch { return json({ error: 'bad-url' }, { status: 400 }); }
+  const propio = destino.protocol === 'https:' && /(^|\.)(ainimation\.studio|xpaceos\.com|admira\.tv|pixeria\.com)$/.test(destino.hostname);
+  if (!propio) return json({ error: 'bad-host', detail: 'solo https y dominios propios' }, { status: 400 });
+
+  const title = String(body.title || 'Xperiencia').slice(0, 160);
+  const tags = [...new Set(['animaciones', 'interactivo', ...(Array.isArray(body.tags) ? body.tags : [])]
+    .map(t => String(t).toLowerCase().trim().slice(0, 30)).filter(Boolean))].slice(0, 8);
+
+  // Id determinista por URL: republicar la misma pieza la ACTUALIZA en vez de
+  // llenar el catálogo de duplicados cada vez que se reexporta.
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(destino.toString()));
+  const id = 'xp-' + Array.from(new Uint8Array(digest)).slice(0, 8)
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  const metaKey = `stock/${id}/meta.json`;
+  const previo = await env.STOCK_BUCKET.get(metaKey);
+  const antes = previo ? await previo.json().catch(() => null) : null;
+
+  const rec = {
+    id,
+    type: 'interactive',
+    motor: String(body.motor || 'AInimation Studio').slice(0, 80),
+    prompt: destino.toString(),
+    title,
+    comment: body.comment ? String(body.comment).slice(0, 800) : null,
+    tags,
+    quality: 'best',
+    audience: 'all',
+    category: 'animaciones',
+    costEst: '0',
+    mime: 'text/html',
+    ext: 'html',
+    size: 0,
+    thumbnail: body.thumbnail ? String(body.thumbnail).slice(0, 500) : null,
+    url: destino.toString(),
+    createdAt: antes && antes.createdAt ? antes.createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: 'ainimation',
+    num: antes && antes.num ? antes.num : undefined,
+  };
+  await env.STOCK_BUCKET.put(metaKey, JSON.stringify(rec), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
+  await rebuildStockIndex(env);
+  return json({ ok: true, id, url: rec.url, category: rec.category, actualizado: !!antes });
+}
+\nconst STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 const SITE_CAPSULE_COUNSELORS = new Set([
@@ -6432,6 +6506,8 @@ export default {
         res = await telegramSetupHandler(req, env, url);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
+      } else if (path === '/stock/interactive' && req.method === 'POST') {
+        res = await stockInteractiveHandler(req, env, ctx);
       } else if (path === '/stock/site-capsule' && req.method === 'POST') {
         res = await stockSiteCapsuleHandler(req, env, ctx);
       } else if (path === '/stock/reindex' && req.method === 'POST') {
