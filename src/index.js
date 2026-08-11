@@ -3880,7 +3880,8 @@ async function stockInteractiveHandler(req, env, ctx) {
   await rebuildStockIndex(env);
   return json({ ok: true, id, url: rec.url, category: rec.category, actualizado: !!antes });
 }
-\nconst STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive'];
+
+const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
 const SITE_CAPSULE_COUNSELORS = new Set([
