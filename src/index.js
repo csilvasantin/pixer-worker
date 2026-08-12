@@ -3953,6 +3953,7 @@ async function stockInteractiveHandler(req, env, ctx) {
 
 // La puerta que convierte una cápsula recién publicada en un TikTok de 15 s.
 const CAPSULE_TIKTOK_URL = 'https://www.admiranext.com/presentaciones/api/capsule-tiktok';
+const CAPSULE_STATUS_URL = 'https://www.admiranext.com/presentaciones/api/grok-video?id=';
 const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive', 'animation'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
@@ -4554,6 +4555,14 @@ async function stockPublishHandler(req, env, ctx) {
       let d = {}; try { d = JSON.parse(texto); } catch {}
       console.log(JSON.stringify({ message: 'capsula→tiktok', id, ok: r.ok, status: r.status,
         generado: d.generado, tema: d.tema, motivo: d.motivo || d.error, cuerpo: texto.slice(0, 160) }));
+      // El video queda EN VUELO: el generador solo lo publica en el Stock cuando
+      // alguien pregunta si ya esta (en el estudio pregunta el navegador). Aqui no
+      // hay navegador, asi que se anota el encargo y el cron de cada 2 min se
+      // encarga de preguntar hasta que aterrice.
+      if (r.ok && d.generado && d.requestId) {
+        await env.SIGNAGE_KV.put('capsula:pendiente:' + d.requestId,
+          JSON.stringify({ capsula: id, tema: d.tema, desde: Date.now() }), { expirationTtl: 3 * 3600 });
+      }
     }).catch((e) => {
       console.error(JSON.stringify({ message: 'capsula→tiktok falló', id, error: String(e && e.message || e).slice(0, 200) }));
     }));
@@ -6348,6 +6357,37 @@ export default {
   // por si alguna regeneración post-mutación se perdió. Corre EN Cloudflare,
   // así que no le afecta el bloqueo de workers.dev de los ISP españoles.
   // + Informe de campañas al cierre del día (REPORT_HOUR Madrid, def 21h) a Telegram.
+// ─── VIDEOS DE CAPSULA EN VUELO ──────────────────────────────────────────────
+// Grok tarda minutos y el generador SOLO publica en el Stock cuando alguien
+// pregunta si el video ya esta — en el estudio pregunta el navegador, aqui no hay
+// ninguno. Este barrido pregunta por cada encargo vivo hasta que aterriza. No hay
+// que hacer nada mas: la propia pregunta dispara la publicacion al otro lado.
+// Los encargos caducan solos a las 3 h: si Grok no ha terminado para entonces, no
+// va a terminar, y dejar la clave viva solo sirve para preguntar eternamente.
+async function capsulasEnVuelo(env) {
+  if (!env.SIGNAGE_KV) return;
+  let lista;
+  try { lista = await env.SIGNAGE_KV.list({ prefix: 'capsula:pendiente:', limit: 40 }); }
+  catch (e) { return; }
+  for (const k of (lista.keys || [])) {
+    const requestId = k.name.slice('capsula:pendiente:'.length);
+    try {
+      const r = await fetch(CAPSULE_STATUS_URL + encodeURIComponent(requestId), { headers: { accept: 'application/json' } });
+      const d = await r.json().catch(() => ({}));
+      if (d.status === 'done' || d.status === 'published' || d.pixeria?.status === 'published') {
+        console.log(JSON.stringify({ message: 'capsula→tiktok aterrizado', requestId, pixeria: d.pixeria?.status, asset: d.pixeria?.id }));
+        await env.SIGNAGE_KV.delete(k.name);
+      } else if (d.status === 'failed' || d.status === 'expired') {
+        console.warn(JSON.stringify({ message: 'capsula→tiktok perdido', requestId, status: d.status, error: d.error }));
+        await env.SIGNAGE_KV.delete(k.name);
+      }
+    } catch (e) {
+      console.warn(JSON.stringify({ message: 'capsula→tiktok sondeo fallo', requestId, error: String(e && e.message || e).slice(0, 160) }));
+    }
+  }
+}
+
+export default {
   async scheduled(event, env, ctx) {
     // Hay dos cron (*/2 y */10) y coinciden en cada minuto múltiplo de diez.
     // Si ambos consolidan, dos isolates pueden ver el marker ausente a la vez y
@@ -6358,6 +6398,7 @@ export default {
         .catch(() => console.warn('notification-aggregator-flush-failed')));
     }
     if (event && event.cron === '*/2 * * * *') {
+      ctx.waitUntil(capsulasEnVuelo(env));
       ctx.waitUntil(tgEntregarPendientes(env));
       ctx.waitUntil(agoraActivityMonitor(env));
       ctx.waitUntil(signageHealthMonitor(env));
