@@ -3667,7 +3667,7 @@ const STOCK_AUDIENCES = ['f', 'm', 'all'];
 // el mismo espíritu. NO se añade a RTB_CATEGORIES a propósito: esa es la taxonomía
 // de DEMANDA, y meterla allí dejaría que el motor programático eligiera un
 // interactivo como creativo de una campaña.
-const STOCK_CATEGORIES = ['atraer', 'producto', 'promo', 'marca', 'animaciones'];
+const STOCK_CATEGORIES = ['atraer', 'producto', 'promo', 'marca', 'animaciones', 'tiktoks'];
 
 // Clasificación automática con Gemini: 3 tags + audiencia + categoría de retail.
 // Devuelve siempre un objeto {tags, audience, category} con defaults seguros.
@@ -4465,6 +4465,12 @@ async function stockPublishHandler(req, env, ctx) {
   // catalogo lo decide el tipo. Gemini la mandaria a 'producto' y no aparecería
   // donde se la busca.
   if (type === 'animation' || type === 'interactive') category = 'animaciones';
+  // Los TikToks son videos, asi que el TIPO no basta para distinguirlos —
+  // clasificar por tipo se llevaria por delante todo el video del catalogo. Los
+  // distingue su ETIQUETA, que es una marca positiva y la pone quien los genera.
+  // Sin esto caian donde Gemini decidiera: los 11 que habia estaban repartidos
+  // entre marca, atraer y producto, o sea en ningun sitio donde buscarlos.
+  if ((tags || []).some(t => String(t).toLowerCase().trim() === 'tiktok')) category = 'tiktoks';
 
   // El tag de calidad se añade SIEMPRE (además de los de contenido), sin pisar.
   tags = Array.isArray(tags) ? tags : [];
