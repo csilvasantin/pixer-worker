@@ -3953,7 +3953,9 @@ async function stockInteractiveHandler(req, env, ctx) {
 
 // La puerta que convierte una cápsula recién publicada en un TikTok de 15 s.
 const CAPSULE_TIKTOK_URL = 'https://www.admiranext.com/presentaciones/api/capsule-tiktok';
-const CAPSULE_STATUS_URL = 'https://www.admiranext.com/presentaciones/api/grok-video?id=';
+// El estado se pregunta por la MISMA puerta que dispara: el endpoint del motor
+// vive tras el perimetro humano y desde fuera devuelve la pagina de login.
+const CAPSULE_STATUS_URL = 'https://www.admiranext.com/presentaciones/api/capsule-tiktok?id=';
 const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive', 'animation'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
@@ -6367,7 +6369,8 @@ async function capsulasEnVuelo(env) {
   for (const k of (lista.keys || [])) {
     const requestId = k.name.slice('capsula:pendiente:'.length);
     try {
-      const r = await fetch(CAPSULE_STATUS_URL + encodeURIComponent(requestId), { headers: { accept: 'application/json' } });
+      const r = await fetch(CAPSULE_STATUS_URL + encodeURIComponent(requestId), {
+        headers: { accept: 'application/json', 'x-admiranext-ingest': env.ADMIRANEXT_INGEST_TOKEN || '' } });
       const d = await r.json().catch(() => ({}));
       if (d.status === 'done' || d.status === 'published' || d.pixeria?.status === 'published') {
         console.log(JSON.stringify({ message: 'capsula→tiktok aterrizado', requestId, pixeria: d.pixeria?.status, asset: d.pixeria?.id }));
