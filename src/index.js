@@ -4547,8 +4547,13 @@ async function stockPublishHandler(req, env, ctx) {
       headers: { 'content-type': 'application/json', 'x-admiranext-ingest': env.ADMIRANEXT_INGEST_TOKEN },
       body: JSON.stringify({ type: meta.type, title: meta.title, comment: meta.comment, tags: meta.tags })
     }).then(async (r) => {
-      const d = await r.json().catch(() => ({}));
-      console.log(JSON.stringify({ message: 'capsula→tiktok', id, ok: r.ok, generado: d.generado, tema: d.tema, motivo: d.motivo }));
+      // Se registra el ESTADO y un trozo del cuerpo: «ok:false» a secas no dice si
+      // fue la credencial, el perímetro o el motor, y cada una se arregla en un
+      // sitio distinto. Lo aprendí perdiendo dos vueltas con este mismo puente.
+      const texto = await r.text().catch(() => '');
+      let d = {}; try { d = JSON.parse(texto); } catch {}
+      console.log(JSON.stringify({ message: 'capsula→tiktok', id, ok: r.ok, status: r.status,
+        generado: d.generado, tema: d.tema, motivo: d.motivo || d.error, cuerpo: texto.slice(0, 160) }));
     }).catch((e) => {
       console.error(JSON.stringify({ message: 'capsula→tiktok falló', id, error: String(e && e.message || e).slice(0, 200) }));
     }));
