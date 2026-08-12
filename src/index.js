@@ -3871,13 +3871,11 @@ async function stockTrackHandler(req, env, ctx, id) {
 // romper activos anteriores; toda publicación nueva usa el nombre canónico.
 
 // ─── Alta de un INTERACTIVO (Xperiencia) en el Stock ───────────────────────────
-// POST /stock/interactive {secret, url, title, motor?, thumbnail?, comment?, tags?}
+// POST /stock/interactive {secret, html?, slug?, url?, title, ...}
 //
-// Un interactivo NO es un fichero que se sube: es una PÁGINA autocontenida que
-// exporta AInimation Studio (Archivo > Publicar Xperiencia) y que vive en su
-// dominio. Por eso no pasa por /stock/publish, que existe para bajar un asset a
-// R2 y firmarlo: aquí no hay nada que bajar, y forzarlo por ese carril solo
-// serviría para guardar una copia muerta del HTML.
+// AInimation puede enviar el HTML autocontenido: Pixeria conserva entonces la
+// pieza REAL en R2 y el item apunta a /stock/asset/:id. `url` se mantiene como
+// compatibilidad para piezas que ya viven en otro dominio propio.
 //
 // Se guarda el meta con `type:'interactive'` (lo que el canal de admira.tv sabe
 // emitir desde r54) y `category:'animaciones'`, que es el sitio del catálogo donde
@@ -3888,12 +3886,21 @@ async function stockInteractiveHandler(req, env, ctx) {
   let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!env.NOTIFY_KEY || body.secret !== env.NOTIFY_KEY) return json({ error: 'unauthorized' }, { status: 401 });
 
+  const html = typeof body.html === 'string' ? body.html : '';
+  const htmlBytes = html ? new TextEncoder().encode(html) : null;
+  if (htmlBytes && (htmlBytes.length < 200 || htmlBytes.length > 2 * 1024 * 1024)) {
+    return json({ error: 'bad-html-size', max: 2 * 1024 * 1024 }, { status: 413 });
+  }
+  if (html && !/^\s*<!doctype html>/i.test(html)) return json({ error: 'bad-html' }, { status: 400 });
+
   // Solo https y solo dominios propios: esto entra en la ANTENA, dentro de un
   // iframe a pantalla completa. Un interactivo de un tercero no se cuela por aquí.
-  let destino;
-  try { destino = new URL(String(body.url || '')); } catch { return json({ error: 'bad-url' }, { status: 400 }); }
-  const propio = destino.protocol === 'https:' && /(^|\.)(ainimation\.studio|xpaceos\.com|admira\.tv|pixeria\.com)$/.test(destino.hostname);
-  if (!propio) return json({ error: 'bad-host', detail: 'solo https y dominios propios' }, { status: 400 });
+  let destino = null;
+  if (!html) {
+    try { destino = new URL(String(body.url || '')); } catch { return json({ error: 'bad-url' }, { status: 400 }); }
+    const propio = destino.protocol === 'https:' && /(^|\.)(ainimation\.studio|xpaceos\.com|admira\.tv|pixeria\.com)$/.test(destino.hostname);
+    if (!propio) return json({ error: 'bad-host', detail: 'solo https y dominios propios' }, { status: 400 });
+  }
 
   const title = String(body.title || 'Xperiencia').slice(0, 160);
   const tags = [...new Set(['animaciones', 'interactivo', ...(Array.isArray(body.tags) ? body.tags : [])]
@@ -3901,18 +3908,21 @@ async function stockInteractiveHandler(req, env, ctx) {
 
   // Id determinista por URL: republicar la misma pieza la ACTUALIZA en vez de
   // llenar el catálogo de duplicados cada vez que se reexporta.
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(destino.toString()));
+  const stableRef = html ? `pixeria:${String(body.slug || title).toLowerCase().replace(/[^a-z0-9]+/g,'-')}` : destino.toString();
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableRef));
   const id = 'xp-' + Array.from(new Uint8Array(digest)).slice(0, 8)
     .map(b => b.toString(16).padStart(2, '0')).join('');
   const metaKey = `stock/${id}/meta.json`;
   const previo = await env.STOCK_BUCKET.get(metaKey);
   const antes = previo ? await previo.json().catch(() => null) : null;
 
+  const assetKey = html ? `stock/${id}/asset.html` : null;
+  const publicUrl = html ? `${new URL(req.url).origin}/stock/asset/${id}` : destino.toString();
   const rec = {
     id,
     type: 'interactive',
     motor: String(body.motor || 'AInimation Studio').slice(0, 80),
-    prompt: destino.toString(),
+    prompt: publicUrl,
     title,
     comment: body.comment ? String(body.comment).slice(0, 800) : null,
     tags,
@@ -3922,14 +3932,18 @@ async function stockInteractiveHandler(req, env, ctx) {
     costEst: '0',
     mime: 'text/html',
     ext: 'html',
-    size: 0,
+    size: htmlBytes ? htmlBytes.length : 0,
     thumbnail: body.thumbnail ? String(body.thumbnail).slice(0, 500) : null,
-    url: destino.toString(),
+    url: publicUrl,
+    assetKey,
     createdAt: antes && antes.createdAt ? antes.createdAt : new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: 'ainimation',
     num: antes && antes.num ? antes.num : undefined,
   };
+  if (htmlBytes) await env.STOCK_BUCKET.put(assetKey, htmlBytes, {
+    httpMetadata: { contentType: 'text/html; charset=utf-8', cacheControl: 'public, max-age=60' },
+  });
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(rec), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
@@ -3937,6 +3951,8 @@ async function stockInteractiveHandler(req, env, ctx) {
   return json({ ok: true, id, url: rec.url, category: rec.category, actualizado: !!antes });
 }
 
+// La puerta que convierte una cápsula recién publicada en un TikTok de 15 s.
+const CAPSULE_TIKTOK_URL = 'https://www.admiranext.com/presentaciones/api/capsule-tiktok';
 const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive', 'animation'];
 const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
 
@@ -4505,6 +4521,30 @@ async function stockPublishHandler(req, env, ctx) {
                footer;
   notify(ctx, env, text);
 
+  // ─── UNA CÁPSULA NACE CON SU VÍDEO ──────────────────────────────────────────
+  // Una cápsula de conocimiento es texto: se lee, no se ve. Desde aquí se avisa al
+  // generador de admiranext, que la convierte en un vertical de 15 s con el tono de
+  // su tema (tech, creativity, business — las etiquetas que la cápsula YA trae) y lo
+  // publica solo de vuelta en este mismo Stock.
+  //
+  // Va en waitUntil y NO se espera: generar un vídeo tarda minutos y quien publica
+  // una cápsula no puede quedarse colgado por eso. Si el generador falla, la cápsula
+  // ya está publicada y lo único que se pierde es su vídeo — se ve en el log y se
+  // puede relanzar. Al revés (esperar y fallar) se perdería la cápsula, que es lo
+  // que de verdad importa.
+  if (isKnowledgeCapsule && env.PIXERIA_INGEST_TOKEN) {
+    ctx.waitUntil(fetch(CAPSULE_TIKTOK_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-admiranext-ingest': env.PIXERIA_INGEST_TOKEN },
+      body: JSON.stringify({ type: meta.type, title: meta.title, comment: meta.comment, tags: meta.tags })
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      console.log(JSON.stringify({ message: 'capsula→tiktok', id, ok: r.ok, generado: d.generado, tema: d.tema, motivo: d.motivo }));
+    }).catch((e) => {
+      console.error(JSON.stringify({ message: 'capsula→tiktok falló', id, error: String(e && e.message || e).slice(0, 200) }));
+    }));
+  }
+
   return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt });
 }
 
@@ -4856,7 +4896,9 @@ async function stockAssetHandler(req, env, id) {
 
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  headers.set('Cache-Control', meta.mime === 'text/html'
+    ? 'public, max-age=60, must-revalidate'
+    : 'public, max-age=31536000, immutable');
   headers.set('Accept-Ranges', 'bytes');
   headers.set('Content-Type', meta.mime || headers.get('Content-Type') || 'application/octet-stream');
   // CORS en el asset: el gemelo dibuja sprites de mobiliario y el editor de
