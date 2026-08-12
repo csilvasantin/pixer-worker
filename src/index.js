@@ -4532,10 +4532,19 @@ async function stockPublishHandler(req, env, ctx) {
   // ya está publicada y lo único que se pierde es su vídeo — se ve en el log y se
   // puede relanzar. Al revés (esperar y fallar) se perdería la cápsula, que es lo
   // que de verdad importa.
-  if (isKnowledgeCapsule && env.PIXERIA_INGEST_TOKEN) {
+  // El secreto es el MISMO a los dos lados, pero NO se llama igual: aquí es
+  // ADMIRANEXT_INGEST_TOKEN y en admiranext PIXERIA_INGEST_TOKEN. Usar el nombre
+  // de allí dejaba la condición en falso y el puente no saltaba NUNCA — y encima
+  // en silencio, que es lo peor: la cápsula se publicaba bien y nadie veía que su
+  // vídeo no había llegado a pedirse. Por eso ahora el caso «no puedo» también
+  // se escribe en el log.
+  if (isKnowledgeCapsule && !env.ADMIRANEXT_INGEST_TOKEN) {
+    console.warn(JSON.stringify({ message: 'capsula→tiktok saltado: falta ADMIRANEXT_INGEST_TOKEN', id }));
+  }
+  if (isKnowledgeCapsule && env.ADMIRANEXT_INGEST_TOKEN) {
     ctx.waitUntil(fetch(CAPSULE_TIKTOK_URL, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-admiranext-ingest': env.PIXERIA_INGEST_TOKEN },
+      headers: { 'content-type': 'application/json', 'x-admiranext-ingest': env.ADMIRANEXT_INGEST_TOKEN },
       body: JSON.stringify({ type: meta.type, title: meta.title, comment: meta.comment, tags: meta.tags })
     }).then(async (r) => {
       const d = await r.json().catch(() => ({}));
