@@ -815,6 +815,46 @@ async function gridGetConfig(env, screen) {
   return c;
 }
 async function gridGetBookings(env, screen, date) { let b = null; try { b = JSON.parse(await env.SIGNAGE_KV.get('grid:book:' + screen + ':' + date) || '[]'); } catch (e) {} return Array.isArray(b) ? b : []; }
+
+// ─── PARRILLA POR DEFECTO, HEREDADA DEL CANAL ────────────────────────────────
+// Una pantalla sin reservas no se quedaba «sin parrilla»: se quedaba con TODO. El
+// canal, al no recibir slots, emite el Stock entero sin segmentar — y hoy eso son
+// importaciones de referencia del pipeline del Consejo saliendo por pantallas de
+// tienda. Nadie lo decidió; es que no lo decidió nadie.
+//
+// Si la pantalla no tiene reservas propias ese día, hereda las del CANAL (su
+// circuito) y, en su defecto, la global. Solo cuando no hay NADA propio: una
+// pantalla programada manda sobre su canal, que es lo que espera quien la programó.
+//
+// Va DELIBERADAMENTE aparte de gridGetBookings, que también lo usan los caminos de
+// ESCRITURA (book/unbook/decide leen antes de guardar). Si heredaran, la primera
+// reserva real grabaría la parrilla prestada como propia de la pantalla y el canal
+// dejaría de heredar para siempre sin que nadie lo hubiera pedido.
+async function gridGetDefaultBookings(env, circuit) {
+  const claves = [];
+  if (circuit) claves.push({ k: 'grid:book:default:' + circuit, from: circuit });
+  claves.push({ k: 'grid:book:default:_', from: 'global' });
+  for (const c of claves) {
+    let b = null;
+    try { b = JSON.parse(await env.SIGNAGE_KV.get(c.k) || 'null'); } catch (e) {}
+    if (Array.isArray(b) && b.length) return { bookings: b, from: c.from };
+  }
+  return { bookings: [], from: '' };
+}
+// Reservas TAL Y COMO SE EMITEN: las propias si las hay, si no las heredadas.
+// Lo heredado va marcado (`inherited`, `inheritedFrom`) para que el CMS y el canal
+// puedan decir de dónde sale: una parrilla que no dice que es prestada es una
+// parrilla que alguien va a buscar donde no está.
+async function gridGetPlayoutBookings(env, screen, date, circuit) {
+  const propias = await gridGetBookings(env, screen, date);
+  if (propias.length) return propias;
+  const def = await gridGetDefaultBookings(env, circuit || String(screen).split('-')[0] || screen);
+  return def.bookings.map((x, i) => Object.assign({}, x, {
+    // Id propio: lo heredado no puede chocar con una reserva real si mañana se programa.
+    id: 'def-' + (def.from || 'g') + '-' + (x.id || i),
+    inherited: true, inheritedFrom: def.from
+  }));
+}
 async function gridPutBookings(env, screen, date, arr) { await env.SIGNAGE_KV.put('grid:book:' + screen + ':' + date, JSON.stringify(arr).slice(0, 120000)); }
 async function gridGetControl(env, circuit) {
   let c = null; try { c = JSON.parse(await env.SIGNAGE_KV.get('grid:ctrl:' + circuit) || 'null'); } catch (e) {}
@@ -866,7 +906,12 @@ async function gridDayHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const screen = gridScreen(url.searchParams.get('screen')); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
   const now = gridNow(); const date = gridDate(url.searchParams.get('date')) || now.ymd;
-  const cfg = await gridGetConfig(env, screen); const bookings = await gridGetBookings(env, screen, date);
+  const cfg = await gridGetConfig(env, screen);
+  // Este es el camino que consume el player: aquí SÍ se hereda. El editor del CMS
+  // usa las otras rutas y sigue viendo lo que la pantalla tiene de verdad.
+  const bookings = url.searchParams.get('own') === '1'
+    ? await gridGetBookings(env, screen, date)
+    : await gridGetPlayoutBookings(env, screen, date, cfg.circuit);
   return json(Object.assign({ ok: true, screen, date: gridFmtDate(date) }, gridComputeDay(cfg, bookings, date, now)));
 }
 // Resumen ligero de ocupación por día para un rango (lo usa el calendario anual del CMS).
