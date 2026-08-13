@@ -2558,6 +2558,50 @@ const SHOT_MIN_INTERVAL_MS = 8000;          // 1 subida / 8 s por screen
 const SHOT_PREFIX = 'data:image/jpeg;base64,';
 const SHOT_SLUG_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+// Una pantalla puede quedar abierta a la vez en el player nativo y en una
+// pestaña/app de Chrome. Antes ambos escribían sobre las MISMAS claves y el
+// puesto de mando terminaba mezclando título, sincro y captura de dos emisiones.
+// Un productor estable reclama la telemetría durante una ventana corta. El
+// player nativo manda sobre una pestaña web; un productor nuevo sólo sustituye
+// a otro de la misma clase cuando la concesión ha caducado.
+const SIGNAGE_OWNER_LEASE_MS = 75 * 1000;
+const SIGNAGE_OWNER_REFRESH_MS = 45 * 1000;
+function signageProducerPriority(userAgent, explicitProducer) {
+  const native = /AdmiraMacOSPlayer\//i.test(String(userAgent || ''));
+  return (native ? 20 : 10) + (explicitProducer ? 2 : 0);
+}
+function signageOwnerDecision(owner, candidate, now) {
+  if (!owner || !owner.producer || !owner.seen || (now - owner.seen) >= SIGNAGE_OWNER_LEASE_MS) return 'claim';
+  if (owner.producer === candidate.producer) return 'accept';
+  if ((candidate.priority || 0) > (owner.priority || 0)) return 'claim';
+  return 'reject';
+}
+function signageLegacyProducer(userAgent) {
+  const s = String(userAgent || 'legacy');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return `legacy-${(h >>> 0).toString(36)}`;
+}
+async function signageClaimOwner(env, screen, body, req, now) {
+  const explicit = String(body.producer || '').trim().slice(0, 80);
+  const ua = (req.headers.get('User-Agent') || '').slice(0, 200);
+  const candidate = {
+    producer: explicit || signageLegacyProducer(ua),
+    priority: signageProducerPriority(ua, !!explicit),
+    seen: now,
+  };
+  const key = `owner:${screen}`;
+  let owner = null;
+  try { owner = await env.SIGNAGE_KV.get(key, 'json'); } catch {}
+  const decision = signageOwnerDecision(owner, candidate, now);
+  if (decision === 'reject') return { ok: false, producer: candidate.producer, owner };
+  const mustWrite = decision === 'claim' || !owner || (now - (owner.seen || 0)) >= SIGNAGE_OWNER_REFRESH_MS;
+  if (mustWrite) {
+    try { await env.SIGNAGE_KV.put(key, JSON.stringify(candidate), { expirationTtl: 180 }); } catch {}
+  }
+  return { ok: true, producer: candidate.producer, priority: candidate.priority };
+}
+
 // Bytes reales que codifica un base64 (sin decodificarlo), para validar tamaño barato.
 function b64DecodedLen(b64) {
   const len = b64.length;
@@ -2582,10 +2626,13 @@ async function signageShotPostHandler(req, env) {
   if (bytes <= 0) return json({ ok: false, reason: 'empty' }, { status: 400 });
   if (bytes > SHOT_MAX_BYTES) return json({ ok: false, reason: 'too-large', bytes, max: SHOT_MAX_BYTES }, { status: 413 });
 
+  const now = Date.now();
+  const ownership = await signageClaimOwner(env, screen, body, req, now);
+  if (!ownership.ok) return json({ ok: false, reason: 'producer-conflict', screen }, { status: 409 });
+
   // Rate-limit por screen (KV shotmeta:<screen>.ts). KV es eventualmente
   // consistente, pero para 1/8s basta: bloquea ráfagas del mismo player.
   const metaKey = `shotmeta:${screen}`;
-  const now = Date.now();
   let prev = null;
   try { prev = await env.SIGNAGE_KV.get(metaKey, 'json'); } catch {}
   if (prev && prev.ts && (now - prev.ts) < SHOT_MIN_INTERVAL_MS) {
@@ -2603,8 +2650,9 @@ async function signageShotPostHandler(req, env) {
   await env.STOCK_BUCKET.put(`shots/${screen}.jpg`, raw, {
     httpMetadata: { contentType: 'image/jpeg', cacheControl: 'no-store' },
   });
-  await env.SIGNAGE_KV.put(metaKey, JSON.stringify({ ts: now, bytes }), { expirationTtl: 604800 });
-  return json({ ok: true, ts: now });
+  const itemId = String(body.itemId || '').slice(0, 100) || null;
+  await env.SIGNAGE_KV.put(metaKey, JSON.stringify({ ts: now, bytes, itemId, producer: ownership.producer }), { expirationTtl: 604800 });
+  return json({ ok: true, ts: now, itemId });
 }
 
 async function signageShotGetHandler(req, env, url) {
@@ -2616,7 +2664,8 @@ async function signageShotGetHandler(req, env, url) {
     let meta = null;
     try { meta = await env.SIGNAGE_KV.get(`shotmeta:${screen}`, 'json'); } catch {}
     if (!meta || !meta.ts) return json({ ok: false, reason: 'no_shot' }, { status: 404 });
-    return json({ ok: true, ts: meta.ts, ageSeconds: Math.round((Date.now() - meta.ts) / 1000), bytes: meta.bytes || 0 });
+    return json({ ok: true, ts: meta.ts, ageSeconds: Math.round((Date.now() - meta.ts) / 1000), bytes: meta.bytes || 0,
+      itemId: meta.itemId || null, producer: meta.producer || null });
   }
 
   const obj = await env.STOCK_BUCKET.get(`shots/${screen}.jpg`);
@@ -2900,7 +2949,8 @@ async function signageNowGetHandler(req, env, url) {
   try { stored = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
   const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
-  return json({ ok: true, screen, item: item || null, ip: (stored && stored.__ip) || null, lastSeen: (stored && stored.__w) || null });
+  return json({ ok: true, screen, item: item || null, ip: (stored && stored.__ip) || null,
+    lastSeen: (stored && stored.__w) || null, producer: (stored && stored.__producer) || null });
 }
 
 // EMISIÓN VISIBLE — cuando /signage/now trae loc/locName (el player de canal.html
@@ -2955,6 +3005,8 @@ async function signageNowPostHandler(req, env) {
   const sig = nowItemSig(item);
   if (sig.length > 8000) return json({ error: 'too-big', max: 8000 }, { status: 413 });
   const now = Date.now();
+  const ownership = await signageClaimOwner(env, screen, body, req, now);
+  if (!ownership.ok) return json({ ok: false, error: 'producer-conflict', screen }, { status: 409 });
   // Detección de cambio: si el item es igual al guardado y se escribió hace
   // <90s, no reescribimos (el keepalive cada 20s no cuesta KV). Solo escribe
   // en cambio real o para refrescar el TTL antes de que caduque.
@@ -2967,7 +3019,9 @@ async function signageNowPostHandler(req, env) {
     return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   }
   try {
-    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig, __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
+    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig,
+      __producer: ownership.producer,
+      __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
   } catch (e) {
     return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
   }
@@ -6761,4 +6815,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { capsuleDimensionTag, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { capsuleDimensionTag, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
