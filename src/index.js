@@ -6457,11 +6457,31 @@ async function gridPlaylistHandler(req, env, url) {
 // descargas había hacía que 3 %, 48 % y 97 % fueran el mismo estado y el mando
 // saltase del primer porcentaje a verde. El bucket limita el gasto a un máximo
 // razonable de 20 escrituras por pieza sin perder feedback progresivo.
-export function screenCacheSignature(ready, total, downloading) {
+export function sanitizeScreenCacheContents(raw) {
+  if (!Array.isArray(raw)) return [];
+  const text = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+  const num = (value, max) => { const n = Number(value); return Number.isFinite(n) && n >= 0 ? Math.min(n, max) : 0; };
+  return raw.slice(0, 300).map(item => ({
+    id: text(item && item.id, 80),
+    num: text(item && item.num, 20),
+    title: text(item && item.title, 160),
+    type: text(item && item.type, 30),
+    mime: text(item && item.mime, 80),
+    bytes: num(item && item.bytes, Number.MAX_SAFE_INTEGER),
+    width: num(item && item.width, 32768),
+    height: num(item && item.height, 32768),
+    duration: num(item && item.duration, 86400),
+    bitrate: num(item && item.bitrate, 100000000000),
+    codec: text(item && item.codec, 120),
+    at: num(item && item.at, Number.MAX_SAFE_INTEGER),
+  })).filter(item => item.id);
+}
+export function screenCacheSignature(ready, total, downloading, contents = []) {
   return JSON.stringify({
     r: ready,
     t: total,
     d: downloading.map(x => [x.id, Math.floor((Number(x.pct) || 0) / 5) * 5]),
+    c: contents.map(x => [x.id, x.bytes, x.width, x.height, Math.round(x.duration || 0), x.bitrate, x.codec]),
   });
 }
 async function screenCacheHandler(req, env, url) {
@@ -6475,14 +6495,15 @@ async function screenCacheHandler(req, env, url) {
   const screen = gridScreen(b.screen); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
   const ready = Array.isArray(b.ready) ? b.ready.map(x => String(x).slice(0, 80)).slice(0, 300) : [];
   const downloading = Array.isArray(b.downloading) ? b.downloading.slice(0, 50).map(x => ({ id: String((x && x.id) || '').slice(0, 80), pct: Math.max(0, Math.min(100, (x && x.pct) | 0)) })) : [];
-  const rec = { ready, readyCount: ready.length, total: Math.max(0, b.total | 0), downloading, bytes: Math.max(0, b.bytes | 0), at: Date.now() };
-  const now = Date.now(), sig = screenCacheSignature(ready, rec.total, downloading);
+  const contents = sanitizeScreenCacheContents(b.contents);
+  const rec = { ready, readyCount: ready.length, total: Math.max(0, b.total | 0), downloading, bytes: Math.max(0, b.bytes | 0), contents, at: Date.now() };
+  const now = Date.now(), sig = screenCacheSignature(ready, rec.total, downloading, contents);
   let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
   if (prev && prev.__sig === sig && (now - (prev.at || 0)) < 60000) return json({ ok: true, screen, throttled: 'unchanged' });
   rec.__sig = sig;
   if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: 600 }); } catch (e) {}
-  return json({ ok: true, screen, readyCount: rec.readyCount, total: rec.total });
+  return json({ ok: true, screen, readyCount: rec.readyCount, total: rec.total, contents: rec.contents.length });
 }
 
 // ─── VIDEOS DE CAPSULA EN VUELO ──────────────────────────────────────────────
