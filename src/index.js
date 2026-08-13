@@ -57,7 +57,7 @@ function corsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'POST, GET, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   };
@@ -596,7 +596,7 @@ async function daProxyHandler(req, env) {
   return new Response(await up.arrayBuffer(), { status: up.status, headers });
 }
 
-// ── Passthrough /locations* → omnipublicity-api (tarea #4) ─────────
+// ── Passthrough /locations* y /playout* → omnipublicity-api ────────
 // El registro de sitios (alta.html) y la vista de flota (cms.html) hablan con
 // omnipublicity-api.csilvasantin.workers.dev/locations*, que Cloudflare/el ISP
 // BLOQUEA a las máquinas españolas. Este proxy lo re-sirve por api.admira.store
@@ -605,15 +605,17 @@ async function daProxyHandler(req, env) {
 // Usa el service binding env.OMNI (misma malla interna que /da/*) para esquivar
 // el error 1042 worker→worker; si no está, cae a fetch directo. La CORS la pone
 // el wrapper de fetch() (corsHeaders, por whitelist) igual que el resto.
-async function locationsProxyHandler(req, env) {
+async function omnipublicityProxyHandler(req, env) {
   const u = new URL(req.url);
   const target = DA_UPSTREAM + u.pathname + u.search;   // p.ej. /locations/register?selfreg=1
   const init = { method: req.method, headers: {} };
   const ct = req.headers.get('Content-Type'); if (ct) init.headers['Content-Type'] = ct;
+  const authorization = req.headers.get('Authorization');
+  if (authorization) init.headers.Authorization = authorization;
   if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await req.arrayBuffer();
   let up;
   try { up = (env && env.OMNI) ? await env.OMNI.fetch(new Request(target, init)) : await fetch(target, init); }
-  catch (e) { return json({ ok: false, error: 'locations-upstream-failed', detail: String(e).slice(0, 160) }, { status: 502 }); }
+  catch (e) { return json({ ok: false, error: 'omnipublicity-upstream-failed', detail: String(e).slice(0, 160) }, { status: 502 }); }
   const headers = new Headers();
   const upct = up.headers.get('Content-Type'); if (upct) headers.set('Content-Type', upct);
   headers.set('Cache-Control', 'no-store');
@@ -6616,8 +6618,8 @@ export default {
         res = await segmentadoGenerateHandler(req, env, ctx);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
         res = await daProxyHandler(req, env);
-      } else if ((path === '/locations' || path.startsWith('/locations/')) && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE' || req.method === 'PUT')) {
-        res = await locationsProxyHandler(req, env);
+      } else if ((path === '/locations' || path.startsWith('/locations/') || path === '/playout' || path.startsWith('/playout/')) && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE' || req.method === 'PUT')) {
+        res = await omnipublicityProxyHandler(req, env);
       } else if (path === '/day/save' && req.method === 'POST') {
         res = await daySaveHandler(req, env);
       } else if (path === '/day/range' && req.method === 'GET') {
