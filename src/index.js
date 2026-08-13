@@ -2585,6 +2585,23 @@ function signageLegacyProducer(userAgent) {
 async function signageClaimOwner(env, screen, body, req, now) {
   const explicit = String(body.producer || '').trim().slice(0, 80);
   const ua = (req.headers.get('User-Agent') || '').slice(0, 200);
+  const native = /AdmiraMacOSPlayer\//i.test(ua);
+  // R2 es fuertemente consistente; KV no. La prueba de campo del 13-ago
+  // demostró que dos edges podían leer una concesión vieja y aceptar a la vez.
+  // La presencia de un player nativo es un hecho duradero por pantalla: el
+  // primer latido nativo crea una marca fuerte y desde entonces una pestaña
+  // Chrome no puede volver a publicar bajo ese mismo screen.
+  if (env.STOCK_BUCKET) {
+    const nativeKey = `signage-owners/native/${screen}`;
+    if (native) {
+      try { await env.STOCK_BUCKET.put(nativeKey, new Uint8Array(0), { customMetadata: { seen: String(now) } }); } catch {}
+    } else {
+      try {
+        const nativeOwner = await env.STOCK_BUCKET.head(nativeKey);
+        if (nativeOwner) return { ok: false, producer: explicit || signageLegacyProducer(ua), owner: { native: true } };
+      } catch {}
+    }
+  }
   const candidate = {
     producer: explicit || signageLegacyProducer(ua),
     priority: signageProducerPriority(ua, !!explicit),
@@ -6815,4 +6832,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { capsuleDimensionTag, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { capsuleDimensionTag, signageClaimOwner, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
