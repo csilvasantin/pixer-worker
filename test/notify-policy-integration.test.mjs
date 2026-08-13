@@ -249,3 +249,85 @@ test('el mando remoto silencia éxitos pero conserva errores en Telegram', async
     globalThis.fetch = originalFetch;
   }
 });
+
+test('ACK browser repetido conserva primer invalid_ack_reference, limita duplicados y avisa recuperación', async () => {
+  const originalFetch = globalThis.fetch;
+  const telegram = telegramFetchSpy();
+  globalThis.fetch = telegram.fetch;
+  try {
+    let upstream = { status: 400, body: { ok: false, error: 'invalid_ack_reference' } };
+    const env = {
+      SIGNAGE_KV: new MemoryKv(),
+      TELEGRAM_BOT_TOKEN: 'fake-token',
+      TELEGRAM_CHAT_ID: 'fake-chat',
+      OMNI: {
+        async fetch() {
+          return new Response(JSON.stringify(upstream.body), {
+            status: upstream.status,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+      },
+    };
+    const ack = () => runRequest(new Request('https://worker.test/locations/cmd/ack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 Chrome/140.0' },
+      body: JSON.stringify({ reference: 'same-invalid-reference' }),
+    }), env);
+
+    await Promise.all(Array.from({ length: 8 }, ack));
+    assert.equal(telegram.calls.length, 1, 'la ráfaga concurrente conserva el primer error y no manda ocho avisos');
+    assert.match(telegram.calls[0].body.text, /400/);
+    assert.match(telegram.calls[0].body.text, /POST \/locations\/cmd\/ack/);
+    assertSafeSummary(telegram.calls[0].body.text, ['same-invalid-reference', 'invalid_ack_reference', 'Chrome/140.0']);
+
+    upstream = { status: 500, body: { ok: false, error: 'upstream-failed' } };
+    const serverFailure = await ack();
+    assert.equal(serverFailure.status, 500);
+    assert.equal(telegram.calls.length, 2, 'un 5xx distinto nunca queda oculto por el cooldown del 400');
+    assert.match(telegram.calls[1].body.text, /500/);
+    await ack();
+    assert.equal(telegram.calls.length, 3, 'los 5xx conservan alerta inmediata incluso si se repiten');
+
+    upstream = { status: 200, body: { ok: true, ack: true } };
+    const response = await ack();
+    assert.equal(response.status, 200);
+    assert.equal(telegram.calls.length, 4, 'el primer éxito posterior debe anunciar recuperación');
+    assert.match(telegram.calls[3].body.text, /RECUPERADO POST \/locations\/cmd\/ack/);
+
+    await ack();
+    assert.equal(telegram.calls.length, 4, 'un segundo éxito no repite recuperación');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('otros errores de negocio no heredan el rate-limit específico del ACK inválido', async () => {
+  const originalFetch = globalThis.fetch;
+  const telegram = telegramFetchSpy();
+  globalThis.fetch = telegram.fetch;
+  try {
+    const env = {
+      SIGNAGE_KV: new MemoryKv(),
+      TELEGRAM_BOT_TOKEN: 'fake-token',
+      TELEGRAM_CHAT_ID: 'fake-chat',
+      OMNI: {
+        async fetch() {
+          return new Response(JSON.stringify({ ok: false, error: 'permission_denied' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+      },
+    };
+    const request = () => runRequest(new Request('https://worker.test/locations/cmd/ack', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' }, body: '{}',
+    }), env);
+    await request();
+    await request();
+    assert.equal(telegram.calls.length, 2);
+    assert.ok(telegram.calls.every(call => /400/.test(call.body.text)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

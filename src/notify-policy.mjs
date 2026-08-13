@@ -6,6 +6,12 @@
 const PREFIX = 'notify:aggregate:v1:';
 const EVENT_PREFIX = PREFIX + 'event:';
 const SUMMARY_PREFIX = PREFIX + 'summary:';
+const INCIDENT_PREFIX = 'notify:incident:v1:';
+
+export const INCIDENT_POLICY = Object.freeze({
+  cooldownMs: 5 * 60 * 1000,
+  stateTtlSeconds: 24 * 60 * 60,
+});
 
 export const AGGREGATE_POLICY = Object.freeze({
   probe_404: Object.freeze({ windowMs: 10 * 60 * 1000, threshold: 20 }),
@@ -64,6 +70,85 @@ export async function safeSourceFingerprint(req, path) {
   // Origin/Referer e IP se excluyen deliberadamente de identidad y almacenamiento.
   const fingerprint = (await sha256(`${method}\n${normalizedPath(path)}\n${ua}`)).slice(0, 20);
   return { fingerprint, source: notificationSourceClass(req) };
+}
+
+export async function safeIncidentIdentity(req, path, status, errorCode = '') {
+  const method = String(req && req.method || 'GET').toUpperCase();
+  const source = notificationSourceClass(req);
+  const operationFingerprint = (await sha256(`${method}\n${normalizedPath(path)}\n${source}`)).slice(0, 20);
+  const safeCode = /^[a-z0-9_-]{1,80}$/i.test(String(errorCode || '')) ? String(errorCode).toLowerCase() : '';
+  const failureFingerprint = (await sha256(`${operationFingerprint}\n${Number(status) || 0}\n${safeCode}`)).slice(0, 20);
+  return { source, operationFingerprint, failureFingerprint };
+}
+
+function incidentKey(operationFingerprint) {
+  return `${INCIDENT_PREFIX}${String(operationFingerprint || '').replace(/[^a-f0-9]/gi, '').slice(0, 40)}`;
+}
+
+function incidentRecord(event, now) {
+  return {
+    v: 1,
+    active: true,
+    method: String(event.method || 'GET').toUpperCase(),
+    path: normalizedPath(event.path),
+    source: String(event.source || 'unknown'),
+    operationFingerprint: String(event.operationFingerprint || ''),
+    failureFingerprint: String(event.failureFingerprint || ''),
+    status: Number(event.status) || 0,
+    errorCode: /^[a-z0-9_-]{1,80}$/i.test(String(event.errorCode || '')) ? String(event.errorCode).toLowerCase() : '',
+    firstAt: now,
+    lastAt: now,
+    lastSentAt: now,
+    count: 1,
+    suppressed: 0,
+  };
+}
+
+export async function recordNotificationIncident(kv, event, now = Date.now()) {
+  const failure = event && event.phase === 'failure';
+  if (!kv || typeof kv.get !== 'function' || typeof kv.put !== 'function') {
+    return { available: false, action: failure ? 'send_first' : 'none', count: failure ? 1 : 0, suppressed: 0 };
+  }
+  const key = incidentKey(event.operationFingerprint);
+  return withLocalLock(key, async () => {
+    let previous = null;
+    try { previous = JSON.parse(await kv.get(key) || 'null'); } catch {}
+
+    if (!failure) {
+      if (!previous || !previous.active) return { available: true, action: 'none', count: 0, suppressed: 0 };
+      const recovery = { ...previous, available: true, action: 'send_recovery', recoveredAt: now };
+      await kv.put(key, JSON.stringify({ v: 1, active: false, recoveredAt: now }), {
+        expirationTtl: INCIDENT_POLICY.stateTtlSeconds,
+      });
+      return recovery;
+    }
+
+    if (!previous || !previous.active || previous.failureFingerprint !== event.failureFingerprint) {
+      const record = incidentRecord(event, now);
+      await kv.put(key, JSON.stringify(record), { expirationTtl: INCIDENT_POLICY.stateTtlSeconds });
+      return { ...record, available: true, action: 'send_first' };
+    }
+
+    const elapsed = now - Number(previous.lastSentAt || previous.firstAt || 0);
+    const record = {
+      ...previous,
+      lastAt: now,
+      count: Number(previous.count || 1) + 1,
+      suppressed: Number(previous.suppressed || 0) + (elapsed < INCIDENT_POLICY.cooldownMs ? 1 : 0),
+    };
+    const action = elapsed >= INCIDENT_POLICY.cooldownMs ? 'send_reminder' : 'suppress';
+    if (action === 'send_reminder') record.lastSentAt = now;
+    await kv.put(key, JSON.stringify(record), { expirationTtl: INCIDENT_POLICY.stateTtlSeconds });
+    return { ...record, available: true, action };
+  });
+}
+
+export function formatIncidentRecovery(record) {
+  const html = value => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const elapsed = Math.max(0, Number(record.recoveredAt || 0) - Number(record.firstAt || 0));
+  return `✅ <b>RECUPERADO ${html(record.method || 'GET')} ${html(record.path || '/')}</b>\n` +
+    `· ${Number(record.count) || 1} fallo(s) · ${Math.round(elapsed / 1000)}s\n` +
+    `· origen seguro <code>${html(record.source || 'unknown')}:${html(record.operationFingerprint || '')}</code>`;
 }
 
 function eventPrefix(kind, bucket, fingerprint) {
@@ -163,4 +248,7 @@ export const __notifyPolicyTest = {
   recordNotificationAggregate,
   flushNotificationAggregates,
   formatAggregateSummary,
+  safeIncidentIdentity,
+  recordNotificationIncident,
+  formatIncidentRecovery,
 };

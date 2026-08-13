@@ -1,8 +1,11 @@
 import {
   classifyHttpNotification,
   flushNotificationAggregates,
+  formatIncidentRecovery,
   notificationSourceClass,
   recordNotificationAggregate,
+  recordNotificationIncident,
+  safeIncidentIdentity,
   safeSourceFingerprint,
 } from './notify-policy.mjs';
 
@@ -246,6 +249,12 @@ function notificationRouteIsSkipped(path, status, method) {
     (String(method).toUpperCase() === 'POST' && Number(status) < 400 && NOTIFY_SKIP_SUCCESS_EXACT.has(successPath));
 }
 
+function notificationUsesIncidentRateLimit(path, method, status, errorCode) {
+  const exactPath = String(path || '/').length > 1 ? String(path).replace(/\/+$/, '') : String(path || '/');
+  return String(method || '').toUpperCase() === 'POST' && exactPath === '/locations/cmd/ack' &&
+    Number(status) >= 400 && Number(status) < 500 && errorCode === 'invalid_ack_reference';
+}
+
 function notificationSafePath(path) {
   const segments = String(path || '/').split('/').map(segment => {
     if (!segment) return segment;
@@ -258,7 +267,7 @@ function notificationSafePath(path) {
 }
 
 async function responseErrorCode(res) {
-  if (!res || res.status < 400 || res.status >= 500) return '';
+  if (!res || res.status < 400) return '';
   try {
     const data = await res.clone().json();
     const code = data && typeof data.error === 'string' ? data.error : '';
@@ -283,9 +292,52 @@ async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
     errorCode,
     skip: notificationRouteIsSkipped(path, status, req.method),
   });
+  const incident = async () => {
+    try {
+      const identity = await safeIncidentIdentity(req, notificationSafePath(path), status, errorCode);
+      const result = await recordNotificationIncident(env.SIGNAGE_KV, {
+        phase: status >= 400 ? 'failure' : 'success',
+        method: req.method,
+        path: notificationSafePath(path),
+        status,
+        errorCode,
+        ...identity,
+      });
+      if (result.action === 'send_first') {
+        await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+      } else if (result.action === 'send_reminder') {
+        await sendTelegram(env, `${automaticHttpMessage(req, path, status, ms)}\n· ${result.count} fallos · ${result.suppressed} repetición(es) suprimida(s)`);
+      } else if (result.action === 'send_recovery') {
+        await sendTelegram(env, formatIncidentRecovery(result));
+      } else if (status < 400 && policy.action === 'immediate') {
+        await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+      }
+    } catch {
+      // Una avería del rate-limit nunca puede ocultar el primer error. Para una
+      // recuperación no se inventa señal si no se pudo leer el estado previo.
+      if (status >= 400) await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+      console.warn(`notification-incident-policy-failed path=${notificationSafePath(path)} status=${status}`);
+    }
+  };
+
+  // Los éxitos de mutaciones no generan una alerta nueva, pero sí cierran un
+  // incidente previo de esa misma operación. Las rutas de telemetría/polling
+  // permanecen fuera para no añadir lecturas KV a cada latido.
+  const ackSuccessMayRecover = status < 400 && String(req.method).toUpperCase() === 'POST' &&
+    String(path || '').replace(/\/+$/, '') === '/locations/cmd/ack';
+  if (ackSuccessMayRecover) {
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(incident());
+    else await incident();
+    return;
+  }
   if (policy.action === 'skip') return;
   if (policy.action === 'immediate') {
-    notify(ctx, env, automaticHttpMessage(req, path, status, ms));
+    if (notificationUsesIncidentRateLimit(path, req.method, status, errorCode)) {
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(incident());
+      else await incident();
+    } else {
+      notify(ctx, env, automaticHttpMessage(req, path, status, ms));
+    }
     return;
   }
 

@@ -2,11 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AGGREGATE_POLICY,
+  INCIDENT_POLICY,
   classifyHttpNotification,
   classifyProbe404Path,
   flushNotificationAggregates,
   formatAggregateSummary,
+  formatIncidentRecovery,
   recordNotificationAggregate,
+  recordNotificationIncident,
+  safeIncidentIdentity,
   safeSourceFingerprint,
 } from '../src/notify-policy.mjs';
 
@@ -104,4 +108,80 @@ test('resumen contiene sólo ruta, clase y fingerprint seguros', () => {
   assert.match(text, /\/grid\/book/);
   assert.match(text, /cli:abc123/);
   for (const forbidden of ['Origin', '127.0.0.1', 'secret=', '{"error"']) assert.equal(text.includes(forbidden), false);
+});
+
+test('fingerprint de incidente browser identifica la operación y el fallo, no el UA', async () => {
+  const chrome = req('Mozilla/5.0 Chrome/140.0 private-build', 'https://one.test');
+  const safari = req('Mozilla/5.0 Safari/19.0 private-build', 'https://two.test');
+  const a = await safeIncidentIdentity(chrome, '/grid/book', 502, 'upstream-failed');
+  const b = await safeIncidentIdentity(safari, '/grid/book', 502, 'upstream-failed');
+  assert.equal(a.source, 'browser');
+  assert.equal(a.operationFingerprint, b.operationFingerprint);
+  assert.equal(a.failureFingerprint, b.failureFingerprint);
+  const changed = await safeIncidentIdentity(safari, '/grid/book', 503, 'unavailable');
+  assert.equal(changed.operationFingerprint, a.operationFingerprint);
+  assert.notEqual(changed.failureFingerprint, a.failureFingerprint);
+  for (const unsafe of ['private-build', 'one.test', 'two.test', 'upstream-failed']) {
+    assert.equal(JSON.stringify(a).includes(unsafe), false);
+  }
+});
+
+test('incidente idéntico avisa primero, limita repeticiones y avisa recuperación', async () => {
+  const kv = new FakeKV();
+  const identity = await safeIncidentIdentity(req('Mozilla/5.0 Chrome/140.0'), '/orders', 502, 'upstream-failed');
+  const failure = { phase: 'failure', method: 'POST', path: '/orders', status: 502, errorCode: 'upstream-failed', ...identity };
+
+  const first = await recordNotificationIncident(kv, failure, 1_000);
+  assert.equal(first.action, 'send_first');
+  assert.equal(first.count, 1);
+
+  const repeated = await recordNotificationIncident(kv, failure, 2_000);
+  assert.equal(repeated.action, 'suppress');
+  assert.equal(repeated.count, 2);
+
+  const reminder = await recordNotificationIncident(kv, failure, 1_000 + INCIDENT_POLICY.cooldownMs);
+  assert.equal(reminder.action, 'send_reminder');
+  assert.equal(reminder.count, 3);
+  assert.equal(reminder.suppressed, 1);
+
+  const recovery = await recordNotificationIncident(kv, {
+    phase: 'success', method: 'POST', path: '/orders', status: 200,
+    source: identity.source, operationFingerprint: identity.operationFingerprint,
+  }, 1_000 + INCIDENT_POLICY.cooldownMs + 500);
+  assert.equal(recovery.action, 'send_recovery');
+  assert.equal(recovery.count, 3);
+  assert.match(formatIncidentRecovery(recovery), /RECUPERADO/);
+
+  const healthyAgain = await recordNotificationIncident(kv, {
+    phase: 'success', method: 'POST', path: '/orders', status: 200,
+    source: identity.source, operationFingerprint: identity.operationFingerprint,
+  }, 1_000 + INCIDENT_POLICY.cooldownMs + 1_000);
+  assert.equal(healthyAgain.action, 'none');
+
+  const recurrence = await recordNotificationIncident(kv, failure, 1_000 + INCIDENT_POLICY.cooldownMs + 2_000);
+  assert.equal(recurrence.action, 'send_first');
+});
+
+test('un fallo distinto en la misma operación no queda oculto por el cooldown', async () => {
+  const kv = new FakeKV();
+  const request = req('Mozilla/5.0 Chrome/140.0');
+  const firstIdentity = await safeIncidentIdentity(request, '/orders', 502, 'upstream-failed');
+  const changedIdentity = await safeIncidentIdentity(request, '/orders', 503, 'unavailable');
+  await recordNotificationIncident(kv, {
+    phase: 'failure', method: 'POST', path: '/orders', status: 502, errorCode: 'upstream-failed', ...firstIdentity,
+  }, 1_000);
+  const changed = await recordNotificationIncident(kv, {
+    phase: 'failure', method: 'POST', path: '/orders', status: 503, errorCode: 'unavailable', ...changedIdentity,
+  }, 2_000);
+  assert.equal(changed.action, 'send_first');
+  assert.equal(changed.count, 1);
+});
+
+test('sin KV el primer error no se oculta', async () => {
+  const identity = await safeIncidentIdentity(req(), '/orders', 500, 'worker-exception');
+  const result = await recordNotificationIncident(null, {
+    phase: 'failure', method: 'POST', path: '/orders', status: 500, errorCode: 'worker-exception', ...identity,
+  }, 1_000);
+  assert.equal(result.available, false);
+  assert.equal(result.action, 'send_first');
 });
