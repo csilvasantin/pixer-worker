@@ -6410,6 +6410,17 @@ async function gridPlaylistHandler(req, env, url) {
   }
   return json({ ok: true, screen, date: gridFmtDate(date), total: items.length, items, generatedAt: Date.now() });
 }
+// Firma de inventario con progreso por tramos del 5 %. Contar sólo cuántas
+// descargas había hacía que 3 %, 48 % y 97 % fueran el mismo estado y el mando
+// saltase del primer porcentaje a verde. El bucket limita el gasto a un máximo
+// razonable de 20 escrituras por pieza sin perder feedback progresivo.
+export function screenCacheSignature(ready, total, downloading) {
+  return JSON.stringify({
+    r: ready,
+    t: total,
+    d: downloading.map(x => [x.id, Math.floor((Number(x.pct) || 0) / 5) * 5]),
+  });
+}
 async function screenCacheHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   if (req.method === 'GET') {
@@ -6422,7 +6433,7 @@ async function screenCacheHandler(req, env, url) {
   const ready = Array.isArray(b.ready) ? b.ready.map(x => String(x).slice(0, 80)).slice(0, 300) : [];
   const downloading = Array.isArray(b.downloading) ? b.downloading.slice(0, 50).map(x => ({ id: String((x && x.id) || '').slice(0, 80), pct: Math.max(0, Math.min(100, (x && x.pct) | 0)) })) : [];
   const rec = { ready, readyCount: ready.length, total: Math.max(0, b.total | 0), downloading, bytes: Math.max(0, b.bytes | 0), at: Date.now() };
-  const now = Date.now(), sig = JSON.stringify({ r: ready, t: rec.total, d: downloading.length });
+  const now = Date.now(), sig = screenCacheSignature(ready, rec.total, downloading);
   let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
   if (prev && prev.__sig === sig && (now - (prev.at || 0)) < 60000) return json({ ok: true, screen, throttled: 'unchanged' });
   rec.__sig = sig;
