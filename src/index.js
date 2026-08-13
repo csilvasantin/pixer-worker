@@ -2958,6 +2958,40 @@ function nowItemSig(item) {
   return JSON.stringify(it);
 }
 
+// Telemetría declarada por el propio player. Se acepta por allowlist: Status no
+// debe convertir un POST público y frecuente en un almacén de JSON arbitrario.
+// Los campos son deliberadamente estables; `lastSeen` ya aporta el reloj vivo.
+function sanitizeDeviceTelemetry(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const schema = {
+    display: { width: 'num', height: 'num', cssWidth: 'num', cssHeight: 'num', viewportWidth: 'num', viewportHeight: 'num', devicePixelRatio: 'num', colorDepth: 'num', orientation: 'text' },
+    system: { os: 'text', osVersion: 'text', platform: 'text', language: 'text', timezone: 'text' },
+    hardware: { cores: 'num', memoryGB: 'num', touchPoints: 'num', architecture: 'text' },
+    software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
+    storage: { usage: 'num', quota: 'num', persisted: 'bool' },
+    network: { online: 'bool', effectiveType: 'text', saveData: 'bool' },
+  };
+  const out = {};
+  for (const [group, fields] of Object.entries(schema)) {
+    const source = raw[group];
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    const clean = {};
+    for (const [field, type] of Object.entries(fields)) {
+      const value = source[field];
+      if (type === 'bool') {
+        if (typeof value === 'boolean') clean[field] = value;
+      } else if (type === 'num') {
+        const number = Number(value);
+        if (Number.isFinite(number) && number >= 0) clean[field] = Math.min(number, Number.MAX_SAFE_INTEGER);
+      } else if (value !== undefined && value !== null && String(value).trim()) {
+        clean[field] = String(value).trim().slice(0, type === 'long' ? 300 : 80);
+      }
+    }
+    if (Object.keys(clean).length) out[group] = clean;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 async function signageNowGetHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
@@ -2966,7 +3000,8 @@ async function signageNowGetHandler(req, env, url) {
   try { stored = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
   const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
-  return json({ ok: true, screen, item: item || null, ip: (stored && stored.__ip) || null,
+  return json({ ok: true, screen, item: item || null, device: (stored && stored.device) || null,
+    standby: !!(stored && stored.standby), ip: (stored && stored.__ip) || null,
     lastSeen: (stored && stored.__w) || null, producer: (stored && stored.__producer) || null });
 }
 
@@ -2984,6 +3019,7 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
   if (!loc && !locName && !machine) return;     // sin loc/machine → no tocamos el registro
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
+  const device = sanitizeDeviceTelemetry(body && body.device) || (prev && prev.device) || null;
   const data = Object.assign({}, prev || {}, {
     screen,
     last_seen: now,
@@ -2995,8 +3031,11 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
     locName,
     // id del equipo donde corre el player → admira.live/control mapea pantalla↔máquina.
     machine: machine || (prev && prev.machine) || '',
+    device,
   });
-  const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine || prev.showing_id !== data.showing_id;
+  const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine ||
+    prev.showing_id !== data.showing_id || prev.version !== data.version ||
+    JSON.stringify(prev.device || null) !== JSON.stringify(device);
   const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
   if (!changed && !stale) return;               // igual y reciente → no gastamos KV
   if (!(await reserveKvWrite(env, now))) return;
@@ -3029,14 +3068,18 @@ async function signageNowPostHandler(req, env) {
   // en cambio real o para refrescar el TTL antes de que caduque.
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
-  if (prev && prev.__w !== undefined && prev.__sig === sig && (now - prev.__w) < NOW_REFRESH_MS) {
+  const device = sanitizeDeviceTelemetry(body.device) || (prev && prev.device) || null;
+  const deviceSig = JSON.stringify(device || null);
+  const standby = typeof body.standby === 'boolean' ? body.standby : !!(prev && prev.standby);
+  if (prev && prev.__w !== undefined && prev.__sig === sig && prev.__deviceSig === deviceSig &&
+      !!prev.standby === standby && (now - prev.__w) < NOW_REFRESH_MS) {
     return json({ ok: true, screen, throttled: 'unchanged' });
   }
   if (!(await reserveKvWrite(env, now))) {
     return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   }
   try {
-    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, __w: now, __sig: sig,
+    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, device, standby, __w: now, __sig: sig, __deviceSig: deviceSig,
       __producer: ownership.producer,
       __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
   } catch (e) {
