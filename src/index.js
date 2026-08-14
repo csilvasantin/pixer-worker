@@ -2753,7 +2753,11 @@ async function signageShotGetHandler(req, env, url) {
 // Heartbeat: cada signage.html abierto pinga periódicamente para que sepamos qué pantallas están vivas.
 const SCREENS_INDEX = 'signage_screens_index';
 const SCREEN_TTL = 10 * 60;        // 10 min sin pings → pantalla muerta (holgura sobre el refresco)
-const HB_REFRESH_MS = 90 * 1000;   // si nada cambió, reescribe screen: como mucho cada 90s
+// Presencia es telemetría crítica, pero no necesita seguir cada cambio de pieza.
+// Refrescar cada 4,5 min deja margen ante el umbral online de 6 min y mantiene
+// toda la flota dentro de la reserva diaria aunque el player cambie de contenido
+// cada pocos segundos.
+const HB_REFRESH_MS = 270 * 1000;
 const SCREEN_ONLINE_MS = 6 * 60 * 1000; // "online" si se vio hace < 6 min (cubre heartbeat lento del juego a 5min)
 
 // ─── Cortacircuitos de escrituras KV (control de coste) ──────────────
@@ -2765,6 +2769,8 @@ const SCREEN_ONLINE_MS = 6 * 60 * 1000; // "online" si se vio hace < 6 min (cubr
 // Kill-switch instantáneo: var KV_WRITES_OFF=1 (wrangler) corta todo write KV.
 const KV_DAILY_WRITE_CAP_DEFAULT = 25000; // físicas/día → ~750k/mes < 1M incluido
 function utcDayKey(now) { return 'kvbudget:' + new Date(now).toISOString().slice(0, 10); }
+const KV_CRITICAL_DAILY_WRITE_CAP_DEFAULT = 10000;
+function utcCriticalDayKey(now) { return 'kvcritical:' + new Date(now).toISOString().slice(0, 10); }
 // Reserva presupuesto para UN write lógico (= 2 físicos: el dato + este contador).
 // Devuelve true si se puede escribir; false si kill-switch o tope alcanzado.
 // Reparto del gasto POR PREFIJO de clave. El contador global decia CUANTO se
@@ -2817,6 +2823,28 @@ async function reserveKvWrite(env, now) {
   }
   try { await env.SIGNAGE_KV.put(key, String(used + 2), { expirationTtl: 172800 }); } catch {}
   return true;
+}
+
+// Reserva independiente para presencia de pantallas. El 14-ago-2026 el pool
+// general llegó a 32.000/32.000 y /signage/now dejó de reflejar players que sí
+// estaban reproduciendo. General (22k) + crítico (10k) conserva el techo total
+// de 32k, pero impide que Agora/layout dejen ciego el CMS. Un write lógico sigue
+// contando como dos físicos: dato + contador de presupuesto.
+async function reserveCriticalKvWrite(env, now) {
+  if (String(env.KV_WRITES_OFF || '') === '1') return false;
+  if (!env.SIGNAGE_KV) return false;
+  const cap = parseInt(env.KV_CRITICAL_DAILY_WRITE_CAP, 10) || KV_CRITICAL_DAILY_WRITE_CAP_DEFAULT;
+  const key = utcCriticalDayKey(now);
+  let used = 0;
+  try { used = parseInt(await env.SIGNAGE_KV.get(key), 10) || 0; } catch {}
+  if (used >= cap) return false;
+  try { await env.SIGNAGE_KV.put(key, String(used + 2), { expirationTtl: 172800 }); } catch { return false; }
+  return true;
+}
+function kvCriticalDenyReason(env) {
+  if (String(env.KV_WRITES_OFF || '') === '1') return 'kill-switch';
+  if (!env.SIGNAGE_KV) return 'kv-not-bound';
+  return 'critical-budget';
 }
 // Causa por la que reserveKvWrite acaba de devolver false, para que la respuesta
 // no mienta: durante el incidente del 2026-07-08 el kill-switch KV_WRITES_OFF
@@ -2874,8 +2902,8 @@ async function signageHeartbeatHandler(req, env) {
     if (!changed && !stale) {
       return json({ ok: true, last_seen: prev.last_seen, throttled: 'unchanged' });
     }
-    if (!(await reserveKvWrite(env, now))) {
-      return json({ ok: true, last_seen: now, throttled: kvWriteDenyReason(env) });
+    if (!(await reserveCriticalKvWrite(env, now))) {
+      return json({ ok: true, last_seen: now, throttled: kvCriticalDenyReason(env) });
     }
     await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
     // Índice de pantallas: solo se escribe al aparecer una pantalla nueva (raro).
@@ -2884,7 +2912,7 @@ async function signageHeartbeatHandler(req, env) {
     if (!index.includes(screen)) {
       index.push(screen);
       if (index.length > 100) index = index.slice(-100);
-      if (await reserveKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+      if (await reserveCriticalKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
     }
     return json({ ok: true, last_seen: now });
   } catch (e) {
@@ -3087,12 +3115,15 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
     machine: machine || (prev && prev.machine) || '',
     device,
   });
+  // El contenido y la telemetría técnica cambian mucho más rápido que la
+  // presencia. Se guardan en el refresco periódico, pero no fuerzan un write:
+  // /signage/now ya conserva el item actual y /signage/screens sólo necesita
+  // saber que el player sigue vivo y dónde está cableado.
   const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine ||
-    prev.showing_id !== data.showing_id || prev.version !== data.version ||
-    JSON.stringify(prev.device || null) !== JSON.stringify(device);
+    prev.role !== data.role || prev.version !== data.version;
   const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
-  if (!changed && !stale) return;               // igual y reciente → no gastamos KV
-  if (!(await reserveKvWrite(env, now))) return;
+  if (!changed && !stale) return { ok: true, updated: false }; // igual y reciente → no gastamos KV
+  if (!(await reserveCriticalKvWrite(env, now))) return { ok: false, reason: kvCriticalDenyReason(env) };
   try {
     await env.SIGNAGE_KV.put(`screen:${screen}`, JSON.stringify(data), { expirationTtl: SCREEN_TTL });
     let index = [];
@@ -3100,9 +3131,10 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
     if (!index.includes(screen)) {
       index.push(screen);
       if (index.length > 100) index = index.slice(-100);
-      if (await reserveKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
+      if (await reserveCriticalKvWrite(env, now)) await env.SIGNAGE_KV.put(SCREENS_INDEX, JSON.stringify(index));
     }
-  } catch {}
+    return { ok: true, updated: true };
+  } catch (e) { return { ok: false, reason: String(e).slice(0, 120) }; }
 }
 
 async function signageNowPostHandler(req, env) {
@@ -3125,12 +3157,16 @@ async function signageNowPostHandler(req, env) {
   const device = sanitizeDeviceTelemetry(body.device) || (prev && prev.device) || null;
   const deviceSig = JSON.stringify(device || null);
   const standby = typeof body.standby === 'boolean' ? body.standby : !!(prev && prev.standby);
+  // La presencia usa su reserva crítica y se actualiza incluso si el pool
+  // general ya está agotado. Antes este paso vivía después del early-return de
+  // presupuesto: el player seguía emitiendo, pero desaparecía por completo del CMS.
+  const presence = await nowUpsertScreenLoc(env, screen, body, item, now, req);
   if (prev && prev.__w !== undefined && prev.__sig === sig && prev.__deviceSig === deviceSig &&
       !!prev.standby === standby && (now - prev.__w) < NOW_REFRESH_MS) {
-    return json({ ok: true, screen, throttled: 'unchanged' });
+    return json({ ok: true, screen, throttled: 'unchanged', presence: presence && presence.ok !== false });
   }
   if (!(await reserveKvWrite(env, now))) {
-    return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
+    return json({ ok: true, screen, throttled: kvWriteDenyReason(env), presence: presence && presence.ok !== false });
   }
   try {
     await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, device, standby, __w: now, __sig: sig, __deviceSig: deviceSig,
@@ -3139,10 +3175,8 @@ async function signageNowPostHandler(req, env) {
   } catch (e) {
     return json({ ok: true, throttled: true, reason: String(e).slice(0, 120) });
   }
-  // Emisión visible: si el POST trae loc/locName, refleja la pantalla en el
-  // registro screen:<id> que sirve /signage/screens. No rompe el POST si falla.
-  try { await nowUpsertScreenLoc(env, screen, body, item, now, req); } catch {}
-  return json({ ok: true, screen, loc: (body.loc || '').toString().slice(0, 60) || null });
+  return json({ ok: true, screen, loc: (body.loc || '').toString().slice(0, 60) || null,
+    presence: presence && presence.ok !== false });
 }
 
 // ─── /signage/assign — cablear un player huérfano a su circuito (tarea #4) ──
@@ -6804,7 +6838,10 @@ export default {
         const gasto = JSON.parse((await env.SIGNAGE_KV.get('kvgasto:' + hoy)) || '{}');
         const usado = parseInt(await env.SIGNAGE_KV.get('kvbudget:' + hoy), 10) || 0;
         const tope = parseInt(env.KV_DAILY_WRITE_CAP, 10) || KV_DAILY_WRITE_CAP_DEFAULT;
+        const criticoUsado = parseInt(await env.SIGNAGE_KV.get('kvcritical:' + hoy), 10) || 0;
+        const criticoTope = parseInt(env.KV_CRITICAL_DAILY_WRITE_CAP, 10) || KV_CRITICAL_DAILY_WRITE_CAP_DEFAULT;
         return json({ dia: hoy, usado, tope, restante: Math.max(0, tope - usado),
+          critico: { usado: criticoUsado, tope: criticoTope, restante: Math.max(0, criticoTope - criticoUsado) },
           por_prefijo: Object.fromEntries(Object.entries(gasto).sort((a, b) => b[1] - a[1])) });
       } else if (path === '/agora/presence') {
         res = await agoraPresenceHandler(req, env, url);
@@ -6961,4 +6998,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { capsuleDimensionTag, signageClaimOwner, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };

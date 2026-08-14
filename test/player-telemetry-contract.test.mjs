@@ -21,8 +21,9 @@ test('un cambio de dispositivo rompe el dedupe sin gastar escrituras en cada lat
   assert.match(source,/__deviceSig: deviceSig/);
 });
 
-test('el censo de pantallas conserva el dispositivo y la versión declarada',()=>{
+test('el censo conserva dispositivo y versión sin escribir en cada variación técnica',()=>{
   assert.match(source,/prev\.version !== data\.version/);
-  assert.match(source,/JSON\.stringify\(prev\.device \|\| null\) !== JSON\.stringify\(device\)/);
   assert.match(source,/machine: machine \|\| \(prev && prev\.machine\) \|\| '',\s+device,/);
+  assert.doesNotMatch(source,/prev\.showing_id !== data\.showing_id \|\| prev\.version/);
+  assert.doesNotMatch(source,/prev\.version !== data\.version \|\|\s+JSON\.stringify\(prev\.device/);
 });

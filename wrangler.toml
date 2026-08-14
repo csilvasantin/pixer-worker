@@ -35,10 +35,9 @@ bucket_name = "pixer-stock"
 binding = "OMNI"
 service = "omnipublicity-api"
 
-# Tope diario del cortacircuitos de KV. Se sube de 25.000 a 32.000 con la cuenta
-# hecha: 32.000 x 30 = 960.000/mes, que sigue por debajo del millon incluido.
-# NO se sube mas: 40.000 se pasaria. Esto solo compra aire mientras se localiza
-# el gasto real con /agora/gasto — un tope que se agota a diario no es escala,
-# es un derroche sin identificar (5-ago-2026).
+# Tope diario partido: 22.000 generales + 10.000 reservadas a presencia de
+# pantallas = 32.000/día (960.000/mes). La reserva evita que Agora/layout deje
+# ciego el CMS cuando agota su pool, sin ampliar el máximo conjunto.
 [vars]
-KV_DAILY_WRITE_CAP = "32000"
+KV_DAILY_WRITE_CAP = "22000"
+KV_CRITICAL_DAILY_WRITE_CAP = "10000"
