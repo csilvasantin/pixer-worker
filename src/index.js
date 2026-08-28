@@ -4462,6 +4462,103 @@ async function stockIngestAuthorized(provided, expected) {
   return crypto.subtle.timingSafeEqual(providedHash, expectedHash);
 }
 
+// ─── SUBIDA POR PARTES (multipart de R2) ─────────────────────────────────────
+//
+// /stock/publish recibe el asset en base64 dentro de un JSON. Base64 infla un
+// 33% y el BORDE de Cloudflare corta el cuerpo de una petición en 100 MB —
+// medido: un cuerpo de 105 MB devuelve 413 antes de tocar este Worker. Eso
+// dejaba el techo real en ~74 MB de fichero, y un episodio no cabe.
+//
+// R2 sabe hacer multipart: se abre una subida, se mandan los trozos por
+// separado y se cierra. Cada trozo es su propia petición, así que el límite de
+// cuerpo deja de importar. El fichero aterriza en `uploads/` y luego
+// /stock/publish lo recoge de ahí con `r2Staged` y sigue por el MISMO carril de
+// siempre (tags de Gemini, meta.json, índice, aviso): no se duplica nada de eso.
+//
+// Cupos: 25 MB por trozo (holgado bajo los 100 del borde) y 400 trozos. El
+// techo de verdad lo pone STOCK_STAGED_MAX. (Carlos, 28-08-2026 · NeoMBP16.)
+const STOCK_PART_MAX = 25 * 1024 * 1024;
+const STOCK_PARTS_MAX = 400;
+const STOCK_STAGED_MAX = 2 * 1024 * 1024 * 1024;   // 2 GB
+const STOCK_STAGING_PREFIX = 'uploads/';
+
+// Solo se acepta tocar claves de `uploads/`: sin esto, un `key` cualquiera
+// dejaría escribir encima de un asset ya publicado.
+function stagingKeyOk(key) {
+  return typeof key === 'string'
+    && key.startsWith(STOCK_STAGING_PREFIX)
+    && /^uploads\/[a-z0-9-]{6,64}\.[a-z0-9]{1,8}$/.test(key);
+}
+
+async function stockUploadInitHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body = {};
+  try { body = await req.json(); } catch {}
+  const mime = (typeof body.mime === 'string' && body.mime) ? body.mime : 'application/octet-stream';
+  const size = Number(body.size || 0);
+  if (size && size > STOCK_STAGED_MAX) {
+    return json({ error: 'too-big', max: STOCK_STAGED_MAX }, { status: 413 });
+  }
+  const ext = extForMime(mime);
+  const key = `${STOCK_STAGING_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+  const up = await env.STOCK_BUCKET.createMultipartUpload(key, {
+    httpMetadata: { contentType: mime },
+  });
+  return json({ ok: true, key, uploadId: up.uploadId, partSize: STOCK_PART_MAX, maxParts: STOCK_PARTS_MAX });
+}
+
+async function stockUploadPartHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  const key = url.searchParams.get('key') || '';
+  const uploadId = url.searchParams.get('uploadId') || '';
+  const n = parseInt(url.searchParams.get('n') || '0', 10);
+  if (!stagingKeyOk(key) || !uploadId) return json({ error: 'bad-key' }, { status: 400 });
+  if (!(n >= 1 && n <= STOCK_PARTS_MAX)) return json({ error: 'bad-part', max: STOCK_PARTS_MAX }, { status: 400 });
+  if (!req.body) return json({ error: 'empty-part' }, { status: 400 });
+  const declared = Number(req.headers.get('Content-Length') || 0);
+  if (declared > STOCK_PART_MAX) return json({ error: 'part-too-big', max: STOCK_PART_MAX }, { status: 413 });
+  const up = env.STOCK_BUCKET.resumeMultipartUpload(key, uploadId);
+  try {
+    const part = await up.uploadPart(n, req.body);
+    return json({ ok: true, partNumber: part.partNumber, etag: part.etag });
+  } catch (e) {
+    return json({ error: 'part-failed', detail: String((e && e.message) || e) }, { status: 502 });
+  }
+}
+
+async function stockUploadCompleteHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body = {};
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const { key, uploadId } = body;
+  if (!stagingKeyOk(key) || !uploadId) return json({ error: 'bad-key' }, { status: 400 });
+  const parts = Array.isArray(body.parts) ? body.parts : [];
+  if (!parts.length || parts.length > STOCK_PARTS_MAX) return json({ error: 'bad-parts' }, { status: 400 });
+  const limpias = parts
+    .map(p => ({ partNumber: Number(p && p.partNumber), etag: String((p && p.etag) || '') }))
+    .filter(p => p.partNumber >= 1 && p.etag);
+  if (limpias.length !== parts.length) return json({ error: 'bad-parts' }, { status: 400 });
+  limpias.sort((a, b) => a.partNumber - b.partNumber);
+  const up = env.STOCK_BUCKET.resumeMultipartUpload(key, uploadId);
+  try {
+    const obj = await up.complete(limpias);
+    return json({ ok: true, key, size: (obj && obj.size) || 0 });
+  } catch (e) {
+    return json({ error: 'complete-failed', detail: String((e && e.message) || e) }, { status: 502 });
+  }
+}
+
+// Una subida empezada y no terminada deja los trozos ocupando sitio: se aborta.
+async function stockUploadAbortHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let body = {};
+  try { body = await req.json(); } catch {}
+  const { key, uploadId } = body;
+  if (!stagingKeyOk(key) || !uploadId) return json({ error: 'bad-key' }, { status: 400 });
+  try { await env.STOCK_BUCKET.resumeMultipartUpload(key, uploadId).abort(); } catch {}
+  return json({ ok: true, aborted: true });
+}
+
 async function stockPublishHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
 
@@ -4524,7 +4621,16 @@ async function stockPublishHandler(req, env, ctx) {
     base64Efectivo = btoa(unescape(encodeURIComponent(texto)));
     mimeEfectivo = 'text/plain';
   }
-  if (!base64Efectivo && !sourceUrl) return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
+  // Tercera vía de entrada, además de base64 y sourceUrl: un fichero que ya
+  // subió por partes y está esperando en `uploads/`. Ver stockUploadInitHandler.
+  const r2Staged = (typeof body.r2Staged === 'string' && stagingKeyOk(body.r2Staged.trim()))
+    ? body.r2Staged.trim() : null;
+  if (typeof body.r2Staged === 'string' && !r2Staged) {
+    return json({ error: 'bad-staged-key' }, { status: 400 });
+  }
+  if (!base64Efectivo && !sourceUrl && !r2Staged) {
+    return json({ error: 'missing-base64-or-sourceUrl' }, { status: 400 });
+  }
 
   // Las integraciones servidor→servidor pueden aportar un id externo. Se
   // convierte en un id opaco y determinista para que reintentar nunca duplique
@@ -4570,6 +4676,20 @@ async function stockPublishHandler(req, env, ctx) {
       // arriba. Si aquí se leyera `base64` a secas, la cápsula se caería por el camino.
       bytes = b64ToBytes(base64Efectivo);
       finalMime = mimeEfectivo || 'application/octet-stream';
+    } else if (r2Staged) {
+      // Subida por partes ya cerrada: el fichero está en `uploads/`. Se engancha
+      // su cuerpo al MISMO carril de streaming que usa sourceUrl, así que de
+      // aquí en adelante no hay nada distinto — tags, meta, índice y aviso
+      // salen igual. Y se puede pasar de los 200 MB de las otras vías, que es
+      // justo para lo que existe esto.
+      const stagedObj = await env.STOCK_BUCKET.get(r2Staged);
+      if (!stagedObj) return json({ error: 'staged-not-found', key: r2Staged }, { status: 404 });
+      if (stagedObj.size > STOCK_STAGED_MAX) {
+        return json({ error: 'too-big', max: STOCK_STAGED_MAX }, { status: 413 });
+      }
+      sourceResponse = { body: stagedObj.body };
+      sourceDeclaredSize = stagedObj.size;
+      finalMime = mime || (stagedObj.httpMetadata && stagedObj.httpMetadata.contentType) || 'application/octet-stream';
     } else {
       // Vídeos Veo: el frontend manda sourceUrl = {worker}/veo/download?uri=<gemini>.
       // Hacer fetch a nuestra propia URL pública (worker→self) es un anti-patrón
@@ -4617,11 +4737,16 @@ async function stockPublishHandler(req, env, ctx) {
     customMetadata: { motor, type, id },
   };
   if (sourceResponse) {
+    // Un sourceUrl es una URL de fuera y sigue topado en 200 MB. Lo que subió
+    // por partes ya pasó por nuestros cupos al entrar en `uploads/`, así que
+    // aquí se le deja llegar hasta STOCK_STAGED_MAX: si no, la subida por
+    // partes moriría en el último paso, que es el peor sitio para morir.
+    const topeFlujo = r2Staged ? STOCK_STAGED_MAX : 200 * 1024 * 1024;
     let streamedBytes = 0;
     const bounded = new TransformStream({
       transform(chunk, controller) {
         streamedBytes += chunk.byteLength;
-        if (streamedBytes > 200 * 1024 * 1024) throw new Error('stock-source-too-big');
+        if (streamedBytes > topeFlujo) throw new Error('stock-source-too-big');
         controller.enqueue(chunk);
       },
     });
@@ -4644,6 +4769,10 @@ async function stockPublishHandler(req, env, ctx) {
       return json({ error: tooBig ? 'too-big' : 'sourceUrl-stream-failed', ...(tooBig ? { max: 200 * 1024 * 1024 } : { detail }) }, { status: tooBig ? 413 : 502 });
     }
     assetSize = streamedBytes;
+    // El fichero ya está en su sitio definitivo: la copia de `uploads/` sobra y
+    // si no se borra el bucket se llena de duplicados de cada episodio. Va en
+    // waitUntil para no retrasar la respuesta.
+    if (r2Staged) ctx.waitUntil(env.STOCK_BUCKET.delete(r2Staged).catch(() => {}));
   } else {
     await env.STOCK_BUCKET.put(assetKey, bytes, putOptions);
   }
@@ -6909,6 +7038,18 @@ export default {
         res = await telegramSetupHandler(req, env, url);
       } else if (path === '/stock/publish' && req.method === 'POST') {
         res = await stockPublishHandler(req, env, ctx);
+      // Subida por partes, para lo que no cabe en un cuerpo de 100 MB.
+      } else if (path === '/stock/upload/init' && req.method === 'POST') {
+        res = await stockUploadInitHandler(req, env);
+      // POST, no PUT: la cabecera CORS de la casa anuncia «POST, GET, DELETE,
+      // OPTIONS», así que un PUT moriría en el preflight del navegador. Se
+      // admite PUT igualmente para quien llame desde un CLI.
+      } else if (path === '/stock/upload/part' && (req.method === 'POST' || req.method === 'PUT')) {
+        res = await stockUploadPartHandler(req, env, url);
+      } else if (path === '/stock/upload/complete' && req.method === 'POST') {
+        res = await stockUploadCompleteHandler(req, env);
+      } else if (path === '/stock/upload/abort' && req.method === 'POST') {
+        res = await stockUploadAbortHandler(req, env);
       } else if (path === '/stock/interactive' && req.method === 'POST') {
         res = await stockInteractiveHandler(req, env, ctx);
       } else if (path === '/stock/site-capsule' && req.method === 'POST') {
