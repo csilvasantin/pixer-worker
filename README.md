@@ -63,6 +63,9 @@ audio centrales. xAI limita la edición a 8,7 segundos y devuelve como máximo
 720p; el cliente debe validar esos límites antes de enviar. Este endpoint exige
 el secreto servidor→servidor en `X-AdmiraNeXT-Ingest` y solo admite una data URI
 de vídeo o una URL de los almacenes propios de Admira.
+La autorización del llamador depende del secreto, no de la cabecera HTTP
+`Origin` (que un cliente no navegador puede falsificar); la restricción de
+origen descrita aquí se refiere a la procedencia del fichero de entrada.
 
 ## RTB · Motor de decisión programática (subasta de segundo precio)
 
