@@ -17,6 +17,7 @@ import {
 //   POST /tts                  → ElevenLabs text-to-speech (devuelve audio/mpeg)
 //   POST /xai/image            → Grok 2 Image (devuelve {data:[{url}]})
 //   POST /xai/video            → Grok Imagine Video (devuelve {request_id})
+//   POST /xai/video/edit       → edición generativa de un vídeo existente
 //   GET  /xai/video/{id}       → polling status
 //   GET  /healthz              → ping
 
@@ -1803,6 +1804,44 @@ async function xaiVideoStartHandler(req, env) {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'grok-imagine-video', prompt, duration: dur, aspect_ratio, resolution }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return json(data, { status: r.status });
+}
+
+// Edita un vídeo YA preparado en el encuadre de salida. El adaptador de Pixeria
+// crea antes un lienzo horizontal con el original vertical centrado y los lados
+// vacíos; xAI completa ese contexto. Después Pixeria vuelve a superponer el
+// original, así que el centro y su audio nunca quedan a merced del modelo.
+async function xaiVideoEditHandler(req, env) {
+  if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
+  if (!await stockIngestAuthorized(req.headers.get('X-AdmiraNeXT-Ingest'), env.ADMIRANEXT_INGEST_TOKEN)) {
+    return json({ error: 'unauthorized-video-edit' }, { status: 401 });
+  }
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const prompt = String(body.prompt || '').trim();
+  const videoUrl = String(body.video_url || body.video?.url || '').trim();
+  if (!prompt) return json({ error: 'missing-prompt' }, { status: 400 });
+  if (prompt.length > 4000) return json({ error: 'prompt-too-long', max: 4000 }, { status: 400 });
+  let videoValido = /^data:video\/(?:mp4|webm);base64,[A-Za-z0-9+/=]+$/i.test(videoUrl);
+  if (!videoValido) {
+    try {
+      const source = new URL(videoUrl);
+      videoValido = source.protocol === 'https:' &&
+        (source.hostname === 'api.admira.store' || source.hostname === 'assets.admira.store');
+    } catch { videoValido = false; }
+  }
+  if (!videoValido) return json({ error: 'bad-video-url', expected: 'https URL or video data URI' }, { status: 400 });
+
+  const r = await fetch('https://api.x.ai/v1/videos/edits', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'grok-imagine-video',
+      prompt,
+      video: { url: videoUrl },
+    }),
   });
   const data = await r.json().catch(() => ({}));
   return json(data, { status: r.status });
@@ -6944,6 +6983,8 @@ export default {
         res = await imageProxyHandler(req);
       } else if (path === '/xai/video' && req.method === 'POST') {
         res = await xaiVideoStartHandler(req, env);
+      } else if (path === '/xai/video/edit' && req.method === 'POST') {
+        res = await xaiVideoEditHandler(req, env);
       } else if (path.startsWith('/xai/video/') && req.method === 'GET') {
         const id = path.slice('/xai/video/'.length);
         res = await xaiVideoPollHandler(req, env, id);
