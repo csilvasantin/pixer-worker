@@ -118,6 +118,28 @@ test('GraphQL 404 no envía individuos y sólo resume al umbral 20', async () =>
   }
 });
 
+test('POST /agora/presence 503 no envía una alerta inmediata a Telegram', async () => {
+  const originalFetch = globalThis.fetch;
+  const telegram = telegramFetchSpy();
+  globalThis.fetch = telegram.fetch;
+  try {
+    const response = await runRequest(new Request('https://worker.test/agora/presence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'agora/1.0' },
+      body: JSON.stringify({ key: 'test-key', identity: 'Codex·gmail', host: 'test-host' }),
+    }), {
+      AGORA_SYNC_KEY: 'test-key',
+      KV_WRITES_OFF: '1',
+      TELEGRAM_BOT_TOKEN: 'fake-token',
+      TELEGRAM_CHAT_ID: 'fake-chat',
+    });
+    assert.equal(response.status, 503);
+    assert.equal(telegram.calls.length, 0, 'el latido fallido de Agora permanece fuera de Telegram');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('bad-key 403 agrupa 3/3; 404 negocio y 5xx en ruta skip siguen inmediatos', async () => {
   const originalFetch = globalThis.fetch;
   const telegram = telegramFetchSpy();

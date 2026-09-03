@@ -52,7 +52,10 @@ test('sólo el 403 bad-key exacto se agrega', () => {
   assert.equal(classifyHttpNotification({ path: '/grid/book', method: 'POST', status: 403, errorCode: 'forbidden' }).action, 'immediate');
 });
 
-test('todo 5xx es inmediato incluso en ruta skip', () => {
+test('housekeeping de Agora silencia 503 y éxito sin romper otros 5xx', () => {
+  assert.equal(classifyHttpNotification({ path: '/agora/presence', method: 'POST', status: 503, skip: true }).action, 'skip');
+  assert.equal(classifyHttpNotification({ path: '/agora/presence', method: 'POST', status: 200, skip: true }).action, 'skip');
+  assert.equal(classifyHttpNotification({ path: '/orders/42', method: 'POST', status: 503 }).action, 'immediate');
   assert.equal(classifyHttpNotification({ path: '/healthz', method: 'GET', status: 503, skip: true }).action, 'immediate');
 });
 

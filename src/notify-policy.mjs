@@ -36,6 +36,13 @@ export function classifyProbe404Path(path) {
 export function classifyHttpNotification({ path, method, status, errorCode, skip = false }) {
   const verb = String(method || 'GET').toUpperCase();
   const code = Number(status) || 0;
+  const route = normalizedPath(path);
+  // Agora es housekeeping de alta frecuencia: si falla el almacenamiento, los
+  // clientes siguen enviando presencia y cada 5xx puede convertirse en una
+  // tormenta de Telegram. El resto de rutas conserva la alerta inmediata 5xx.
+  if (skip && (route === '/agora' || route.startsWith('/agora/'))) {
+    return { action: 'skip', kind: 'routine' };
+  }
   if (code >= 500) return { action: 'immediate', kind: 'server_error' };
   if (verb === 'POST' && code === 404 && classifyProbe404Path(path)) {
     return { action: 'aggregate', kind: 'probe_404' };
