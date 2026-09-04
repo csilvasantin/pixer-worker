@@ -66,6 +66,9 @@ function corsHeaders(req) {
   };
 }
 
+// Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
+const WORKER_VERSION = 'v.04.09.2026.r1.21:25';
+
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
     ...init,
@@ -5005,6 +5008,47 @@ async function stockReassetHandler(req, env, ctx) {
   return json({ ok: true, id, mime, size: bytes.length });
 }
 
+// POST /stock/poster { secret, id, base64, mime? }
+// Guarda el PÓSTER de un asset (un fotograma real del vídeo, o la imagen reducida)
+// en stock/{id}/poster.jpg y lo deja como `thumbnail` del meta. Lo genera el Mac
+// Mini con ffmpeg (stock-posters.sh, launchd cada 10 min): un Worker no puede
+// decodificar vídeo. Motivo (Carlos, 4-sep-2026, FLT pixeria stock): la rejilla
+// de pixeria.com/stock pintaba cada vídeo con <video preload=metadata> y sin
+// póster, o sea 1-3 MB por tarjeta —51 MB en la primera página— solo para
+// enseñar diez fotogramas. Con póster cada tarjeta son ~30 KB.
+// Auth: STOCK_POSTER_KEY (clave propia del generador) o NOTIFY_KEY.
+async function stockPosterHandler(req, env, ctx) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const okKey = (env.STOCK_POSTER_KEY && b.secret === env.STOCK_POSTER_KEY) || (env.NOTIFY_KEY && b.secret === env.NOTIFY_KEY);
+  if (!okKey) return json({ error: 'unauthorized' }, { status: 401 });
+  const id = String(b.id || '');
+  if (!id || !/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  if (!b.base64) return json({ error: 'missing-base64' }, { status: 400 });
+  const mime = (b.mime === 'image/webp') ? 'image/webp' : 'image/jpeg';
+  const ext = mime === 'image/webp' ? 'webp' : 'jpg';
+  let bytes; try { bytes = b64ToBytes(b.base64); } catch { return json({ error: 'bad-base64' }, { status: 400 }); }
+  if (bytes.length < 200) return json({ error: 'too-small' }, { status: 400 });
+  if (bytes.length > 400 * 1024) return json({ error: 'too-big' }, { status: 413 }); // un póster son decenas de KB, no cientos
+  const metaObj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+  if (!metaObj) return json({ error: 'not-found' }, { status: 404 });
+  let meta; try { meta = await metaObj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
+  const posterKey = `stock/${id}/poster.${ext}`;
+  await env.STOCK_BUCKET.put(posterKey, bytes, {
+    httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
+    customMetadata: { id, poster: '1' },
+  });
+  // ?v=tamaño: si se regenera cambia la URL y el navegador no sirve el viejo.
+  meta.thumbnail = `${STOCK_PUBLIC_R2}/${posterKey}?v=${bytes.length}`;
+  meta.posterAt = new Date().toISOString();
+  if (b.at != null && Number.isFinite(+b.at)) meta.posterFrameAt = +b.at;
+  await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+  });
+  if (ctx && ctx.waitUntil) ctx.waitUntil(rebuildStockIndex(env)); else await rebuildStockIndex(env);
+  return json({ ok: true, id, thumbnail: meta.thumbnail, size: bytes.length });
+}
+
 // ─── Índice estático de Stock en R2 (anti-bloqueo workers.dev) ─────
 // Los ISP españoles bloquean el rango de IPs de *.workers.dev y *.pages.dev
 // (188.114.96.0/22, bloqueos LaLiga), pero NO el de r2.dev. La galería
@@ -6827,7 +6871,7 @@ export default {
     let res;
     try {
       if (path === '/healthz') {
-        res = json({ ok: true, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV, notificationAggregatorAvailable: !!env.SIGNAGE_KV });
+        res = json({ ok: true, version: WORKER_VERSION, hasPosterKey: !!env.STOCK_POSTER_KEY, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV, notificationAggregatorAvailable: !!env.SIGNAGE_KV });
       } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
         res = grokLatestHandler();
       } else if (path === '/grok/agent-ack' && req.method === 'POST') {
@@ -7128,6 +7172,8 @@ export default {
         res = await stockRecategorizeHandler(req, env);
       } else if (path === '/stock/reasset' && req.method === 'POST') {
         res = await stockReassetHandler(req, env, ctx);
+      } else if (path === '/stock/poster' && req.method === 'POST') {
+        res = await stockPosterHandler(req, env, ctx);
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
