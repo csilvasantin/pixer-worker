@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import worker, { shouldFlushNotificationAggregates } from '../src/index.js';
+import worker, {
+  AGORA_AWAKE_MS,
+  AGORA_PRESENCE_REFRESH_MS,
+  agoraPresenceUpdate,
+  shouldFlushNotificationAggregates,
+} from '../src/index.js';
 import {
   AGGREGATE_POLICY,
   recordNotificationAggregate,
@@ -45,6 +50,21 @@ async function runRequest(request, env) {
   const response = await worker.fetch(request, env, ctx);
   await ctx.drain();
   return response;
+}
+
+function agoraPresenceRequest(overrides = {}) {
+  return new Request('https://worker.test/agora/presence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'agora/1.0' },
+    body: JSON.stringify({
+      key: 'test-key', identity: 'Codex·gmail', host: 'test-host',
+      persona: 'OraculoMacMini', tokens: 100, reqs: 2, ...overrides,
+    }),
+  });
+}
+
+function presenceWriteCount(kv) {
+  return kv.ops.filter(operation => operation.op === 'put' && operation.key === 'agora:presence').length;
 }
 
 test('solo el cron */2 consolida alertas; el solape */10 no duplica el resumen', () => {
@@ -138,6 +158,77 @@ test('POST /agora/presence 503 no envía una alerta inmediata a Telegram', async
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('presencia idéntica se deduplica pero un cambio real escribe inmediatamente', async () => {
+  const kv = new MemoryKv();
+  const env = { SIGNAGE_KV: kv, AGORA_SYNC_KEY: 'test-key' };
+
+  const first = await runRequest(agoraPresenceRequest(), env);
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).deduplicated, false);
+  assert.equal(presenceWriteCount(kv), 1);
+
+  const repeated = await runRequest(agoraPresenceRequest(), env);
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).deduplicated, true);
+  assert.equal(presenceWriteCount(kv), 1, 'un latido idéntico dentro del TTL no reescribe presencia');
+
+  const changed = await runRequest(agoraPresenceRequest({ tokens: 101 }), env);
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).deduplicated, false);
+  assert.equal(presenceWriteCount(kv), 2, 'un cambio de estado persiste sin esperar al refresco');
+});
+
+test('cada campo observable de presencia invalida la deduplicación', () => {
+  const now = Date.now();
+  const current = {
+    ts: now - 1_000,
+    host: 'test-host', persona: 'OraculoMacMini', tokens: 100, reqs: 2,
+  };
+  for (const change of [
+    { host: 'other-host' },
+    { persona: 'SubOraculoMacMini' },
+    { tokens: 101 },
+    { reqs: 3 },
+  ]) {
+    assert.equal(agoraPresenceUpdate(current, { ...current, ...change }, now).shouldWrite, true);
+  }
+});
+
+test('el vencimiento refresca ts antes del umbral awake de cinco minutos', async () => {
+  assert.equal(AGORA_AWAKE_MS, 5 * 60 * 1000);
+  assert.ok(AGORA_PRESENCE_REFRESH_MS < AGORA_AWAKE_MS);
+  const now = Date.now();
+  const previous = {
+    ts: now - AGORA_PRESENCE_REFRESH_MS - 1,
+    host: 'test-host', persona: 'OraculoMacMini', tokens: 100, reqs: 2,
+  };
+  assert.equal(agoraPresenceUpdate(previous, previous, now).shouldWrite, true);
+
+  const kv = new MemoryKv();
+  kv.data.set('agora:presence', {
+    value: JSON.stringify({ 'Codex·gmail': previous }),
+    expiresAt: 0,
+  });
+  const response = await runRequest(agoraPresenceRequest(), {
+    SIGNAGE_KV: kv,
+    AGORA_SYNC_KEY: 'test-key',
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).deduplicated, false);
+  assert.equal(presenceWriteCount(kv), 1);
+  const stored = JSON.parse(await kv.get('agora:presence'))['Codex·gmail'];
+  assert.ok(stored.ts > previous.ts, 'el refresco renueva la marca temporal persistida');
+});
+
+test('una escritura de presencia necesaria conserva el 503 si KV está bloqueado', async () => {
+  const response = await runRequest(agoraPresenceRequest(), {
+    AGORA_SYNC_KEY: 'test-key',
+    KV_WRITES_OFF: '1',
+  });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'kv-write-blocked');
 });
 
 test('bad-key 403 agrupa 3/3; 404 negocio y 5xx en ruta skip siguen inmediatos', async () => {

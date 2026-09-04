@@ -5398,6 +5398,11 @@ const AGORA_TOKEN_IDENTITIES = {
   CYPHER: 'OpenCode·grok',
 };
 const AGORA_AWAKE_MS = 5 * 60 * 1000; // visto < 5 min = despierto
+// No hace falta escribir cada latido idéntico. Un refresco a los 3 min conserva
+// dos minutos de margen antes de que el agente pase a dormido y reduce mucho el
+// gasto KV de los clientes que laten cada 60/120 s.
+const AGORA_PRESENCE_REFRESH_MS = 3 * 60 * 1000;
+const AGORA_PRESENCE_STATE_FIELDS = ['host', 'persona', 'tokens', 'reqs'];
 const AGORA_FEED_CAP = 200;           // últimos N items del feed compartido
 const AGORA_QUEUE_CAP = 100;          // tope por buzón/cola
 const AGORA_TASKLOG_CAP = 100;        // historial compacto para comandos del grupo
@@ -5990,7 +5995,27 @@ async function agoraCliCommandReply(env, command, actor) {
   return agoraCliHelpText();
 }
 
-// POST /agora/presence {key,identity,host,tokens?,reqs?}  ·  GET /agora/presence?key=
+function agoraPresenceRecord(body, ts) {
+  return {
+    ts,
+    host: body.host || '',
+    persona: body.persona || '',
+    tokens: body.tokens || 0,
+    reqs: body.reqs || 0,
+  };
+}
+
+function agoraPresenceUpdate(current, body, now) {
+  const next = agoraPresenceRecord(body, now);
+  const previousTs = Number(current && current.ts);
+  const fresh = Number.isFinite(previousTs) && previousTs <= now &&
+    now - previousTs < AGORA_PRESENCE_REFRESH_MS;
+  const unchanged = !!current && AGORA_PRESENCE_STATE_FIELDS.every(field =>
+    Object.is(current[field] || (field === 'host' || field === 'persona' ? '' : 0), next[field]));
+  return { shouldWrite: !unchanged || !fresh, next, unchanged, fresh };
+}
+
+// POST /agora/presence {key,identity,host,persona?,tokens?,reqs?} · GET ?key=
 async function agoraPresenceHandler(req, env, url) {
   const now = Date.now();
   if (req.method === 'POST') {
@@ -5998,15 +6023,17 @@ async function agoraPresenceHandler(req, env, url) {
     if (!agoraAuth(env, b.key)) return json({ error: 'unauthorized' }, { status: 401 });
     if (!b.identity) return json({ error: 'missing-identity' }, { status: 400 });
     const map = await agoraKvGet(env, 'agora:presence', {});
-    map[b.identity] = { ts: now, host: b.host || '', tokens: b.tokens || 0, reqs: b.reqs || 0 };
+    const update = agoraPresenceUpdate(map[b.identity], b, now);
+    if (!update.shouldWrite) return json({ ok: true, deduplicated: true });
+    map[b.identity] = update.next;
     if (!(await agoraKvPut(env, 'agora:presence', map, now))) return kvNoEntro();
-    return json({ ok: true });
+    return json({ ok: true, deduplicated: false });
   }
   if (!agoraAuth(env, url.searchParams.get('key'))) return json({ error: 'unauthorized' }, { status: 401 });
   const map = await agoraKvGet(env, 'agora:presence', {});
   const agents = Object.entries(map).map(([identity, p]) => ({
     identity, ts: p.ts || 0, awake: (now - (p.ts || 0)) < AGORA_AWAKE_MS,
-    host: p.host || '', tokens: p.tokens || 0, reqs: p.reqs || 0,
+    host: p.host || '', persona: p.persona || '', tokens: p.tokens || 0, reqs: p.reqs || 0,
   }));
   return json({ agents });
 }
@@ -7139,4 +7166,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
