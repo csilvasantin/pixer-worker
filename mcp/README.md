@@ -35,7 +35,7 @@ npm install
 ## Variables
 
 ```bash
-export ADMIRA_WORKER_URL="https://pixer-eleven.csilvasantin.workers.dev"
+export ADMIRA_WORKER_URL="https://api.admira.store"
 export AGORA_SYNC_KEY="<valor de la sync key>"
 ```
 
@@ -60,7 +60,7 @@ Ejemplo generico de cliente MCP:
         "/Users/csilvasantin/Documents/Admirito/github-csilvasantin/pixer-worker/mcp/src/server.js"
       ],
       "env": {
-        "ADMIRA_WORKER_URL": "https://pixer-eleven.csilvasantin.workers.dev",
+        "ADMIRA_WORKER_URL": "https://api.admira.store",
         "AGORA_SYNC_KEY": "<valor de la sync key>"
       }
     }

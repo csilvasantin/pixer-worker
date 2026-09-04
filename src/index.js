@@ -67,7 +67,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.04.09.2026.r1.21:25';
+const WORKER_VERSION = 'v.04.09.2026.r3.22:28';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -106,7 +106,8 @@ async function sendTelegramVia(token, chatId, text) {
 // El worker corre EN Cloudflare → admira-vault.workers.dev es alcanzable sin
 // el bloqueo ISP que sufren las máquinas españolas. Lee con la GRID_KEY (la
 // misma de Agora). Caché en memoria 5 min para no pegar a la bóveda en cada msg.
-const VAULT_BASE = 'https://admira-vault.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const VAULT_BASE = 'https://vault.yokup.com';
 const _vaultCache = Object.create(null);
 async function vaultGet(env, name) {
   const key = env.GRID_KEY || env.AGORA_SYNC_KEY;
@@ -631,7 +632,8 @@ async function segmentadoGenerateHandler(req, env, ctx) {
 // pixeria a diario), y la llamada worker→worker viaja por la red de Cloudflare,
 // no por el ISP. Reenvía método+cuerpo y devuelve la respuesta con ACAO:* para que
 // digitalavatar.ai / carlossilva.info / xpaceos.com puedan leerla.
-const DA_UPSTREAM = 'https://omnipublicity-api.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const DA_UPSTREAM = 'https://brain.digitalavatar.ai';
 async function daProxyHandler(req, env) {
   const u = new URL(req.url);
   const sub = u.pathname.slice('/da'.length) || '/';   // '/da/metahuman/ask' → '/metahuman/ask'
@@ -2381,7 +2383,8 @@ async function veoDownloadHandler(req, env, url) {
 const SIGNAGE_INDEX_KEY = 'signage/index.json';
 const SIGNAGE_ASSET_PREFIX = 'signage/asset/';
 const SIGNAGE_MAX_ITEMS = 50;
-const SIGNAGE_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const SIGNAGE_BASE = 'https://api.admira.store';
 
 async function signageReadIndex(env) {
   try {
@@ -4162,7 +4165,8 @@ const CAPSULE_TIKTOK_URL = 'https://www.admiranext.com/presentaciones/api/capsul
 // vive tras el perimetro humano y desde fuera devuelve la pagina de login.
 const CAPSULE_STATUS_URL = 'https://www.admiranext.com/presentaciones/api/capsule-tiktok?id=';
 const STOCK_TYPES = ['audio', 'music', 'locucion', 'image', 'video', 'link', 'furni', 'twin-npc', 'digital-twin', 'capsula', 'guion', 'interactive', 'animation'];
-const WORKER_PUBLIC_BASE = 'https://pixer-eleven.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const WORKER_PUBLIC_BASE = 'https://api.admira.store';
 
 const SITE_CAPSULE_COUNSELORS = new Set([
   'stevejobs', 'stevewozniak', 'timcook', 'warrenbuffett',
@@ -6698,7 +6702,8 @@ async function audienceRangeHandler(req, env, url) {
 // segmentación (omnipublicity-api) resueltos a URL vía el índice público del Stock.
 // El player pre-descarga ESA lista (Cache API) y reporta su estado a /screen/cache;
 // el CMS lo pinta. Reutiliza los helpers de /grid (gridGetBookings/gridScreen/…).
-const GRID_OMNIP_API = 'https://omnipublicity-api.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const GRID_OMNIP_API = 'https://brain.digitalavatar.ai';
 async function gridStockIndexMap(env) {
   try {
     const r = await fetch(GRID_R2_PUBLIC + '/stock/index.json', { cf: { cacheTtl: 60 } });

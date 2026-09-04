@@ -4,7 +4,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod/v4';
 
-const DEFAULT_WORKER_URL = 'https://pixer-eleven.csilvasantin.workers.dev';
+// dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
+const DEFAULT_WORKER_URL = 'https://api.admira.store';
 const AGENTS = {
   neo: 'Claude·admira',
   morfeo: 'Claude·gmail',
