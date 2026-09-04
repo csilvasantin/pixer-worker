@@ -15,7 +15,7 @@ Uso: stock-posters.py [--limit N] [--dry-run] [--id ID]
 """
 import base64, json, os, subprocess, sys, tempfile, time, urllib.request
 
-INDEX = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev/stock/index.json'
+INDEX = 'https://stock.admira.store/stock/index.json'
 API = 'https://api.admira.store/stock/poster'
 KEY_FILE = os.path.expanduser('~/.fleet/stock-poster.key')
 FAIL_FILE = os.path.expanduser('~/.fleet/stock-posters-failed.json')
@@ -100,8 +100,14 @@ def main():
                 log('✓', iid, it.get('type'), f'{r.get("size", 0)//1024} KB', f't={t}')
                 fails.pop(iid, None)
             except subprocess.CalledProcessError as e:
-                fails[iid] = fails.get(iid, 0) + 1
-                log('✖', iid, 'ffmpeg:', (e.stderr or b'').decode(errors='replace').strip().splitlines()[-1:] )
+                err = (e.stderr or b'').decode(errors='replace').strip().splitlines()[-1:] or ['']
+                # Un timeout o un corte de red no es culpa del asset: no consume intentos.
+                # (4-sep-2026: LaLiga bloqueó r2.dev a media pasada y 86 assets quedaron
+                # marcados como fallidos sin serlo.)
+                red = any(k in err[0] for k in ('timed out', 'Connection', 'Server returned 5', 'Input/output error', 'Network'))
+                if not red: fails[iid] = fails.get(iid, 0) + 1
+                log('✖' if not red else '⏳', iid, 'ffmpeg:', err[0][:120], '' if not red else '(red, se reintenta)')
+                if red: time.sleep(2)
             except Exception as e:
                 fails[iid] = fails.get(iid, 0) + 1
                 log('✖', iid, type(e).__name__, str(e)[:160])

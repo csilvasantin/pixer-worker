@@ -28,7 +28,7 @@ test('sin clave → 401; con STOCK_POSTER_KEY guarda el póster y actualiza meta
   const r = await worker.fetch(post({ id: 'abc-1', base64: jpeg, secret: 'poster-key', at: 1.2 }), env, ctx);
   const d = await r.json();
   assert.equal(r.status, 200, JSON.stringify(d));
-  assert.match(d.thumbnail, /^https:\/\/pub-[a-z0-9]+\.r2\.dev\/stock\/abc-1\/poster\.jpg\?v=603$/);
+  assert.match(d.thumbnail, /^https:\/\/stock\.admira\.store\/stock\/abc-1\/poster\.jpg\?v=603$/);
   const meta = JSON.parse(bucket.store.get('stock/abc-1/meta.json'));
   assert.equal(meta.thumbnail, d.thumbnail); assert.equal(meta.posterFrameAt, 1.2); assert.equal(meta.num, 7, 'el meta se conserva');
   const put = bucket.puts.find((p) => p.k === 'stock/abc-1/poster.jpg');

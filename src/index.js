@@ -830,7 +830,8 @@ async function emitRangeHandler(req, env, url) {
 //   grid:cfg:<screen>          config de pantalla (bandas, slots, pixerScreens, política)
 //   grid:book:<screen>:<date>  reservas del día [{id,bandId,slots,status,...}]
 //   grid:ctrl:<circuit>        política + lista negra del circuito
-const GRID_R2_PUBLIC = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev';
+// Dominio propio del bucket (4-sep-2026): LaLiga bloqueó también r2.dev a media tarde.
+const GRID_R2_PUBLIC = 'https://stock.admira.store';
 const GRID_DEFAULT_BANDS = [
   { id: 'manana',   label: 'Mañana',   from: '08:00', to: '12:00', capacity: 6 },
   { id: 'mediodia', label: 'Mediodía', from: '12:00', to: '16:00', capacity: 6 },
@@ -5062,7 +5063,12 @@ async function stockPosterHandler(req, env, ctx) {
 //   blobs   → {R2_PUB}/stock/{id}/asset.{ext}  (immutable, Range nativo)
 // El índice se regenera tras cada mutación (publish/delete/tags/recategorize)
 // y con un cron de respaldo cada 10 min por si alguna escritura se pierde.
-const STOCK_PUBLIC_R2 = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev';
+// El bucket pixer-stock sale por stock.admira.store (dominio propio, 4-sep-2026): el
+// 4-sep LaLiga bloqueó también el rango de r2.dev (104.18.x) a media tarde y con él los
+// vídeos, las imágenes y los pósters recién generados de pixeria.com/stock. Una zona
+// propia sale por otras IPs y, de regalo, comprime el índice (700 KB → 138 KB).
+const STOCK_PUBLIC_R2 = 'https://stock.admira.store';
+const STOCK_PUBLIC_R2_ANTIGUO = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev';
 
 async function rebuildStockIndex(env) {
   if (!env.STOCK_BUCKET) return;
@@ -5106,8 +5112,9 @@ async function rebuildStockIndex(env) {
   const items = metas.map(m => ({
     ...m,
     url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}?v=${m.size || 0}` : m.url,
-    // thumbnail se deja tal cual: son data-URIs o URLs externas; si alguno
-    // apuntase a workers.dev el <video> cae a preload de metadata sin póster.
+    // thumbnail se deja tal cual (data-URIs o URLs externas), salvo los pósters que
+    // se guardaron con la URL r2.dev antes del dominio propio: se reescriben al vuelo.
+    thumbnail: (typeof m.thumbnail === 'string' && m.thumbnail.startsWith(STOCK_PUBLIC_R2_ANTIGUO)) ? STOCK_PUBLIC_R2 + m.thumbnail.slice(STOCK_PUBLIC_R2_ANTIGUO.length) : m.thumbnail,
   }));
 
   await env.STOCK_BUCKET.put('stock/index.json', JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
