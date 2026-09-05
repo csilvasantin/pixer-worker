@@ -357,7 +357,8 @@ test('el mando remoto silencia éxitos pero conserva errores en Telegram', async
       body: '{}',
     }), env);
     assert.equal(put.status, 200);
-    assert.equal(telegram.calls.length, 7, 'otros verbos no heredan el silencio reservado al mando');
+    // FLT-1779 (5-sep-2026): un éxito nunca es noticia, sea el verbo que sea; los errores siguen avisando.
+    assert.equal(telegram.calls.length, 6, 'un PUT que sale bien tampoco ensucia Telegram');
   } finally {
     globalThis.fetch = originalFetch;
   }

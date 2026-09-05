@@ -51,7 +51,14 @@ export function classifyHttpNotification({ path, method, status, errorCode, skip
     return { action: 'aggregate', kind: 'bad_key_403' };
   }
   if (skip || verb === 'GET') return { action: 'skip', kind: 'routine' };
-  return { action: 'immediate', kind: code >= 400 ? 'business_error' : 'business_event' };
+  // FLT-1779 (Carlos, 5-sep-2026): un POST que sale bien NO es noticia. El bot AdmiraXP
+  // mandaba «✅ POST /grid/upload · 200 · 165ms» cada vez que una pantalla subía su
+  // captura, y Carlos no sabía ni qué era. Lo que importa de un éxito lo cuenta su
+  // propio handler con detalle (publicación en Stock, lead, importación…); aquí solo
+  // quedan los errores. La recuperación de un incidente (RECUPERADO) sigue su camino
+  // aparte en recordNotificationIncident.
+  if (code < 400) return { action: 'skip', kind: 'routine_success' };
+  return { action: 'immediate', kind: 'business_error' };
 }
 
 export function notificationSourceClass(req) {

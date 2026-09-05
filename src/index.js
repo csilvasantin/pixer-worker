@@ -67,7 +67,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.04.09.2026.r3.22:28';
+const WORKER_VERSION = 'v.05.09.2026.r1.07:34';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -2957,6 +2957,14 @@ async function signageScreensHandler(req, env) {
 // en la TRANSICIÓN (online→muda y muda→recuperada), sin spam. Corre en el cron.
 const SIGNAGE_HEALTH_KEY = 'signage:health:state';
 const SIGNAGE_STALE_MS = 4 * 60 * 1000;   // muda si no reporta hace > 4 min
+// FLT-1779 (Carlos, 5-sep-2026): xtore-inicial y macbookairrosa oscilaban «MUDAS / de vuelta»
+// cada pocos minutos y el bot AdmiraXP era puro ruido. Reglas nuevas:
+//  · una pantalla se da por MUDA solo tras dos comprobaciones seguidas sin señal (≥ 6 min),
+//    y por RECUPERADA solo tras dos seguidas con señal: un latido tardío no dispara nada;
+//  · si una pantalla lleva ≥ 3 vaivenes en la última hora es INTERMITENTE: se avisa una vez
+//    y se calla hasta que pase una hora estable, con un resumen de cuántas veces cayó.
+const SIGNAGE_FLAP_WINDOW_MS = 60 * 60 * 1000;
+const SIGNAGE_FLAP_MAX = 3;
 async function signageHealthMonitor(env) {
   if (!env.SIGNAGE_KV) return;
   let index = [];
@@ -2976,23 +2984,40 @@ async function signageHealthMonitor(env) {
   }
   let prev = {};
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(SIGNAGE_HEALTH_KEY)) || {}; } catch {}
-  const down = [], up = [];
+  const down = [], up = [], intermitentes = [];
+  const save = {};
   for (const s of Object.keys(cur)) {
-    const was = prev[s] && prev[s].online;
+    const p = prev[s] || {};
     const is = cur[s].online;
-    if (was === true && !is) down.push(cur[s]);
-    else if (was === false && is) up.push(cur[s]);
-    // primera aparición (sin estado previo): no alerta → evita ruido de arranque
+    // Estado ANUNCIADO (lo que Carlos cree) y racha de lecturas iguales.
+    const announced = typeof p.online === 'boolean' ? p.online : null;
+    const streak = (p.last === is) ? (Number(p.streak) || 1) + 1 : 1;
+    const flips = (Array.isArray(p.flips) ? p.flips : []).filter(t => now - t < SIGNAGE_FLAP_WINDOW_MS);
+    let next = { online: announced === null ? is : announced, last: is, streak, flips, muted_until: p.muted_until || 0 };
+    // primera aparición (sin estado previo): se registra, no se alerta → evita ruido de arranque
+    if (announced !== null && is !== announced && streak >= 2) {
+      flips.push(now);
+      next.online = is; next.flips = flips;
+      const muted = now < (p.muted_until || 0);
+      if (!muted && flips.length >= SIGNAGE_FLAP_MAX) {
+        intermitentes.push({ ...cur[s], caidas: flips.length });
+        next.muted_until = now + SIGNAGE_FLAP_WINDOW_MS;
+      } else if (!muted) {
+        (is ? up : down).push(cur[s]);
+      }
+    }
+    save[s] = next;
   }
   const tag = c => `• ${c.name}${c.loc ? ` (${c.loc})` : ''}${c.machine ? ` · ${c.machine}` : ''}`;
   if (down.length) {
-    await sendTelegram(env, `🩺⚠️ Pantalla(s) de signage MUDAS (dejaron de emitir hace >4 min):\n${down.map(tag).join('\n')}\n\n¿Tótem iOS en segundo plano o kiosko caído? Panel: https://www.admira.live/control`);
+    await sendTelegram(env, `🩺⚠️ Pantalla(s) de signage MUDAS (sin señal en dos comprobaciones seguidas, > 6 min):\n${down.map(tag).join('\n')}\n\n¿Tótem iOS en segundo plano o kiosko caído? Panel: https://www.admira.live/control`);
   }
   if (up.length) {
     await sendTelegram(env, `🩺✅ Pantalla(s) de signage de vuelta emitiendo:\n${up.map(tag).join('\n')}`);
   }
-  const save = {};
-  for (const s of Object.keys(cur)) save[s] = { online: cur[s].online };
+  if (intermitentes.length) {
+    await sendTelegram(env, `🩺🔁 Pantalla(s) INTERMITENTES (≥ ${SIGNAGE_FLAP_MAX} vaivenes en una hora; me callo sobre ellas hasta que pase una hora estable):\n${intermitentes.map(c => `${tag(c)} · ${c.caidas} vaivenes`).join('\n')}\n\nSuele ser un tótem que reporta cada ~5 min o una red que va y viene. Panel: https://www.admira.live/control`);
+  }
   try { await env.SIGNAGE_KV.put(SIGNAGE_HEALTH_KEY, JSON.stringify(save), { expirationTtl: 60 * 60 * 24 * 7 }); } catch {}
 }
 
@@ -3639,6 +3664,30 @@ async function handleTelegramAttachment(env, ctx, req, chatId, msg, media) {
   }
 }
 
+// Texto de /help del bot AdmiraXP (@AdmiraXPBot). Se mantiene aquí, junto al webhook, y en
+// www.admira.live/telegram (tabla de grupos y bots): si cambia uno, cambia el otro.
+function telegramHelpText(env) {
+  return [
+    '🤖 <b>AdmiraXP</b> · bot operativo de Pixeria y del signage (worker pixer-eleven · api.admira.store)',
+    '',
+    '<b>Qué publica aquí</b>',
+    '• 🩺 Salud de las pantallas: MUDA tras dos comprobaciones sin señal (> 6 min), de vuelta, e INTERMITENTE (≥ 3 vaivenes/hora: aviso único y silencio una hora).',
+    '• ▶️ STOCK PLAY: cada reproducción desde el Stock, con importaciones y reproducciones del día.',
+    '• ✅ Publicaciones en Stock, leads del formulario web e importaciones desde Telegram.',
+    '• ⚠️/🚨 Errores 4xx/5xx de la API (agrupados: primer fallo, recordatorio, RECUPERADO). Los éxitos NO se notifican.',
+    '',
+    '<b>Quién escribe</b>: el worker, solo. <b>Quién lee</b>: Carlos (chat privado). Nadie más recibe estos avisos.',
+    '',
+    '<b>Qué puedes escribirle</b>',
+    '• Pega una URL (YouTube, TikTok, LinkedIn, imagen…) o manda una foto/vídeo → lo importa al Stock de pixeria.com.',
+    '• /avisosaqui → los avisos de publicación en Stock llegan a este chat · /avisosdonde → dónde van ahora.',
+    '• /help → este mensaje.',
+    '',
+    'Para hablar con el equipo (consejeros y agentes) el sitio es el grupo <b>AgoraMatrix</b>: escribe /ayuda allí.',
+    'Referencia de todos los grupos y bots: https://www.admira.live/telegram',
+  ].join('\n');
+}
+
 async function telegramWebhookHandler(req, env, ctx) {
   // Verificación del secret de Telegram (cabecera fijada en setWebhook)
   const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
@@ -3665,6 +3714,12 @@ async function telegramWebhookHandler(req, env, ctx) {
   }
   const textoMando = String((msg.text || msg.caption || '')).trim();
   const deDuenno = !env.TELEGRAM_CHAT_ID || String((msg.from && msg.from.id) || '') === String(env.TELEGRAM_CHAT_ID);
+  // /help · /ayuda · /start (FLT-1779, Carlos, 5-sep-2026): que cada bot diga qué hace y quién
+  // puede leer y escribir. Este chat le llegaba a Carlos lleno de avisos que no sabía qué eran.
+  if (/^\/(help|ayuda|start)(?:@[A-Za-z0-9_]+)?\s*$/i.test(textoMando)) {
+    await tgSend(env, chatId, telegramHelpText(env));
+    return json({ ok: true });
+  }
   if (deDuenno && /^\/avisos(aqui|donde)\b/i.test(textoMando)) {
     const titulo = (msg.chat && (msg.chat.title || msg.chat.username || msg.chat.first_name)) || String(chatId);
     if (/^\/avisosaqui\b/i.test(textoMando)) {
@@ -7224,4 +7279,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
