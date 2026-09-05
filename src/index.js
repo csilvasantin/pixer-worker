@@ -67,7 +67,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.05.09.2026.r1.07:34';
+const WORKER_VERSION = 'v.05.09.2026.r2.07:43';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -2543,9 +2543,26 @@ async function signagePushHandler(req, env, ctx) {
               `· target <code>${escHtml(targetLabel)}</code>${interrupt ? ' · INTERRUPT' : ''}\n` +
               `· source <b>${escHtml(sourceLabel)}</b>${meta.page ? ` · ${escHtml(meta.page)}` : ''}\n` +
               `· page <code>${escHtml(meta.page_url || 'direct')}</code>${srcLabel}`;
-  notify(ctx, env, msg);
+  if (signagePushMerecetAviso({ interrupt, assetLabel, sourceLabel, pageUrl: meta.page_url, src })) notify(ctx, env, msg);
 
   return json({ ok: true, id, url: `${SIGNAGE_BASE}/signage/asset/${id}` });
+}
+
+// FLT-1779 (Carlos, 5-sep-2026): el bot AdmiraXP recibía un «SIGNAGE PUSH» por cada asset que
+// el escaparate de xpaceos.com ponía en pantalla, y hasta por los «_idle_» de un player en
+// 127.0.0.1. Eso no es una noticia, es el player funcionando. Se avisa solo de lo que hizo
+// una persona: un envío con INTERRUPT (prioridad 0) o uno desde una superficie de mando con
+// origen conocido. Lo automático (idle, localhost, blob del propio player, source unknown) calla.
+function signagePushMerecetAviso({ interrupt, assetLabel, sourceLabel, pageUrl, src }) {
+  const label = String(assetLabel || '').toLowerCase();
+  const page = String(pageUrl || '').toLowerCase();
+  const source = String(sourceLabel || '').toLowerCase();
+  if (/(^|[^a-z])_?idle_?([^a-z]|$)/.test(label)) return false;
+  if (/^(https?:\/\/)?(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/|$)/.test(page) || page === 'about:blank') return false;
+  if (interrupt) return true;
+  if (!source || source === 'unknown') return false;
+  if (String(src || '').startsWith('blob:')) return false;
+  return /control|mando|pixeria|admira\.live|stock|manual|humano|carlos/.test(source);
 }
 
 async function signageFeedHandler(req, env, url) {
@@ -3673,6 +3690,7 @@ function telegramHelpText(env) {
     '<b>Qué publica aquí</b>',
     '• 🩺 Salud de las pantallas: MUDA tras dos comprobaciones sin señal (> 6 min), de vuelta, e INTERMITENTE (≥ 3 vaivenes/hora: aviso único y silencio una hora).',
     '• ▶️ STOCK PLAY: cada reproducción desde el Stock, con importaciones y reproducciones del día.',
+    '• 📺 SIGNAGE PUSH solo si lo mandó una persona (mando/control) o lleva INTERRUPT; lo automático del player (idle, escaparate, localhost) no avisa.',
     '• ✅ Publicaciones en Stock, leads del formulario web e importaciones desde Telegram.',
     '• ⚠️/🚨 Errores 4xx/5xx de la API (agrupados: primer fallo, recordatorio, RECUPERADO). Los éxitos NO se notifican.',
     '',
@@ -7279,4 +7297,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
