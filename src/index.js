@@ -67,7 +67,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.05.09.2026.r2.07:43';
+const WORKER_VERSION = 'v.07.09.2026.r1.22:20';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -3068,8 +3068,24 @@ async function signageClearHandler(req, env) {
 // hace GET ?screen= y reproduce lo mismo. Un único valor por pantalla.
 // El emisor postea en cada cambio + keepalive; el worker deduplica para no
 // reescribir KV salvo cambio real o refresco antes de caducar (ver POST).
-const SIGNAGE_NOW_TTL = 180;        // 3 min sin escritura → el puntero caduca
-const NOW_REFRESH_MS = 90 * 1000;   // si el item no cambió, reescribe como mucho cada 90s
+// 07-sep-2026: con solo 4 pantallas el pool general (22k) se agotó a media tarde
+// y /signage/now y /screen/cache devolvían throttled:'budget' → el CMS enseñaba
+// «0 de 40 · pendiente» en todas. Causa: cada pantalla reescribía `now:` cada 90 s
+// (la telemetría trae storage.usage/network, que cambian a cada latido y rompían
+// la firma) y `screen:cache:` cada 60 s = ~5.800 escrituras físicas/día/pantalla.
+// Ahora: TTL 5 min con refresco a los 4, firma de dispositivo SIN campos volátiles,
+// inventario de caché refrescado a los 7 min (TTL 10). La reserva crítica sigue
+// siendo SOLO de presencia (doctrina 14-ago): now/cache no la evaden.
+const SIGNAGE_NOW_TTL = 300;        // 5 min sin escritura → el puntero caduca
+const NOW_REFRESH_MS = 240 * 1000;  // si el item no cambió, reescribe como mucho cada 4 min
+// Campos de telemetría que cambian a cada latido y NO deben invalidar la firma.
+function deviceStableSig(device) {
+  if (!device || typeof device !== 'object') return 'null';
+  const stable = {};
+  for (const k of Object.keys(device)) { if (k !== 'storage' && k !== 'network') stable[k] = device[k]; }
+  return JSON.stringify(stable);
+}
+
 
 // Firma de IDENTIDAD del item: SOLO campos estables que definen "qué pieza es"
 // (id/type/url y, si existe, dur). Se construye por allowlist para EXCLUIR
@@ -3204,7 +3220,7 @@ async function signageNowPostHandler(req, env) {
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   const device = sanitizeDeviceTelemetry(body.device) || (prev && prev.device) || null;
-  const deviceSig = JSON.stringify(device || null);
+  const deviceSig = deviceStableSig(device);
   const standby = typeof body.standby === 'boolean' ? body.standby : !!(prev && prev.standby);
   // La presencia usa su reserva crítica y se actualiza incluso si el pool
   // general ya está agotado. Antes este paso vivía después del early-return de
@@ -6857,6 +6873,8 @@ export function screenCacheSignature(ready, total, downloading, contents = []) {
     c: contents.map(x => [x.id, x.bytes, x.width, x.height, Math.round(x.duration || 0), x.bitrate, x.codec]),
   });
 }
+const SCREEN_CACHE_TTL = 600;             // 10 min sin reporte → el inventario caduca
+const SCREEN_CACHE_REFRESH_MS = 420 * 1000; // sin cambios se reescribe como mucho cada 7 min (era 60 s)
 async function screenCacheHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   if (req.method === 'GET') {
@@ -6872,10 +6890,10 @@ async function screenCacheHandler(req, env, url) {
   const rec = { ready, readyCount: ready.length, total: Math.max(0, b.total | 0), downloading, bytes: Math.max(0, b.bytes | 0), contents, at: Date.now() };
   const now = Date.now(), sig = screenCacheSignature(ready, rec.total, downloading, contents);
   let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
-  if (prev && prev.__sig === sig && (now - (prev.at || 0)) < 60000) return json({ ok: true, screen, throttled: 'unchanged' });
+  if (prev && prev.__sig === sig && (now - (prev.at || 0)) < SCREEN_CACHE_REFRESH_MS) return json({ ok: true, screen, throttled: 'unchanged', at: prev.at });
   rec.__sig = sig;
   if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
-  try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: 600 }); } catch (e) {}
+  try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: SCREEN_CACHE_TTL }); } catch (e) {}
   return json({ ok: true, screen, readyCount: rec.readyCount, total: rec.total, contents: rec.contents.length });
 }
 

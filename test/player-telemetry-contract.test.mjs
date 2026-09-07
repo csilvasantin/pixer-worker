@@ -16,7 +16,12 @@ test('GET signage/now expone device y standby',()=>{
 });
 
 test('un cambio de dispositivo rompe el dedupe sin gastar escrituras en cada latido',()=>{
-  assert.match(source,/const deviceSig = JSON\.stringify\(device \|\| null\)/);
+  // La firma ignora storage/network: cambian a cada latido y reescribían `now:` cada 90 s.
+  assert.match(source,/const deviceSig = deviceStableSig\(device\)/);
+  assert.match(source,/if \(k !== 'storage' && k !== 'network'\) stable\[k\] = device\[k\];/);
+  assert.match(source,/const SIGNAGE_NOW_TTL = 300;/);
+  assert.match(source,/const NOW_REFRESH_MS = 240 \* 1000;/);
+  assert.match(source,/const SCREEN_CACHE_REFRESH_MS = 420 \* 1000;/);
   assert.match(source,/prev\.__deviceSig === deviceSig/);
   assert.match(source,/__deviceSig: deviceSig/);
 });
