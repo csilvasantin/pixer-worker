@@ -8,6 +8,15 @@ import {
   safeIncidentIdentity,
   safeSourceFingerprint,
 } from './notify-policy.mjs';
+import {
+  STOCK_HASH_KV_PREFIX,
+  STOCK_RECENT_KV_PREFIX,
+  dedupWindowMs,
+  isSha256Hex,
+  mergeReplacedMeta,
+  recentFingerprintInput,
+  stockDedupDecision,
+} from './stock-dedup.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
@@ -67,7 +76,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.07.09.2026.r1.22:20';
+const WORKER_VERSION = 'v.11.09.2026.r1.20:10';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -211,6 +220,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
+  '/stock/exists', // consulta previa de los clientes antes de subir (GET) — no notificar
   '/rtb/decide', // subasta programática: POST muy frecuente (una por impresión) — no spamear Telegram
   '/rtb/feed',   // lectura del feed de decisiones (GET) — polling del reproductor
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
@@ -4559,6 +4569,110 @@ async function stockIngestAuthorized(provided, expected) {
   return crypto.subtle.timingSafeEqual(providedHash, expectedHash);
 }
 
+// ─── DEDUP DEL STOCK ─────────────────────────────────────────────────────────
+// Las reglas viven en src/stock-dedup.mjs (puras, con tests). Aquí solo el I/O:
+// hash del binario, índice KV hash→id con repesca en stock/index.json, ventana
+// de «recientes» y la consulta pública /stock/exists.
+function sha256HexOf(buffer) {
+  return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function sha256HexText(text) {
+  return sha256HexOf(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text))));
+}
+async function stockMetaById(env, id) {
+  if (!id || !/^[A-Za-z0-9-]+$/.test(String(id)) || !env.STOCK_BUCKET) return null;
+  try {
+    const obj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+    return obj ? await obj.json() : null;
+  } catch { return null; }
+}
+// hash → id. KV primero (`stock:hash:<sha256>`); si no está, repesca en
+// stock/index.json (assets cuyo KV no se pudo escribir por el tope diario) y
+// deja la clave puesta. Una clave que apunte a un asset borrado se olvida.
+async function stockHashLookup(env, hash) {
+  if (!isSha256Hex(hash) || !env.STOCK_BUCKET) return null;
+  const kvKey = STOCK_HASH_KV_PREFIX + hash;
+  let id = null;
+  if (env.SIGNAGE_KV) { try { id = await env.SIGNAGE_KV.get(kvKey); } catch {} }
+  if (id) {
+    const meta = await stockMetaById(env, id);
+    if (meta && meta.contentHash === hash) return id;
+    try { await env.SIGNAGE_KV.delete(kvKey); } catch {}
+  }
+  try {
+    const idx = await env.STOCK_BUCKET.get('stock/index.json');
+    if (idx) {
+      const { items } = await idx.json();
+      const hit = (items || []).find(m => m && m.contentHash === hash && m.id);
+      if (hit) { await stockRememberHash(env, hash, hit.id); return hit.id; }
+    }
+  } catch {}
+  return null;
+}
+async function stockRememberHash(env, hash, id) {
+  if (!isSha256Hex(hash) || !id || !env.SIGNAGE_KV) return false;
+  if (!(await reserveKvWrite(env, Date.now()))) return false;
+  try { await env.SIGNAGE_KV.put(STOCK_HASH_KV_PREFIX + hash, String(id)); return true; } catch { return false; }
+}
+async function stockForgetHash(env, hash) {
+  if (!isSha256Hex(hash) || !env.SIGNAGE_KV) return;
+  try { await env.SIGNAGE_KV.delete(STOCK_HASH_KV_PREFIX + hash); } catch {}
+}
+// Regla blanda: `stock:recent:<sha256(title|motor|sourceUrl)>` → id, con TTL de
+// STOCK_DEDUP_WINDOW_MIN minutos (10 por defecto; 0 la apaga). KV no admite TTL
+// por debajo de 60 s.
+async function stockRecentKey(input) { return STOCK_RECENT_KV_PREFIX + await sha256HexText(input); }
+async function stockRecentLookup(env, input) {
+  if (!input || !env.SIGNAGE_KV || dedupWindowMs(env) <= 0) return null;
+  try { return (await env.SIGNAGE_KV.get(await stockRecentKey(input))) || null; } catch { return null; }
+}
+async function stockRememberRecent(env, input, id) {
+  const ttlMs = dedupWindowMs(env);
+  if (!input || !id || !env.SIGNAGE_KV || ttlMs <= 0) return;
+  if (!(await reserveKvWrite(env, Date.now()))) return;
+  try {
+    await env.SIGNAGE_KV.put(await stockRecentKey(input), String(id), { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) });
+  } catch {}
+}
+// Quién puede borrar: el carril interno de admiranext (misma cabecera que el
+// publish con externalId) o quien tenga NOTIFY_KEY (`?secret=`, cabecera
+// `X-Notify-Key` o `{secret}` en el body). Hasta el 11-sep-2026 DELETE no
+// pedía nada y cualquiera podía vaciar el Stock desde un curl.
+async function stockDeleteAuthorized(req, env, url) {
+  if (await stockIngestAuthorized(req.headers.get('X-AdmiraNeXT-Ingest'), env.ADMIRANEXT_INGEST_TOKEN)) return true;
+  let secret = url.searchParams.get('secret') || req.headers.get('X-Notify-Key') || '';
+  if (!secret) {
+    try { const b = await req.clone().json(); secret = (b && typeof b.secret === 'string') ? b.secret : ''; } catch {}
+  }
+  return !!(secret && env.NOTIFY_KEY && await stockIngestAuthorized(secret, env.NOTIFY_KEY));
+}
+// GET /stock/exists?hash=<sha256>|externalId=<id> → { exists, id, url }.
+// Para que los clientes pregunten ANTES de subir 200 MB que ya están.
+async function stockExistsHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  const origin = new URL(req.url).origin;
+  const externalId = (url.searchParams.get('externalId') || '').trim();
+  const hash = (url.searchParams.get('hash') || '').trim().toLowerCase();
+  if (!externalId && !hash) return json({ error: 'missing-hash-or-externalId' }, { status: 400 });
+  if (externalId && !/^[A-Za-z0-9:_-]{16,160}$/.test(externalId)) return json({ error: 'bad-external-id' }, { status: 400 });
+  if (hash && !isSha256Hex(hash)) return json({ error: 'bad-hash' }, { status: 400 });
+  const noStore = { headers: { 'Cache-Control': 'no-store' } };
+  const found = (by, id, meta) => json({
+    ok: true, exists: true, by, id, url: `${origin}/stock/asset/${id}`,
+    contentHash: (meta && meta.contentHash) || null, createdAt: (meta && meta.createdAt) || null,
+  }, noStore);
+  if (externalId) {
+    const id = await stockExternalId(externalId);
+    const meta = await stockMetaById(env, id);
+    if (meta && meta.externalRef === id) return found('externalId', id, meta);
+  }
+  if (hash) {
+    const id = await stockHashLookup(env, hash);
+    if (id) return found('hash', id, await stockMetaById(env, id));
+  }
+  return json({ ok: true, exists: false }, noStore);
+}
+
 // ─── SUBIDA POR PARTES (multipart de R2) ─────────────────────────────────────
 //
 // /stock/publish recibe el asset en base64 dentro de un JSON. Base64 infla un
@@ -4754,25 +4868,44 @@ async function stockPublishHandler(req, env, ctx) {
   const id = externalId ? await stockExternalId(externalId) : `${ts}-${Math.random().toString(36).slice(2, 8)}`;
   const metaKey = `stock/${id}/meta.json`;
   const publicUrl = `${new URL(req.url).origin}/stock/asset/${id}`;
-  if (externalId) {
-    const existing = await env.STOCK_BUCKET.get(metaKey);
-    if (existing) {
-      try {
-        const meta = await existing.json();
-        if (meta && meta.id === id && meta.externalRef === id) {
-          return json({ ok: true, reused: true, id, url: publicUrl, createdAt: meta.createdAt });
-        }
-      } catch {}
+  // ─── DEDUP, fase 1: antes de descargar nada (reglas en src/stock-dedup.mjs) ───
+  // · identidad: mismo externalId → mismo id; si ya existe se decide con el hash
+  //   (igual → reused, distinto → se sustituye el binario y se conserva el id).
+  // · `contentHash` en el body (sha256 hex) es una pista del cliente: si ya hay
+  //   un asset con ese hash, se responde reused sin bajar nada.
+  // · reciente: mismo title+motor+sourceUrl dentro de la ventana → reused.
+  const existingMeta = externalId ? await stockMetaById(env, id) : null;
+  const hashHint = isSha256Hex(body.contentHash) ? body.contentHash : null;
+  const recentInput = externalId ? null : recentFingerprintInput({ title, motor, sourceUrl });
+  const reusedResponse = (ownerId, reason, ownerMeta) => json({
+    ok: true, reused: true, reason, id: ownerId,
+    url: `${new URL(req.url).origin}/stock/asset/${ownerId}`,
+    createdAt: (ownerMeta && ownerMeta.createdAt) || null,
+    contentHash: (ownerMeta && ownerMeta.contentHash) || null,
+  });
+  if (hashHint) {
+    const owner = await stockHashLookup(env, hashHint);
+    const early = stockDedupDecision({ id, externalId, existingMeta, contentHash: hashHint, hashOwnerId: owner });
+    if (early.action === 'reuse') {
+      return reusedResponse(early.id, early.reason, early.id === id ? existingMeta : await stockMetaById(env, early.id));
+    }
+  }
+  if (recentInput) {
+    const recentId = await stockRecentLookup(env, recentInput);
+    if (recentId) {
+      const recentMeta = await stockMetaById(env, recentId);
+      if (recentMeta) return reusedResponse(recentId, 'duplicate_recent', recentMeta);
     }
   }
 
-  let bytes, finalMime, sourceResponse = null, sourceDeclaredSize = 0;
+  let bytes, finalMime, sourceResponse = null, sourceDeclaredSize = 0, contentHash = null;
   try {
     if (base64Efectivo) {
       // Efectivo, no el del body: una cápsula llega sin adjunto y su texto se convierte
       // arriba. Si aquí se leyera `base64` a secas, la cápsula se caería por el camino.
       bytes = b64ToBytes(base64Efectivo);
       finalMime = mimeEfectivo || 'application/octet-stream';
+      contentHash = sha256HexOf(await crypto.subtle.digest('SHA-256', bytes));
     } else if (r2Staged) {
       // Subida por partes ya cerrada: el fichero está en `uploads/`. Se engancha
       // su cuerpo al MISMO carril de streaming que usa sourceUrl, así que de
@@ -4833,6 +4966,22 @@ async function stockPublishHandler(req, env, ctx) {
     httpMetadata: { contentType: finalMime, cacheControl: 'public, max-age=31536000, immutable' },
     customMetadata: { motor, type, id },
   };
+
+  // ─── DEDUP, fase 2: con el hash real del binario ───
+  // En el carril base64 el hash se sabe ANTES del put (y se ahorra). En el de
+  // streaming se calcula mientras se escribe en R2, así que se sabe después: si
+  // resulta duplicado se borra lo recién escrito (`written`).
+  let decision = null;
+  const dedupSettle = async (written) => {
+    const hashOwnerId = contentHash ? await stockHashLookup(env, contentHash) : null;
+    decision = stockDedupDecision({ id, externalId, existingMeta, contentHash, hashOwnerId });
+    if (decision.action !== 'reuse') return null;
+    const keepsOwnFile = decision.id === id && existingMeta && existingMeta.assetKey === assetKey;
+    if (written && !keepsOwnFile) { try { await env.STOCK_BUCKET.delete(assetKey); } catch {} }
+    console.log(JSON.stringify({ message: 'stock publish dedup', id, reused: decision.id, reason: decision.reason, contentHash }));
+    return reusedResponse(decision.id, decision.reason, decision.id === id ? existingMeta : await stockMetaById(env, decision.id));
+  };
+
   if (sourceResponse) {
     // Un sourceUrl es una URL de fuera y sigue topado en 200 MB. Lo que subió
     // por partes ya pasó por nuestros cupos al entrar en `uploads/`, así que
@@ -4840,12 +4989,18 @@ async function stockPublishHandler(req, env, ctx) {
     // partes moriría en el último paso, que es el peor sitio para morir.
     const topeFlujo = r2Staged ? STOCK_STAGED_MAX : 200 * 1024 * 1024;
     let streamedBytes = 0;
+    // sha256 al vuelo: crypto.DigestStream es del runtime de Workers (no del
+    // navegador). Si no existiera (wrangler viejo, tests) se sigue sin hash.
+    const digest = (typeof crypto.DigestStream === 'function') ? new crypto.DigestStream('SHA-256') : null;
+    const digestWriter = digest ? digest.getWriter() : null;
     const bounded = new TransformStream({
       transform(chunk, controller) {
         streamedBytes += chunk.byteLength;
         if (streamedBytes > topeFlujo) throw new Error('stock-source-too-big');
         controller.enqueue(chunk);
+        if (digestWriter) return digestWriter.write(chunk);
       },
+      flush() { if (digestWriter) return digestWriter.close(); },
     });
     try {
       const boundedBody = sourceResponse.body.pipeThrough(bounded);
@@ -4858,8 +5013,10 @@ async function stockPublishHandler(req, env, ctx) {
       } else {
         await env.STOCK_BUCKET.put(assetKey, boundedBody, putOptions);
       }
+      if (digest) contentHash = sha256HexOf(await digest.digest);
     }
     catch (error) {
+      if (digestWriter) digestWriter.abort().catch(() => {});
       const detail = String(error && error.message || error).slice(0, 160);
       const tooBig = detail.includes('stock-source-too-big');
       console.error(JSON.stringify({ message: 'stock source stream failed', id, declared: sourceDeclaredSize, detail }));
@@ -4870,9 +5027,14 @@ async function stockPublishHandler(req, env, ctx) {
     // si no se borra el bucket se llena de duplicados de cada episodio. Va en
     // waitUntil para no retrasar la respuesta.
     if (r2Staged) ctx.waitUntil(env.STOCK_BUCKET.delete(r2Staged).catch(() => {}));
+    const dup = await dedupSettle(true);
+    if (dup) return dup;
   } else {
+    const dup = await dedupSettle(false);
+    if (dup) return dup;
     await env.STOCK_BUCKET.put(assetKey, bytes, putOptions);
   }
+  const replacing = !!(decision && decision.action === 'replace');
 
   // Clasificación automática con Gemini (sincronizada, ~1-2s): tags para la
   // biblioteca + audience/category para publicidad dirigida (/targetPublicity).
@@ -4904,7 +5066,7 @@ async function stockPublishHandler(req, env, ctx) {
   tags = Array.isArray(tags) ? tags : [];
   if (!tags.includes(quality)) tags.push(quality);
 
-  const meta = {
+  let meta = {
     id,
     type,
     motor: String(motor).slice(0, 80),
@@ -4935,11 +5097,29 @@ async function stockPublishHandler(req, env, ctx) {
     fp,
     ph,
     price,
+    // sha256 hex del binario completo: es la llave de la dedup por contenido.
+    contentHash,
     createdAt: new Date(ts).toISOString(),
   };
+  if (replacing) {
+    // Misma identidad, contenido nuevo: el máster nuevo ocupa el hueco. Se
+    // conservan num/valoraciones/consumos/alta y se retira el binario anterior
+    // si cambió de extensión (si no, el put de arriba ya lo pisó).
+    meta = mergeReplacedMeta(existingMeta, meta, ts);
+    if (existingMeta.assetKey && existingMeta.assetKey !== assetKey) {
+      ctx.waitUntil(env.STOCK_BUCKET.delete(existingMeta.assetKey).catch(() => {}));
+    }
+    if (existingMeta.contentHash && existingMeta.contentHash !== contentHash) await stockForgetHash(env, existingMeta.contentHash);
+  }
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+  // Índices de dedup. Se ESPERAN (no waitUntil): el doble clic llega en
+  // milisegundos y la segunda petición tiene que encontrar ya la marca.
+  await Promise.all([
+    stockRememberHash(env, contentHash, id),
+    stockRememberRecent(env, recentInput, id),
+  ]);
 
   // Regenera el índice estático sin retrasar la respuesta del publish
   ctx.waitUntil(rebuildAndSyncTaggedStock(env));
@@ -4952,7 +5132,7 @@ async function stockPublishHandler(req, env, ctx) {
   const tagsSnip = (meta.tags && meta.tags.length)
     ? `\n🏷 ${meta.tags.map(t => '<code>#' + escHtml(t) + '</code>').join(' ')}`
     : '';
-  const text = `📦 <b>STOCK PUBLISH</b> · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
+  const text = `📦 <b>STOCK PUBLISH</b>${replacing ? ' · sustituido' : ''} · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
                `· ${mbStr} MB · ${escHtml(meta.mime)}\n` +
                `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}${tagsSnip}` +
                footer;
@@ -5004,7 +5184,7 @@ async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt });
+  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt, contentHash, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -5351,10 +5531,13 @@ async function stockRatingHandler(req, env, ctx, id) {
 }
 
 // DELETE /stock/:id — borra los 2 objetos R2 (asset + meta) de un item.
-// Sin auth (admira.studio es admin-only por convención del dominio).
+// Con clave desde el 11-sep-2026 (ver stockDeleteAuthorized): cabecera
+// X-AdmiraNeXT-Ingest (carril admiranext) o NOTIFY_KEY por `?secret=`,
+// `X-Notify-Key` o `{secret}` en el body. Antes no pedía nada.
 async function stockDeleteHandler(req, env, ctx, id) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  if (!(await stockDeleteAuthorized(req, env, new URL(req.url)))) return json({ error: 'unauthorized' }, { status: 401 });
 
   const metaKey = `stock/${id}/meta.json`;
   const metaObj = await env.STOCK_BUCKET.get(metaKey);
@@ -5362,6 +5545,7 @@ async function stockDeleteHandler(req, env, ctx, id) {
 
   let meta = null;
   try { meta = await metaObj.json(); } catch {}
+  if (meta && meta.contentHash) ctx.waitUntil(stockForgetHash(env, meta.contentHash));
 
   const keysToDelete = [metaKey];
   if (meta && meta.assetKey) keysToDelete.push(meta.assetKey);
@@ -7235,6 +7419,8 @@ export default {
         else { await rebuildStockIndex(env); res = json({ ok: true, reindexed: true }); }
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/stock/exists' && req.method === 'GET') {
+        res = await stockExistsHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {
         res = await layoutPublishHandler(req, env, ctx);
       } else if (path === '/layout/list' && req.method === 'GET') {

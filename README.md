@@ -33,7 +33,35 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | POST | `/xai/image`            | Grok 2 Image (devuelve `{data:[{url}]}`) |
 | POST | `/xai/video`            | Grok Imagine Video — start (devuelve `{request_id}`) |
 | GET  | `/xai/video/{id}`       | Grok Imagine Video — poll status |
-| POST | `/stock/publish`        | Publica en Stock; `externalId` requiere el secreto interno y evita duplicados |
+| POST | `/stock/publish`        | Publica en Stock; `externalId` requiere el secreto interno y evita duplicados (ver «Dedup del Stock») |
+| GET  | `/stock/exists`         | `?hash=<sha256>` o `?externalId=<id>` → `{exists, id, url}`; pregunta ANTES de subir |
+| DELETE | `/stock/{id}`         | Borra asset+meta. Con clave: `X-AdmiraNeXT-Ingest` o `NOTIFY_KEY` (`?secret=`, `X-Notify-Key` o `{secret}`) |
+
+### Dedup del Stock (v.11.09.2026.r1)
+
+El 11-sep-2026 entró dos veces el mismo vídeo. Causa: sin `externalId` cada publish
+inventa un id (`${ts}-${random}`), así que un doble clic, un reintento o dos paquetes
+de admiranext con el mismo máster creaban dos assets; y con `externalId` solo se
+miraba la identidad, nunca el contenido. Reglas (decisión pura en `src/stock-dedup.mjs`):
+
+1. **Contenido** — sha256 del binario completo, guardado en `meta.contentHash`.
+   Índice KV `stock:hash:<sha256>` → id (repesca en `stock/index.json` si el KV no se
+   escribió). Mismo hash en otro asset → `{ok, reused:true, reason:'duplicate_content', id}`
+   y no se crea nada. En base64 se decide antes del put; en streaming (`sourceUrl`,
+   `r2Staged`) el hash se calcula al vuelo con `crypto.DigestStream` y, si es duplicado,
+   se borra lo recién escrito. Solo los assets publicados desde esta versión tienen hash.
+2. **Identidad** — mismo `externalId` → mismo id opaco. Contenido igual →
+   `reused` (`duplicate_external_id`); contenido distinto → se **sustituye el binario y
+   se conserva el id** (`{ok, replaced:true, reason:'external_id_new_content'}`),
+   manteniendo num, valoraciones, consumos, alta y cara. Para no descargar en vano,
+   manda `contentHash` en el body: si coincide con el que hay, responde `reused` sin bajar nada.
+3. **Reciente** — mismo `title`+`motor`+`sourceUrl` en los últimos
+   `STOCK_DEDUP_WINDOW_MIN` minutos (10; `0` apaga) → `reused` (`duplicate_recent`)
+   sin descargar. Solo sin `externalId`. KV `stock:recent:<sha256(tupla)>` con TTL.
+
+Cómo debe llamar un creador: `GET /stock/exists?hash=<sha256>` (o `externalId=`) →
+si `exists`, usa `id`/`url`; si no, `POST /stock/publish` incluyendo `contentHash`.
+Test: `node --test test/stock-dedup.test.mjs`.
 
 ### POST /tts
 ```json
