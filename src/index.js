@@ -4603,8 +4603,14 @@ async function stockHashLookup(env, hash) {
     const idx = await env.STOCK_BUCKET.get('stock/index.json');
     if (idx) {
       const { items } = await idx.json();
+      // El índice puede ir por detrás (se regenera en waitUntil tras cada
+      // borrado): un asset recién borrado aún figura. Se comprueba su meta
+      // antes de fiarse y de volver a apuntarlo en KV.
       const hit = (items || []).find(m => m && m.contentHash === hash && m.id);
-      if (hit) { await stockRememberHash(env, hash, hit.id); return hit.id; }
+      if (hit) {
+        const meta = await stockMetaById(env, hit.id);
+        if (meta && meta.contentHash === hash) { await stockRememberHash(env, hash, hit.id); return hit.id; }
+      }
     }
   } catch {}
   return null;
