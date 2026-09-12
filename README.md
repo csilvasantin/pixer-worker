@@ -38,7 +38,30 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | DELETE | `/stock/{id}`         | Borra asset+meta. Con clave: `X-AdmiraNeXT-Ingest` o `NOTIFY_KEY` (`?secret=`, `X-Notify-Key` o `{secret}`) |
 | GET  | `/stock/list`           | Listado; filtros `type`, `motor`, `catalogo=<id>`, `cliente=<slug>`, `tag=<tag>`, `q=<texto>` (ver «Catálogo») |
 | GET  | `/stock/catalogos`      | Catálogos agrupados desde el índice: `{ok, catalogos:[{id, cliente, nombre, desde, hasta, proyecto, count, ultimo, vigente, ids}]}` |
-| PATCH | `/stock/{id}/meta`     | `{catalogo?, tags_add?, tags_remove?}` — backfill/edición; misma clave que el DELETE |
+| PATCH | `/stock/{id}/meta`     | `{catalogo?, tags_add?, tags_remove?, oculto?, validacion?}` — backfill/edición; misma clave que el DELETE |
+| GET  | `/stock/poster/{id}`    | Póster representativo (`image/jpeg`, caché 1 día, CORS `*`); 404 si no lo tiene. Es `meta.poster` |
+| POST | `/stock/poster`         | `{id, poster:<data URL> \| base64+mime, at?, validacion?}` — clave `STOCK_POSTER_KEY`/`NOTIFY_KEY` en `secret`, `X-Notify-Key` o `?secret=` |
+
+### Póster y validación de vídeos (v.12.09.2026.r2 · Yokup #3199)
+
+El previo del «Langostino cocido» salía negro en admira.tv/contentcatalogue: el máster solo tiene
+negro el fotograma 0 (relleno `#020508` del canvas antes de `captureStream()`) y el webm de
+MediaRecorder no lleva Duration ni Cues, así que el `#t=0.1` del previo pintaba ese fotograma.
+Regla de Carlos: el previo nunca es un fotograma negro y nada se publica sin validar.
+
+- `POST /stock/publish` acepta **`poster`** (data URL JPEG/WebP ≤ 400 KB), `posterAt` y
+  **`validacion`** `{ok, negros, muestras, duracion, motivo, por}`. El póster va a
+  `stock/<id>/poster.jpg`; `meta.poster = https://api.admira.store/stock/poster/<id>` (estable) y
+  `meta.thumbnail` (R2 directo con `?v=`). Se valida antes de mover el asset (400/413 sin dejar restos).
+- `/stock/list`, `/stock/exists` y el índice exponen `poster`, `thumbnail`, `validacion`, `oculto`.
+- **`oculto:true`** (vía PATCH) saca la pieza de `/stock/list`, `stock/index.json` y `/stock/catalogos`
+  sin borrarla; `?ocultos=1` en `/stock/list` la enseña. Para un máster inválido: `PATCH {oculto:true,
+  validacion:{ok:false, motivo}}`.
+- Criterio (mismo en el creador, el catálogo y el backfill): negro = luma < 16 (o < 24 con varianza
+  < 25); inválido si > 70 % negros, < 10 s o sin pista; póster = luma 40..220 y máxima varianza
+  fuera de los 0,8 s de cada extremo (`src/stock-poster.mjs`).
+- Backfill con ffmpeg: `NOTIFY_KEY=… node tools/valida-videos-catalogo.mjs --catalogo <id> --subir`
+  (repo admira-next-web).
 
 ### Catálogo del Stock (v.12.09.2026.r1 · Yokup #3183)
 

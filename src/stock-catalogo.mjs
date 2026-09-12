@@ -15,6 +15,8 @@
 //   · `GET /stock/list?catalogo=|cliente=|tag=|q=` filtra; `GET /stock/catalogos`
 //     agrupa desde el índice; `PATCH /stock/:id/meta` edita/backfill.
 
+import { sanitizeValidacion } from './stock-poster.mjs';
+
 export const STOCK_TAGS_MAX = 10;
 export const STOCK_TAG_MAX_LEN = 30;
 export const CATALOGO_NOMBRE_MAX = 120;
@@ -197,6 +199,26 @@ export function applyMetaPatch(meta, patch) {
   const tags = applyCatalogoTags(base, catalogo, { quality: meta.quality || null, previous });
   const next = { ...meta, tags, catalogo };
   if (!catalogo) delete next.catalogo;
-  const changed = JSON.stringify(before) !== JSON.stringify(tags) || JSON.stringify(previous) !== JSON.stringify(catalogo);
+  // Yokup #3199: `oculto` (true/false) saca la pieza de listados, índice y
+  // catálogos sin borrarla; `validacion` guarda el veredicto {ok, negros,
+  // muestras, duracion, motivo, por} (null lo quita).
+  let extra = false;
+  if ('oculto' in patch) {
+    const oculto = patch.oculto === true;
+    if (!!meta.oculto !== oculto) extra = true;
+    if (oculto) next.oculto = true; else delete next.oculto;
+  }
+  if ('validacion' in patch) {
+    if (patch.validacion === null) {
+      if (meta.validacion) extra = true;
+      delete next.validacion;
+    } else {
+      const v = sanitizeValidacion(patch.validacion);
+      if (!v) return { meta, changed: false, error: 'bad-validacion' };
+      next.validacion = v;
+      extra = true;
+    }
+  }
+  const changed = extra || JSON.stringify(before) !== JSON.stringify(tags) || JSON.stringify(previous) !== JSON.stringify(catalogo);
   return { meta: next, changed, error: null };
 }

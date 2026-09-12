@@ -28,6 +28,13 @@ import {
   refreshVigente,
   sanitizeCatalogo,
 } from './stock-catalogo.mjs';
+import {
+  parsePoster,
+  posterKey,
+  posterKeyFromMeta,
+  posterUrl,
+  sanitizeValidacion,
+} from './stock-poster.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
@@ -89,7 +96,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.12.09.2026.r1.13:35';
+const WORKER_VERSION = 'v.12.09.2026.r2.15:10';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -260,6 +267,7 @@ const NOTIFY_SKIP_PREFIX = [
   '/signage/asset/',
   '/signage/ack/',
   '/stock/asset/',
+  '/stock/poster/', // GET del póster (imagen) — lectura, no notificar
   '/stock/track/', // notificado dentro del handler con stats agregados
   '/stock/',       // DELETE notifica dentro del handler
   '/veo/status/',
@@ -4680,6 +4688,10 @@ async function stockExistsHandler(req, env, url) {
   const found = (by, id, meta) => json({
     ok: true, exists: true, by, id, url: `${origin}/stock/asset/${id}`,
     contentHash: (meta && meta.contentHash) || null, createdAt: (meta && meta.createdAt) || null,
+    // Yokup #3199: el catálogo pinta el previo con el póster, nunca el frame 0.
+    poster: posterProyectado(meta, origin), thumbnail: (meta && meta.thumbnail) || null,
+    posterFrameAt: (meta && Number.isFinite(+meta.posterFrameAt)) ? +meta.posterFrameAt : null,
+    validacion: (meta && meta.validacion) || null, oculto: !!(meta && meta.oculto),
   }, noStore);
   if (externalId) {
     const id = await stockExternalId(externalId);
@@ -4812,6 +4824,14 @@ async function stockPublishHandler(req, env, ctx) {
   // Se guarda saneado en meta.catalogo; si viene pero no trae id utilizable → 400.
   const catalogo = body.catalogo == null ? null : sanitizeCatalogo(body.catalogo);
   if (body.catalogo != null && !catalogo) return json({ error: 'bad-catalogo', expected: { id: '[a-z0-9-]', cliente: '[a-z0-9-]', nombre: '<=120', desde: 'AAAA-MM-DD', hasta: 'AAAA-MM-DD', proyecto: '[a-z0-9-]', producto: '[a-z0-9-]' } }, { status: 400 });
+  // Póster representativo + resultado de la validación del máster (Yokup #3199).
+  // `poster` es una data URL JPEG/WebP (≤400 KB) elegida por el generador con el
+  // fotograma de más información; se guarda en stock/<id>/poster.jpg y se expone
+  // como meta.poster (GET /stock/poster/<id>) y meta.thumbnail. Se valida AQUÍ,
+  // antes de mover un solo byte del asset, para no dejar un binario sin meta.
+  const posterIn = (body.poster != null && body.poster !== '') ? parsePoster(body.poster) : null;
+  if (posterIn && posterIn.error) return json({ error: posterIn.error, ...(posterIn.max ? { max: posterIn.max } : {}) }, { status: posterIn.error === 'poster-too-big' ? 413 : 400 });
+  const validacionIn = sanitizeValidacion(body.validacion);
   // Calidad del asset (good/better/best, según el motor); default 'good'.
   const QUALITY_TIERS = ['good', 'better', 'best'];
   const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
@@ -5141,6 +5161,10 @@ async function stockPublishHandler(req, env, ctx) {
     }
     if (existingMeta.contentHash && existingMeta.contentHash !== contentHash) await stockForgetHash(env, existingMeta.contentHash);
   }
+  // El póster y la validación se aplican DESPUÉS del merge de sustitución: el
+  // máster nuevo trae su propio fotograma y el viejo no debe sobrevivirle.
+  if (posterIn) await guardarPosterStock(env, meta, posterIn, { at: body.posterAt });
+  if (validacionIn) meta.validacion = validacionIn;
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
@@ -5214,7 +5238,7 @@ async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt, contentHash, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt, contentHash, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -5226,6 +5250,9 @@ async function stockListHandler(req, env, url) {
   const clienteFilter = cleanTag(url.searchParams.get('cliente') || '');
   const tagFilter = cleanTag(url.searchParams.get('tag') || '');
   const qFilter = (url.searchParams.get('q') || '').trim();
+  // Yokup #3199: una pieza con `oculto:true` (máster inválido) no sale en ningún
+  // listado salvo que se pida ?ocultos=1 (backoffice / backfill).
+  const conOcultos = url.searchParams.get('ocultos') === '1';
   const hasFilter = !!(typeFilter || motorFilter || catalogoFilter || clienteFilter || tagFilter || qFilter);
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
 
@@ -5269,6 +5296,7 @@ async function stockListHandler(req, env, url) {
     if (tagFilter)      filtered = filtered.filter(m => itemHasTag(m, tagFilter));
     if (qFilter)        filtered = filtered.filter(m => itemMatchesQuery(m, qFilter));
   }
+  if (!conOcultos) filtered = filtered.filter(m => !m.oculto);
   // Se sigue ordenando por createdAt: si algún id antiguo no llevara el
   // timestamp delante, el orden final no depende de la forma de la clave.
   filtered.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
@@ -5283,6 +5311,7 @@ async function stockListHandler(req, env, url) {
     // transparente) cambia el tamaño → nueva URL → el navegador no sirve el viejo.
     url: m.assetKey ? `${origin}/stock/asset/${m.id}?v=${m.size || 0}` : m.url,
     thumbnail: m.thumbnail ? m.thumbnail.replace(WORKER_PUBLIC_BASE, origin) : m.thumbnail,
+    poster: posterProyectado(m, origin),
   }));
   // `total` sigue siendo el tamaño del Stock, no el de la página: sin filtros ya
   // no se leen todos los metas, así que se cuenta por claves. Con filtros es el
@@ -5330,37 +5359,88 @@ async function stockReassetHandler(req, env, ctx) {
 // de pixeria.com/stock pintaba cada vídeo con <video preload=metadata> y sin
 // póster, o sea 1-3 MB por tarjeta —51 MB en la primera página— solo para
 // enseñar diez fotogramas. Con póster cada tarjeta son ~30 KB.
-// Auth: STOCK_POSTER_KEY (clave propia del generador) o NOTIFY_KEY.
+// Auth: STOCK_POSTER_KEY (clave propia del generador) o NOTIFY_KEY, en el body
+// (`secret`), en la cabecera `X-Notify-Key` o en `?secret=` (Yokup #3199: así el
+// backfill con ffmpeg manda la clave sin meterla en el JSON).
+// Desde el 12-sep-2026 (Yokup #3199) acepta también `poster` como data URL
+// (además de `base64`+`mime`) y `validacion` {ok, negros, muestras, duracion,
+// motivo, por}, y deja `meta.poster` (URL estable por el worker) además del
+// `thumbnail` directo a R2.
 async function stockPosterHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const okKey = (env.STOCK_POSTER_KEY && b.secret === env.STOCK_POSTER_KEY) || (env.NOTIFY_KEY && b.secret === env.NOTIFY_KEY);
+  const secret = (typeof b.secret === 'string' && b.secret) || req.headers.get('X-Notify-Key') || new URL(req.url).searchParams.get('secret') || '';
+  const okKey = !!secret && ((env.STOCK_POSTER_KEY && secret === env.STOCK_POSTER_KEY) || (env.NOTIFY_KEY && secret === env.NOTIFY_KEY));
   if (!okKey) return json({ error: 'unauthorized' }, { status: 401 });
   const id = String(b.id || '');
   if (!id || !/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
-  if (!b.base64) return json({ error: 'missing-base64' }, { status: 400 });
-  const mime = (b.mime === 'image/webp') ? 'image/webp' : 'image/jpeg';
-  const ext = mime === 'image/webp' ? 'webp' : 'jpg';
-  let bytes; try { bytes = b64ToBytes(b.base64); } catch { return json({ error: 'bad-base64' }, { status: 400 }); }
-  if (bytes.length < 200) return json({ error: 'too-small' }, { status: 400 });
-  if (bytes.length > 400 * 1024) return json({ error: 'too-big' }, { status: 413 }); // un póster son decenas de KB, no cientos
+  const validacion = sanitizeValidacion(b.validacion);
+  let p = null;
+  if (b.poster != null && b.poster !== '') {
+    p = parsePoster(b.poster);
+  } else if (b.base64) {
+    p = parsePoster(`data:${b.mime === 'image/webp' ? 'image/webp' : 'image/jpeg'};base64,${String(b.base64)}`);
+  } else if (!validacion) {
+    return json({ error: 'missing-base64' }, { status: 400 });
+  }
+  if (p && p.error) {
+    // Nombres de error de antes (too-small/too-big/bad-base64) para no romper stock-posters.sh.
+    const legado = { 'poster-too-small': 'too-small', 'poster-too-big': 'too-big', 'bad-poster-base64': 'bad-base64' }[p.error] || p.error;
+    return json({ error: legado }, { status: p.error === 'poster-too-big' ? 413 : 400 });
+  }
   const metaObj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
   if (!metaObj) return json({ error: 'not-found' }, { status: 404 });
   let meta; try { meta = await metaObj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
-  const posterKey = `stock/${id}/poster.${ext}`;
-  await env.STOCK_BUCKET.put(posterKey, bytes, {
-    httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
-    customMetadata: { id, poster: '1' },
-  });
-  // ?v=tamaño: si se regenera cambia la URL y el navegador no sirve el viejo.
-  meta.thumbnail = `${STOCK_PUBLIC_R2}/${posterKey}?v=${bytes.length}`;
-  meta.posterAt = new Date().toISOString();
-  if (b.at != null && Number.isFinite(+b.at)) meta.posterFrameAt = +b.at;
+  if (p) await guardarPosterStock(env, meta, p, { at: b.at });
+  if (validacion) meta.validacion = validacion;
   await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
   if (ctx && ctx.waitUntil) ctx.waitUntil(rebuildStockIndex(env)); else await rebuildStockIndex(env);
-  return json({ ok: true, id, thumbnail: meta.thumbnail, size: bytes.length });
+  return json({ ok: true, id, thumbnail: meta.thumbnail || null, poster: meta.poster || null, size: p ? p.bytes.length : 0, validacion: meta.validacion || null });
+}
+
+// Guarda los bytes del póster en R2 (stock/<id>/poster.jpg|webp) y deja en el
+// meta las dos URLs: `thumbnail` (R2 directo, con ?v=tamaño para romper caché
+// al regenerar) y `poster` (estable, por el worker: GET /stock/poster/<id>).
+async function guardarPosterStock(env, meta, p, { at } = {}) {
+  const key = posterKey(meta.id, p.ext);
+  await env.STOCK_BUCKET.put(key, p.bytes, {
+    httpMetadata: { contentType: p.mime, cacheControl: 'public, max-age=31536000, immutable' },
+    customMetadata: { id: meta.id, poster: '1' },
+  });
+  meta.thumbnail = `${STOCK_PUBLIC_R2}/${key}?v=${p.bytes.length}`;
+  meta.poster = posterUrl(WORKER_PUBLIC_BASE, meta.id);
+  meta.posterAt = new Date().toISOString();
+  if (at != null && Number.isFinite(+at)) meta.posterFrameAt = +at;
+  return key;
+}
+
+// GET /stock/poster/<id> → image/jpeg|webp del póster (404 si no lo tiene).
+// Caché de un día (el póster puede regenerarse) y CORS * (canvas sin taint).
+async function stockPosterGetHandler(req, env, id) {
+  if (!env.STOCK_BUCKET) return new Response('r2-not-bound', { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return new Response('bad-id', { status: 400 });
+  const metaObj = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`);
+  if (!metaObj) return new Response('not-found', { status: 404 });
+  let meta; try { meta = await metaObj.json(); } catch { return new Response('bad-meta', { status: 500 }); }
+  const key = posterKeyFromMeta(meta) || posterKey(id, 'jpg');
+  const obj = await env.STOCK_BUCKET.get(key);
+  if (!obj) return new Response('no-poster', { status: 404, headers: { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' } });
+  const headers = new Headers();
+  headers.set('Content-Type', key.endsWith('.webp') ? 'image/webp' : 'image/jpeg');
+  headers.set('Cache-Control', 'public, max-age=86400');
+  headers.set('Access-Control-Allow-Origin', '*');
+  if (obj.size != null) headers.set('Content-Length', String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
+}
+
+// URL del póster tal y como la ve el cliente: por el origen de ESTA petición si
+// el póster es nuestro en R2; si el meta trae `poster` de otro origen, tal cual.
+function posterProyectado(m, origin) {
+  if (!m) return null;
+  if (posterKeyFromMeta(m)) return posterUrl(origin, m.id);
+  return typeof m.poster === 'string' ? m.poster.replace(WORKER_PUBLIC_BASE, origin) : null;
 }
 
 // ─── Índice estático de Stock en R2 (anti-bloqueo workers.dev) ─────
@@ -5418,8 +5498,11 @@ async function rebuildStockIndex(env) {
   }
 
   metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  const items = metas.map(m => ({
+  // Las piezas ocultas (máster inválido, Yokup #3199) no entran en el índice
+  // público ni, por tanto, en /stock/catalogos ni en la galería de pixeria.
+  const items = metas.filter(m => !m.oculto).map(m => ({
     ...m,
+    poster: posterProyectado(m, WORKER_PUBLIC_BASE),
     url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}?v=${m.size || 0}` : m.url,
     // thumbnail se deja tal cual (data-URIs o URLs externas), salvo los pósters que
     // se guardaron con la URL r2.dev antes del dominio propio: se reescriben al vuelo.
@@ -5492,7 +5575,7 @@ async function stockPatchMetaHandler(req, env, ctx, id) {
     const catHtml = next.catalogo ? `\n📒 ${escHtml(next.catalogo.nombre || next.catalogo.id)} · <code>${escHtml(next.catalogo.id)}</code>` : '\n📒 <i>(sin catálogo)</i>';
     notify(ctx, env, `✏️ <b>STOCK PATCH META</b> · ${escHtml(next.type || '')} · <code>${escHtml(id)}</code>${catHtml}\n🏷 ${tagsHtml}`);
   }
-  return json({ ok: true, id, changed, catalogo: next.catalogo || null, tags: next.tags });
+  return json({ ok: true, id, changed, catalogo: next.catalogo || null, tags: next.tags, oculto: !!next.oculto, validacion: next.validacion || null });
 }
 async function rebuildAndSyncTaggedStock(env) {
   const items = await rebuildStockIndex(env);
@@ -7571,6 +7654,8 @@ export default {
         res = await stockReassetHandler(req, env, ctx);
       } else if (path === '/stock/poster' && req.method === 'POST') {
         res = await stockPosterHandler(req, env, ctx);
+      } else if (path.startsWith('/stock/poster/') && req.method === 'GET') {
+        res = await stockPosterGetHandler(req, env, path.slice('/stock/poster/'.length));
       } else if (path.startsWith('/stock/asset/') && req.method === 'GET') {
         const id = path.slice('/stock/asset/'.length);
         res = await stockAssetHandler(req, env, id);
