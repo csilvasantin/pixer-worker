@@ -17,6 +17,17 @@ import {
   recentFingerprintInput,
   stockDedupDecision,
 } from './stock-dedup.mjs';
+import {
+  STOCK_TAGS_MAX,
+  applyCatalogoTags,
+  applyMetaPatch,
+  buildCatalogos,
+  cleanTag,
+  itemHasTag,
+  itemMatchesQuery,
+  refreshVigente,
+  sanitizeCatalogo,
+} from './stock-catalogo.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
@@ -68,15 +79,17 @@ function corsHeaders(req) {
   const allow = isAllowed ? origin : ALLOWED_ORIGINS[0];
   return {
     'Access-Control-Allow-Origin': allow,
-    'Access-Control-Allow-Methods': 'POST, GET, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'POST, GET, PATCH, DELETE, OPTIONS',
+    // X-AdmiraNeXT-Ingest / X-Notify-Key: sin ellas el preflight de las galerías
+    // (PATCH /stock/:id/meta, DELETE con clave) fallaba en el navegador (12-sep-2026).
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AdmiraNeXT-Ingest, X-Notify-Key',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   };
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.11.09.2026.r1.20:10';
+const WORKER_VERSION = 'v.12.09.2026.r1.13:35';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -220,6 +233,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
   '/stock/list',
+  '/stock/catalogos', // agrupación por catálogo (GET) — lectura, no notificar
   '/stock/exists', // consulta previa de los clientes antes de subir (GET) — no notificar
   '/rtb/decide', // subasta programática: POST muy frecuente (una por impresión) — no spamear Telegram
   '/rtb/feed',   // lectura del feed de decisiones (GET) — polling del reproductor
@@ -4790,7 +4804,14 @@ async function stockPublishHandler(req, env, ctx) {
   const ph = (body.ph != null && isFinite(+body.ph)) ? Math.max(8, Math.min(400, +body.ph)) : null;
   // Precio del mueble (créditos del Xpacio), para el Marketplace.
   const price = (body.price != null && isFinite(+body.price)) ? Math.max(0, Math.min(100000, Math.round(+body.price))) : null;
-  let tags = Array.isArray(body.tags) ? body.tags.map(t => String(t).toLowerCase().slice(0,30)).filter(Boolean).slice(0,4) : null;
+  // Tope de etiquetas: 4 → STOCK_TAGS_MAX (10) el 12-sep-2026 (Yokup #3183). Con 4, la
+  // base `admiranext,tiktok,vertical` solo dejaba hueco a UNA etiqueta y los hashtags
+  // de catálogo no cabían.
+  let tags = Array.isArray(body.tags) ? body.tags.map(cleanTag).filter(Boolean).slice(0, STOCK_TAGS_MAX) : null;
+  // Catálogo (opcional): {id, cliente, nombre, desde, hasta, proyecto, producto}.
+  // Se guarda saneado en meta.catalogo; si viene pero no trae id utilizable → 400.
+  const catalogo = body.catalogo == null ? null : sanitizeCatalogo(body.catalogo);
+  if (body.catalogo != null && !catalogo) return json({ error: 'bad-catalogo', expected: { id: '[a-z0-9-]', cliente: '[a-z0-9-]', nombre: '<=120', desde: 'AAAA-MM-DD', hasta: 'AAAA-MM-DD', proyecto: '[a-z0-9-]', producto: '[a-z0-9-]' } }, { status: 400 });
   // Calidad del asset (good/better/best, según el motor); default 'good'.
   const QUALITY_TIERS = ['good', 'better', 'best'];
   const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
@@ -5069,8 +5090,9 @@ async function stockPublishHandler(req, env, ctx) {
   if ((tags || []).some(t => String(t).toLowerCase().trim() === 'tiktok')) category = 'tiktoks';
 
   // El tag de calidad se añade SIEMPRE (además de los de contenido), sin pisar.
-  tags = Array.isArray(tags) ? tags : [];
-  if (!tags.includes(quality)) tags.push(quality);
+  // Con catálogo entran además sus hashtags (catalogo · cliente · id · AAAA-MM);
+  // ni ésos ni el de calidad se recortan al aplicar el tope: se recortan los del cliente.
+  tags = applyCatalogoTags(Array.isArray(tags) ? tags : [], catalogo, { quality });
 
   let meta = {
     id,
@@ -5103,6 +5125,8 @@ async function stockPublishHandler(req, env, ctx) {
     fp,
     ph,
     price,
+    // Catálogo al que pertenece la pieza (folleto de un cliente con fechas), o null.
+    catalogo,
     // sha256 hex del binario completo: es la llave de la dedup por contenido.
     contentHash,
     createdAt: new Date(ts).toISOString(),
@@ -5197,6 +5221,12 @@ async function stockListHandler(req, env, url) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const typeFilter = url.searchParams.get('type') || '';
   const motorFilter = url.searchParams.get('motor') || '';
+  // Filtros de catálogo (12-sep-2026): ?catalogo=<id> ?cliente=<slug> ?tag=<tag> ?q=<texto>
+  const catalogoFilter = cleanTag(url.searchParams.get('catalogo') || '');
+  const clienteFilter = cleanTag(url.searchParams.get('cliente') || '');
+  const tagFilter = cleanTag(url.searchParams.get('tag') || '');
+  const qFilter = (url.searchParams.get('q') || '').trim();
+  const hasFilter = !!(typeFilter || motorFilter || catalogoFilter || clienteFilter || tagFilter || qFilter);
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
 
   // List todos los meta.json bajo stock/. R2 devuelve hasta 1000/request.
@@ -5226,7 +5256,7 @@ async function stockListHandler(req, env, url) {
   // del meta y recortar antes cambiaría el filtrado y el total.
   const total = allMetaKeys.length;
   let filtered;
-  if (!typeFilter && !motorFilter) {
+  if (!hasFilter) {
     const recientes = [...allMetaKeys].sort((a, b) => b.localeCompare(a)).slice(0, limit);
     filtered = (await Promise.all(recientes.map(readMeta))).filter(Boolean);
   } else {
@@ -5234,6 +5264,10 @@ async function stockListHandler(req, env, url) {
     filtered = metas;
     if (typeFilter)  filtered = filtered.filter(m => m.type === typeFilter);
     if (motorFilter) filtered = filtered.filter(m => m.motor === motorFilter);
+    if (catalogoFilter) filtered = filtered.filter(m => m.catalogo && cleanTag(m.catalogo.id) === catalogoFilter);
+    if (clienteFilter)  filtered = filtered.filter(m => m.catalogo && cleanTag(m.catalogo.cliente) === clienteFilter);
+    if (tagFilter)      filtered = filtered.filter(m => itemHasTag(m, tagFilter));
+    if (qFilter)        filtered = filtered.filter(m => itemMatchesQuery(m, qFilter));
   }
   // Se sigue ordenando por createdAt: si algún id antiguo no llevara el
   // timestamp delante, el orden final no depende de la forma de la clave.
@@ -5253,7 +5287,7 @@ async function stockListHandler(req, env, url) {
   // `total` sigue siendo el tamaño del Stock, no el de la página: sin filtros ya
   // no se leen todos los metas, así que se cuenta por claves. Con filtros es el
   // número de coincidencias, igual que antes.
-  return json({ items, total: (!typeFilter && !motorFilter) ? total : filtered.length });
+  return json({ items, total: !hasFilter ? total : filtered.length });
 }
 
 // POST /stock/reasset {id, base64, mime}
@@ -5395,7 +5429,70 @@ async function rebuildStockIndex(env) {
   await env.STOCK_BUCKET.put('stock/index.json', JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=60' },
   });
+  // Agrupación por catálogo, derivada del mismo índice: así GET /stock/catalogos
+  // lee UN objeto y no recorre R2. `vigente` se recalcula al servirlo (depende del día).
+  try {
+    const catalogos = buildCatalogos(items);
+    await env.STOCK_BUCKET.put(STOCK_CATALOGOS_KEY, JSON.stringify({ catalogos, total: catalogos.length, builtAt: new Date().toISOString() }), {
+      httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=60' },
+    });
+  } catch (e) { console.warn(JSON.stringify({ message: 'stock/catalogos.json no escrito', error: String(e) })); }
   return items;
+}
+const STOCK_CATALOGOS_KEY = 'stock/catalogos.json';
+
+// GET /stock/catalogos[?cliente=&vigente=1] → {ok, catalogos:[{id, cliente, nombre,
+// desde, hasta, proyecto, count, ultimo, vigente, ids[≤500]}]} ordenados por `ultimo`
+// desc. Sale de stock/catalogos.json (se mantiene al reindexar/publicar); si aún
+// no existe se construye una vez desde stock/index.json.
+async function stockCatalogosHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let catalogos = null, builtAt = null;
+  try {
+    const obj = await env.STOCK_BUCKET.get(STOCK_CATALOGOS_KEY);
+    if (obj) { const d = await obj.json(); if (d && Array.isArray(d.catalogos)) { catalogos = d.catalogos; builtAt = d.builtAt || null; } }
+  } catch {}
+  if (!catalogos) {
+    try {
+      const items = await gridReadStockIndex(env);
+      catalogos = buildCatalogos(items);
+    } catch { catalogos = []; }
+  }
+  catalogos = refreshVigente(catalogos);
+  const cliente = cleanTag(url.searchParams.get('cliente') || '');
+  if (cliente) catalogos = catalogos.filter(c => c.cliente === cliente);
+  if (['1', 'true', 'si'].includes(String(url.searchParams.get('vigente') || '').toLowerCase())) catalogos = catalogos.filter(c => c.vigente);
+  return json({ ok: true, catalogos, total: catalogos.length, builtAt }, { headers: { 'Cache-Control': 'public, max-age=60' } });
+}
+
+// PATCH /stock/:id/meta {catalogo?, tags_add?:[], tags_remove?:[]} — backfill/edición
+// de catálogo y etiquetas. Misma clave que el publish con externalId / DELETE:
+// X-AdmiraNeXT-Ingest, o NOTIFY_KEY por `?secret=`, `X-Notify-Key` o `{secret}`.
+// Recalcula los hashtags (retira los del catálogo anterior) y regenera el índice.
+async function stockPatchMetaHandler(req, env, ctx, id) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  if (!(await stockDeleteAuthorized(req, env, new URL(req.url)))) return json({ error: 'unauthorized' }, { status: 401 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (!body || typeof body !== 'object') return json({ error: 'bad-json' }, { status: 400 });
+  const metaKey = `stock/${id}/meta.json`;
+  const obj = await env.STOCK_BUCKET.get(metaKey);
+  if (!obj) return json({ error: 'not-found' }, { status: 404 });
+  let meta;
+  try { meta = await obj.json(); } catch { return json({ error: 'bad-meta' }, { status: 500 }); }
+  const { meta: next, changed, error } = applyMetaPatch(meta, body);
+  if (error) return json({ error }, { status: error === 'bad-meta' ? 500 : 400 });
+  if (changed) {
+    await env.STOCK_BUCKET.put(metaKey, JSON.stringify(next), {
+      httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
+    });
+    ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+    const tagsHtml = next.tags.length ? next.tags.map(t => '<code>#' + escHtml(t) + '</code>').join(' ') : '<i>(sin etiquetas)</i>';
+    const catHtml = next.catalogo ? `\n📒 ${escHtml(next.catalogo.nombre || next.catalogo.id)} · <code>${escHtml(next.catalogo.id)}</code>` : '\n📒 <i>(sin catálogo)</i>';
+    notify(ctx, env, `✏️ <b>STOCK PATCH META</b> · ${escHtml(next.type || '')} · <code>${escHtml(id)}</code>${catHtml}\n🏷 ${tagsHtml}`);
+  }
+  return json({ ok: true, id, changed, catalogo: next.catalogo || null, tags: next.tags });
 }
 async function rebuildAndSyncTaggedStock(env) {
   const items = await rebuildStockIndex(env);
@@ -7425,6 +7522,11 @@ export default {
         else { await rebuildStockIndex(env); res = json({ ok: true, reindexed: true }); }
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
+      } else if (path === '/stock/catalogos' && req.method === 'GET') {
+        res = await stockCatalogosHandler(req, env, url);
+      } else if (path.match(/^\/stock\/[^/]+\/meta$/) && req.method === 'PATCH') {
+        const id = path.split('/')[2];
+        res = await stockPatchMetaHandler(req, env, ctx, id);
       } else if (path === '/stock/exists' && req.method === 'GET') {
         res = await stockExistsHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {

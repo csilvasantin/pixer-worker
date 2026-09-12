@@ -36,6 +36,33 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | POST | `/stock/publish`        | Publica en Stock; `externalId` requiere el secreto interno y evita duplicados (ver «Dedup del Stock») |
 | GET  | `/stock/exists`         | `?hash=<sha256>` o `?externalId=<id>` → `{exists, id, url}`; pregunta ANTES de subir |
 | DELETE | `/stock/{id}`         | Borra asset+meta. Con clave: `X-AdmiraNeXT-Ingest` o `NOTIFY_KEY` (`?secret=`, `X-Notify-Key` o `{secret}`) |
+| GET  | `/stock/list`           | Listado; filtros `type`, `motor`, `catalogo=<id>`, `cliente=<slug>`, `tag=<tag>`, `q=<texto>` (ver «Catálogo») |
+| GET  | `/stock/catalogos`      | Catálogos agrupados desde el índice: `{ok, catalogos:[{id, cliente, nombre, desde, hasta, proyecto, count, ultimo, vigente, ids}]}` |
+| PATCH | `/stock/{id}/meta`     | `{catalogo?, tags_add?, tags_remove?}` — backfill/edición; misma clave que el DELETE |
+
+### Catálogo del Stock (v.12.09.2026.r1 · Yokup #3183)
+
+Las piezas que admiranext genera para un folleto (Alcampo 10–23 sep) entraban como
+vídeos sueltos con 4 etiquetas fijas. Ahora (reglas puras en `src/stock-catalogo.mjs`):
+
+- `POST /stock/publish` acepta **`catalogo`**:
+  `{id:"alcampo-2026-09-10", cliente:"alcampo", nombre:"Alcampo · 10–23 sep 2026", desde:"2026-09-10", hasta:"2026-09-23", proyecto:"admira-tv", producto:"coca-cola"}`
+  → `meta.catalogo` saneado (id/cliente/producto/proyecto `[a-z0-9-]`, fechas ISO, nombre ≤120).
+  Si viene y no trae id utilizable → `400 bad-catalogo`.
+- **Hashtags automáticos** con catálogo: `catalogo`, `<cliente>`, `<catalogo.id>`, `<AAAA-MM de desde>`
+  se añaden a `tags` además de los del cliente. **Tope de tags: 10** (antes 4). Si sobran se
+  recortan los del cliente por el final; los automáticos y el de calidad nunca.
+- `GET /stock/list?catalogo=<id>` · `?cliente=<slug>` · `?tag=<tag>` · `?q=<texto>` (todas las
+  palabras en título/prompt/comentario/tags/id/num/campos del catálogo).
+- `GET /stock/catalogos[?cliente=&vigente=1]` sale de `stock/catalogos.json` (se escribe en cada
+  reindex, o sea tras cada publish/patch/delete y con el cron); `vigente` se recalcula al servir.
+  `ids` lleva hasta 500 ids por catálogo, ordenados por `ultimo` desc.
+- `PATCH /stock/{id}/meta` con `{catalogo?, tags_add?:[], tags_remove?:[]}` (`catalogo:null` lo
+  retira). Recalcula hashtags (quita los del catálogo anterior) y regenera el índice.
+  Clave: `X-AdmiraNeXT-Ingest`, o `NOTIFY_KEY` por `?secret=`, `X-Notify-Key` o `{secret}`.
+- CORS: `Allow-Methods` incluye `PATCH`; `Allow-Headers` incluye `X-AdmiraNeXT-Ingest, X-Notify-Key`.
+
+Test: `node --test test/stock-catalogo.test.mjs`.
 
 ### Dedup del Stock (v.11.09.2026.r1)
 

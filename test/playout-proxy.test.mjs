@@ -12,5 +12,5 @@ test('the public API proxies playout orchestration through OMNI', () => {
 test('the proxy preserves bearer authentication for protected writes', () => {
   assert.match(source, /req\.headers\.get\('Authorization'\)/);
   assert.match(source, /init\.headers\.Authorization = authorization/);
-  assert.match(source, /'Access-Control-Allow-Headers': 'Content-Type, Authorization'/);
+  assert.match(source, /'Access-Control-Allow-Headers': 'Content-Type, Authorization[^']*'/);
 });
