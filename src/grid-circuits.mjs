@@ -15,7 +15,7 @@
 // titular de un equipo ni datos del comercio.
 
 export const GRID_CIRCUITS_KEY = 'grid:circuits';
-const MAX_CIRCUITS = 500;
+const MAX_CIRCUITS = 5000;   // un Excel del portal del comercio trae hasta 500 establecimientos por archivo
 
 export function circuitId(s) { return String(s || '').toLowerCase().trim().replace(/[^a-z0-9_-]/g, '').slice(0, 40); }
 function label(s, max) { return String(s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, max); }
