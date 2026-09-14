@@ -1,3 +1,4 @@
+import { gridCircuitsHandler } from './grid-circuits.mjs';
 import {
   classifyHttpNotification,
   flushNotificationAggregates,
@@ -7435,6 +7436,8 @@ export default {
         res = await gridScreensHandler(req, env);
       } else if (path === '/grid/projects') {
         res = await gridProjectsHandler(req, env);
+      } else if (path === '/grid/circuits') {
+        res = await gridCircuitsHandler(req, env, { json, projectsDefault: GRID_PROJECTS_DEFAULT });
       } else if (path === '/grid/draft') {
         res = await gridDraftHandler(req, env, url);
       } else if (path === '/grid/playlist' && req.method === 'GET') {
