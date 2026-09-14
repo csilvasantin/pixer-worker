@@ -36,10 +36,12 @@ export function circuitWriteAllowed(env, req, body) {
 
 export function parseCircuitRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'bad-request' };
-  const id = circuitId(body.circuit);
-  if (!id || id.length < 2) return { error: 'bad-circuit' };
-  const project = body.project == null || body.project === '' ? '' : circuitId(body.project);
-  if (body.project && !project) return { error: 'bad-project' };
+  // Estricto: un id que cambiaría al limpiarlo se rechaza (no se inventa otro circuito).
+  const raw = String(body.circuit || '').trim().toLowerCase(), id = circuitId(raw);
+  if (!id || id.length < 2 || id !== raw) return { error: 'bad-circuit' };
+  const rawProject = body.project == null ? '' : String(body.project).trim().toLowerCase();
+  const project = circuitId(rawProject);
+  if (rawProject && project !== rawProject) return { error: 'bad-project' };
   return {
     id,
     name: label(body.name, 60) || id,

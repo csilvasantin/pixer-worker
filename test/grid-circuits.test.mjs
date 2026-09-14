@@ -14,7 +14,9 @@ const post = (body, auth) => new Request('https://x/grid/circuits', { method: 'P
   headers: auth ? { Authorization: 'Bearer ' + auth } : {} });
 
 test('valida el id del circuito y el canal', () => {
-  assert.equal(parseCircuitRequest({ circuit: 'Mi Circuito!' }).id, 'micircuito');
+  assert.equal(parseCircuitRequest({ circuit: ' Kiosko-BCN ' }).id, 'kiosko-bcn');
+  assert.equal(parseCircuitRequest({ circuit: 'Mi Circuito!' }).error, 'bad-circuit');
+  assert.equal(parseCircuitRequest({ circuit: 'bad!!' }).error, 'bad-circuit');
   assert.equal(parseCircuitRequest({ circuit: 'x' }).error, 'bad-circuit');
   assert.equal(parseCircuitRequest({ circuit: 'ok', project: '!!' }).error, 'bad-project');
   assert.equal(parseCircuitRequest({ circuit: 'ok', name: '<b>Tienda</b>' }).name, 'bTienda/b');
