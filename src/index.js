@@ -1349,7 +1349,6 @@ async function gridSyncTaggedStock(env, stockItems) {
   for (const target of objetivos) {
     const clave = claveObjetivo(target);
     const claveCarril = `${target.screen}|${target.lane}`;
-    const offset = ocupados.get(claveCarril) || 0;
     const porId = new Map();
     const tagged = items.filter(x => { const por = motivoDeReparto(x, target); if (por) porId.set(String(x.id), por); return !!por; }).slice(0, 5);
     const ensured = await gridEnsureDailyTaggedRundown(env, target.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
@@ -1359,8 +1358,11 @@ async function gridSyncTaggedStock(env, stockItems) {
         .sort((a, z) => (+a.position || 0) - (+z.position || 0));
       const overridesByContent = new Map(slots.filter(x => x.titleOverride && x.titleOverrideFor).map(x => [String(x.titleOverrideFor), String(x.titleOverride).slice(0, 120)]));
       laneSlots += slots.length;
+      const claveBanda = `${claveCarril}|${band.id}`;
+      const offset = ocupados.get(claveBanda) || 0; // slots de esta banda ya ocupados por objetivos anteriores del mismo carril
+      ocupados.set(claveBanda, offset + Math.min(tagged.length, Math.max(0, slots.length - offset)));
       for (let i = 0; i < slots.length; i++) {
-        if (i < offset) continue; // slots de un objetivo anterior del mismo carril
+        if (i < offset) continue;
         const slot = slots[i], stock = tagged[i - offset];
         if (stock) {
           if (!slot.tagFallback && slot.sourceTag !== clave) {
@@ -1383,7 +1385,6 @@ async function gridSyncTaggedStock(env, stockItems) {
         }
       }
     }
-    ocupados.set(claveCarril, offset + tagged.length);
     const changed = JSON.stringify(bookings) !== before;
     if (changed) await gridPutBookings(env, target.screen, date, bookings);
     results.push({ screen: target.screen, tag: target.tag ? '#' + target.tag : clave, clave, cliente: target.cliente || null, audience: target.audience || null, age: target.age || null, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type, por: porId.get(String(x.id)) || 'tag' })) });
