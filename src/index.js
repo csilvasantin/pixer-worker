@@ -36,6 +36,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
+import { siguienteNum, renumerarDuplicados, etiquetasHonestas, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
@@ -243,6 +244,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/stock/list',
   '/stock/catalogos', // agrupación por catálogo (GET) — lectura, no notificar
   '/stock/exists', // consulta previa de los clientes antes de subir (GET) — no notificar
+  '/stock/traza', // traza folleto → Stock → parrilla → pantalla (GET) — no notificar
+  '/grid/tag-targets', // objetivos de reparto (GET/POST) — no notificar
   '/rtb/decide', // subasta programática: POST muy frecuente (una por impresión) — no spamear Telegram
   '/rtb/feed',   // lectura del feed de decisiones (GET) — polling del reproductor
   '/stock/publish', // notificado dentro del handler con detalle (motor/tipo/tamaño)
@@ -1293,14 +1296,58 @@ async function gridEnsureDailyTaggedRundown(env, screen, date) {
   if (carried.length) await gridPutBookings(env, screen, date, current.concat(carried));
   return { bookings: current.concat(carried), carried: carried.length };
 }
+async function gridLeerObjetivosExtra(env) {
+  try { const d = JSON.parse((env.SIGNAGE_KV && await env.SIGNAGE_KV.get('grid:tag-targets')) || '[]'); return Array.isArray(d) ? d : ((d && d.targets) || []); } catch { return []; }
+}
+// GET /grid/tag-targets → objetivos efectivos (fijos + extra). POST {secret, targets:[{screen, lane, tag?|cliente?|audience?|age?}]} sustituye los extra y resincroniza.
+async function gridTagTargetsHandler(req, env) {
+  if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
+  if (req.method === 'POST') {
+    let body = {}; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+    if (!env.NOTIFY_KEY || body.secret !== env.NOTIFY_KEY) return json({ error: 'unauthorized' }, { status: 401 });
+    const extra = objetivosDeReparto([], Array.isArray(body.targets) ? body.targets : []).slice(0, 200);
+    await env.SIGNAGE_KV.put('grid:tag-targets', JSON.stringify({ targets: extra, updatedAt: Date.now() }).slice(0, 60000));
+    const sync = await gridSyncTaggedStock(env, await gridReadStockIndex(env));
+    return json({ ok: true, extra, efectivos: objetivosDeReparto(GRID_TAG_TARGETS, extra), sync });
+  }
+  const extra = await gridLeerObjetivosExtra(env);
+  return json({ ok: true, fijos: GRID_TAG_TARGETS, extra, efectivos: objetivosDeReparto(GRID_TAG_TARGETS, extra), como: 'POST {secret, targets:[{screen, lane, tag?|cliente?|audience?|age?}]} (secret = NOTIFY_KEY)' });
+}
+// GET /stock/traza?id=|num=|externalId= → traza folleto → Stock → reparto → parrilla → antena de un asset.
+async function stockTrazaHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  let id = String(url.searchParams.get('id') || '').trim();
+  const ext = String(url.searchParams.get('externalId') || '').trim();
+  const num = parseInt(url.searchParams.get('num') || '', 10);
+  if (!id && ext) id = await stockExternalId(ext);
+  if (!id && Number.isFinite(num)) { const it = (await gridReadStockIndex(env)).find(x => +x.num === num); id = it ? String(it.id) : ''; }
+  if (!id || !/^[A-Za-z0-9-]+$/.test(id)) return json({ error: 'missing-id-num-or-externalId' }, { status: 400 });
+  let meta = null; try { const o = await env.STOCK_BUCKET.get(`stock/${id}/meta.json`); meta = o ? await o.json() : null; } catch {}
+  if (!meta) return json({ ok: false, error: 'not-found', id }, { status: 404 });
+  if (ext) meta.externalId = ext;
+  let status = null; try { status = JSON.parse((env.SIGNAGE_KV && await env.SIGNAGE_KV.get('grid:tag-sync:status')) || 'null'); } catch {}
+  const hoy = gridNow().ymd;
+  const pantallas = [...new Set(((status && status.targets) || []).map(t => t.screen))];
+  const bookingsPorPantalla = {}, nowPorPantalla = {};
+  for (const screen of pantallas) {
+    bookingsPorPantalla[screen] = await gridGetBookings(env, screen, hoy);
+    try { nowPorPantalla[screen] = JSON.parse((await env.SIGNAGE_KV.get('signage:now:' + screen)) || 'null'); } catch {}
+  }
+  const traza = construirTraza({ meta, status, bookingsPorPantalla, nowPorPantalla, hoy: gridFmtDate(hoy) });
+  return json({ ok: true, ...traza, sync: status ? { syncedAt: status.syncedAt, date: status.date } : null }, { headers: { 'Cache-Control': 'no-store' } });
+}
 async function gridSyncTaggedStock(env, stockItems) {
   if (!env.SIGNAGE_KV) return { ok: false, error: 'kv-not-bound', targets: [] };
   const items = (Array.isArray(stockItems) ? stockItems : [])
     .filter(x => x && x.id && x.url && (x.type === 'image' || x.type === 'video'))
     .sort((a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || '')));
   const date = gridNow().ymd, results = [];
-  for (const target of GRID_TAG_TARGETS) {
-    const tagged = items.filter(x => gridStockTags(x).has(target.tag)).slice(0, 5);
+  // VÍA 1: objetivos fijos + extra (KV grid:tag-targets); una pieza casa por etiqueta, por cliente de catálogo o por segmento.
+  const objetivos = objetivosDeReparto(GRID_TAG_TARGETS, await gridLeerObjetivosExtra(env));
+  for (const target of objetivos) {
+    const clave = claveObjetivo(target);
+    const porId = new Map();
+    const tagged = items.filter(x => { const por = motivoDeReparto(x, target); if (por) porId.set(String(x.id), por); return !!por; }).slice(0, 5);
     const ensured = await gridEnsureDailyTaggedRundown(env, target.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
     let laneSlots = 0;
     for (const band of (await gridGetConfig(env, target.screen)).bands) {
@@ -1311,7 +1358,7 @@ async function gridSyncTaggedStock(env, stockItems) {
       for (let i = 0; i < slots.length; i++) {
         const slot = slots[i], stock = tagged[i];
         if (stock) {
-          if (!slot.tagFallback && slot.sourceTag !== target.tag) {
+          if (!slot.tagFallback && slot.sourceTag !== clave) {
             slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
           }
           const stockTitle = stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id));
@@ -1321,8 +1368,8 @@ async function gridSyncTaggedStock(env, stockItems) {
           slot.title = String(carriedTitle || stockTitle).slice(0, 120);
           slot.advertiser = target.lane === 'municipal' ? 'Ajuntament de Gràcia' : 'Pixeria'; slot.category = target.lane;
           slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
-          slot.stockId = String(stock.id); slot.sourceTag = target.tag;
-        } else if (slot.sourceTag === target.tag) {
+          slot.stockId = String(stock.id); slot.sourceTag = clave;
+        } else if (slot.sourceTag === clave) {
           const fallback = slot.tagFallback || (target.lane === 'municipal'
             ? { title: 'Contenido del Ayuntamiento', advertiser: 'Ajuntament de Gràcia', category: 'municipal', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/sabias.svg', name: 'Contenido del Ayuntamiento' } }
             : { title: 'Publicidad local ' + String.fromCharCode(65 + i), advertiser: 'Publicidad local', category: 'publicidad', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: 'Publicidad local' } });
@@ -1333,7 +1380,7 @@ async function gridSyncTaggedStock(env, stockItems) {
     }
     const changed = JSON.stringify(bookings) !== before;
     if (changed) await gridPutBookings(env, target.screen, date, bookings);
-    results.push({ screen: target.screen, tag: '#' + target.tag, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type })) });
+    results.push({ screen: target.screen, tag: target.tag ? '#' + target.tag : clave, clave, cliente: target.cliente || null, audience: target.audience || null, age: target.age || null, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type, por: porId.get(String(x.id)) || 'tag' })) });
   }
   const status = { ok: true, date: gridFmtDate(date), syncedAt: Date.now(), targets: results };
   await env.SIGNAGE_KV.put('grid:tag-sync:status', JSON.stringify(status).slice(0, 16000));
@@ -5114,6 +5161,10 @@ async function stockPublishHandler(req, env, ctx) {
   // Con catálogo entran además sus hashtags (catalogo · cliente · id · AAAA-MM);
   // ni ésos ni el de calidad se recortan al aplicar el tope: se recortan los del cliente.
   tags = applyCatalogoTags(Array.isArray(tags) ? tags : [], catalogo, { quality });
+  // VÍA 1 (FLT-100477): etiquetas HONESTAS por dimensiones. `vertical`/`horizontal` las pone el cliente
+  // según el formato que pidió; si la validación trae ancho/alto reales del máster, manda la realidad.
+  const honestas = etiquetasHonestas(tags, validacionIn);
+  tags = honestas.tags;
 
   let meta = {
     id,
@@ -5123,6 +5174,9 @@ async function stockPublishHandler(req, env, ctx) {
     title: title ? String(title).slice(0, 300) : null,
     comment: comment ? String(comment).slice(0, 2000) : null,
     tags: tags || [],
+    orientacion: honestas.orientacion,                                   // vertical|horizontal|cuadrado según el máster real (null si no se midió)
+    ancho: (validacionIn && validacionIn.ancho) || null,
+    alto: (validacionIn && validacionIn.alto) || null,
     quality,
     audience,
     category,
@@ -5166,6 +5220,14 @@ async function stockPublishHandler(req, env, ctx) {
   // máster nuevo trae su propio fotograma y el viejo no debe sobrevivirle.
   if (posterIn) await guardarPosterStock(env, meta, posterIn, { at: body.posterAt });
   if (validacionIn) meta.validacion = validacionIn;
+  // VÍA 1: num AL PUBLICAR (antes nacía sin número hasta el rebuild): max(contador KV, índice)+1.
+  if (!(+meta.num > 0)) {
+    try {
+      const kvLast = env.SIGNAGE_KV ? await env.SIGNAGE_KV.get(NUM_KV_KEY) : null;
+      meta.num = siguienteNum(await gridReadStockIndex(env), kvLast);
+      if (env.SIGNAGE_KV) await env.SIGNAGE_KV.put(NUM_KV_KEY, String(meta.num));
+    } catch (e) { console.warn(JSON.stringify({ message: 'num al publicar no asignado; lo pondrá el rebuild', error: String(e) })); }
+  }
   await env.STOCK_BUCKET.put(metaKey, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
@@ -5239,7 +5301,7 @@ async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, url: publicUrl, createdAt: meta.createdAt, contentHash, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, num: meta.num || null, orientacion: meta.orientacion || null, tags: meta.tags || [], url: publicUrl, createdAt: meta.createdAt, contentHash, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -5498,6 +5560,13 @@ async function rebuildStockIndex(env) {
     } catch { /* si la escritura falla, el índice igual lleva el num; se reintenta en el próximo rebuild */ }
   }
 
+  // VÍA 1: si dos publish concurrentes repitieron num, el más nuevo recibe otro; y el contador KV se pone al día.
+  for (const m of renumerarDuplicados(metas)) {
+    try { await env.STOCK_BUCKET.put(`stock/${m.id}/meta.json`, JSON.stringify(m), { httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' } }); } catch { /* lo reintenta el próximo rebuild */ }
+  }
+  try {
+    if (env.SIGNAGE_KV) { let top = 0; for (const m of metas) { const n = +m.num; if (Number.isFinite(n) && n > top) top = n; } const kv = +(await env.SIGNAGE_KV.get(NUM_KV_KEY)) || 0; if (top > kv) await env.SIGNAGE_KV.put(NUM_KV_KEY, String(top)); }
+  } catch { /* el contador es una ayuda, no la verdad */ }
   metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   // Las piezas ocultas (máster inválido, Yokup #3199) no entran en el índice
   // público ni, por tanto, en /stock/catalogos ni en la galería de pixeria.
@@ -7418,6 +7487,8 @@ export default {
         res = await gridBookHandler(req, env);
       } else if (path === '/grid/rundown' && req.method === 'POST') {
         res = await gridRundownHandler(req, env);
+      } else if (path === '/grid/tag-targets' && (req.method === 'GET' || req.method === 'POST')) {
+        res = await gridTagTargetsHandler(req, env);
       } else if (path === '/grid/tag-sync') {
         res = await gridTagSyncHandler(req, env);
       } else if (path === '/grid/unbook' && req.method === 'POST') {
@@ -7613,6 +7684,8 @@ export default {
       } else if (path.match(/^\/stock\/[^/]+\/meta$/) && req.method === 'PATCH') {
         const id = path.split('/')[2];
         res = await stockPatchMetaHandler(req, env, ctx, id);
+      } else if (path === '/stock/traza' && req.method === 'GET') {
+        res = await stockTrazaHandler(req, env, url);
       } else if (path === '/stock/exists' && req.method === 'GET') {
         res = await stockExistsHandler(req, env, url);
       } else if (path === '/layout/publish' && req.method === 'POST') {

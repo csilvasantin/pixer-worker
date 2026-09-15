@@ -75,6 +75,10 @@ export function sanitizeValidacion(input) {
     duracion: num(input.duracion, 36000),
     motivo: input.motivo == null ? null : String(input.motivo).slice(0, 200),
     por: input.por == null ? null : String(input.por).slice(0, 80),
+    // Dimensiones reales del máster (Vía 1, FLT-100477): las mide el creador al validar; el Stock
+    // deriva de ellas la orientación honesta (vertical|horizontal) en vez de fiarse del formato pedido.
+    ancho: (Number.isFinite(+input.ancho) && +input.ancho >= 16 && +input.ancho <= 8192) ? Math.round(+input.ancho) : null,
+    alto: (Number.isFinite(+input.alto) && +input.alto >= 16 && +input.alto <= 8192) ? Math.round(+input.alto) : null,
     at: (typeof input.at === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(input.at)) ? input.at.slice(0, 24) : new Date().toISOString(),
   };
   if (!out.ok && !out.motivo) out.motivo = 'sin-motivo';
