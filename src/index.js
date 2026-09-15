@@ -1344,8 +1344,12 @@ async function gridSyncTaggedStock(env, stockItems) {
   const date = gridNow().ymd, results = [];
   // VÍA 1: objetivos fijos + extra (KV grid:tag-targets); una pieza casa por etiqueta, por cliente de catálogo o por segmento.
   const objetivos = objetivosDeReparto(GRID_TAG_TARGETS, await gridLeerObjetivosExtra(env));
+  // Varios objetivos pueden compartir pantalla+carril: cada uno ocupa los slots que siguen a los del anterior.
+  const ocupados = new Map();
   for (const target of objetivos) {
     const clave = claveObjetivo(target);
+    const claveCarril = `${target.screen}|${target.lane}`;
+    const offset = ocupados.get(claveCarril) || 0;
     const porId = new Map();
     const tagged = items.filter(x => { const por = motivoDeReparto(x, target); if (por) porId.set(String(x.id), por); return !!por; }).slice(0, 5);
     const ensured = await gridEnsureDailyTaggedRundown(env, target.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
@@ -1356,7 +1360,8 @@ async function gridSyncTaggedStock(env, stockItems) {
       const overridesByContent = new Map(slots.filter(x => x.titleOverride && x.titleOverrideFor).map(x => [String(x.titleOverrideFor), String(x.titleOverride).slice(0, 120)]));
       laneSlots += slots.length;
       for (let i = 0; i < slots.length; i++) {
-        const slot = slots[i], stock = tagged[i];
+        if (i < offset) continue; // slots de un objetivo anterior del mismo carril
+        const slot = slots[i], stock = tagged[i - offset];
         if (stock) {
           if (!slot.tagFallback && slot.sourceTag !== clave) {
             slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
@@ -1378,6 +1383,7 @@ async function gridSyncTaggedStock(env, stockItems) {
         }
       }
     }
+    ocupados.set(claveCarril, offset + tagged.length);
     const changed = JSON.stringify(bookings) !== before;
     if (changed) await gridPutBookings(env, target.screen, date, bookings);
     results.push({ screen: target.screen, tag: target.tag ? '#' + target.tag : clave, clave, cliente: target.cliente || null, audience: target.audience || null, age: target.age || null, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type, por: porId.get(String(x.id)) || 'tag' })) });
