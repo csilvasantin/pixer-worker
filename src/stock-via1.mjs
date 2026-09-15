@@ -124,7 +124,14 @@ export function construirTraza({ meta, status, bookingsPorPantalla = {}, nowPorP
   if (!meta) return null;
   const id = String(meta.id);
   const asset = { id, num: meta.num || null, title: meta.title || meta.prompt || null, type: meta.type, mime: meta.mime || null, orientacion: meta.orientacion || null, tags: meta.tags || [], catalogo: meta.catalogo || null, audience: meta.audience || null, ageBucket: meta.ageBucket || null, createdAt: meta.createdAt || null, url: meta.url || null };
-  const origen = origenDeExternalId(meta.externalId || meta.externalIdOrigen || meta.externalRefOrigen || '') || (meta.externalRef ? { tipo: 'externo', externalRef: meta.externalRef } : null);
+  // El meta guarda externalRef = id derivado (opaco); el externalId original solo viaja si el publish lo anotó
+  // (externalIdOrigen, desde la vía 1) o si lo pasa quien pregunta. Si no, el catálogo del meta ya dice de qué folleto sale.
+  let origen = origenDeExternalId(meta.externalIdOrigen || meta.externalId || '');
+  if ((!origen || origen.tipo === 'externo') && meta.catalogo && meta.catalogo.id) {
+    const c = meta.catalogo;
+    origen = { tipo: 'catalogo', catalogo_id: c.id, producto: c.producto || null, cliente: c.cliente || null, nombre: c.nombre || null, vigencia: c.desde ? `${c.desde} → ${c.hasta || '?'}` : null, horizontal: (meta.tags || []).includes('horizontal'), catalogo_url: `https://admira.tv/contentcatalogue/?catalogo=${encodeURIComponent(c.id)}` };
+  }
+  if (!origen && meta.externalRef) origen = { tipo: 'externo', externalRef: meta.externalRef };
   const reparto = [];
   for (const t of ((status && status.targets) || [])) {
     const hit = (t.items || []).find((x) => String(x.id) === id);

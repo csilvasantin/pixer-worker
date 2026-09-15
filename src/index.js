@@ -5195,6 +5195,7 @@ async function stockPublishHandler(req, env, ctx) {
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : (thumbHeredada || null),
     url: publicUrl,
     assetKey,
+    externalIdOrigen: externalId || null, // Vía 1: la clave original (admiranext:catalogo:<id>:<producto>) para la traza; externalRef sigue siendo el id derivado
     externalRef: externalId ? id : (typeof body.externalRef === 'string'
       ? body.externalRef.trim().slice(0, 160) || null : null),
     fp,

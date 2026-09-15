@@ -44,6 +44,8 @@ test('traza: origen del externalId, reparto, parrilla y antena → estado y sigu
   const rep = construirTraza({ meta, status }); assert.equal(rep.estado, 'repartido'); assert.equal(rep.reparto[0].por, 'cliente');
   const par = construirTraza({ meta, status, hoy: '2026-09-15', bookingsPorPantalla: { 'xtore-escaparate-pn1w': [{ stockId: 'auto-1', bandId: 'b1', position: 2, lane: 'publicidad', title: 'Leche' }, { stockId: 'otro' }] } });
   assert.equal(par.estado, 'en_parrilla'); assert.deepEqual(par.pantallas[0].slots[0], { bandId: 'b1', position: 2, lane: 'publicidad', title: 'Leche' });
+  const viejo = construirTraza({ meta: { id: 'auto-2', type: 'video', tags: ['tiktok', 'horizontal'], externalRef: 'auto-2', catalogo: { id: 'alcampo-2026-09-10', cliente: 'alcampo', producto: 'langostino-cocido', desde: '2026-09-10', hasta: '2026-09-23' } }, status: null });
+  assert.equal(viejo.origen.tipo, 'catalogo'); assert.equal(viejo.origen.producto, 'langostino-cocido'); assert.equal(viejo.origen.horizontal, true); assert.equal(viejo.estado, 'en_stock');
   const ant = construirTraza({ meta, status, nowPorPantalla: { 'xtore-escaparate-pn1w': { item: { id: 'auto-1', ts: 5, title: 'Leche' } } } });
   assert.equal(ant.estado, 'en_antena'); assert.equal(ant.emision[0].screen, 'xtore-escaparate-pn1w');
 });
