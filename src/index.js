@@ -1342,30 +1342,37 @@ async function gridSyncTaggedStock(env, stockItems) {
     .filter(x => x && x.id && x.url && (x.type === 'image' || x.type === 'video'))
     .sort((a, z) => String(z.createdAt || '').localeCompare(String(a.createdAt || '')));
   const date = gridNow().ymd, results = [];
-  // VÍA 1: objetivos fijos + extra (KV grid:tag-targets); una pieza casa por etiqueta, por cliente de catálogo o por segmento.
+  // VÍA 1 (FLT-100477): objetivos fijos + extra (KV grid:tag-targets). Una pieza casa por etiqueta, por
+  // cliente de catálogo o por segmento. Los objetivos que comparten pantalla+carril forman UN cupo:
+  // sus piezas (≤5 por objetivo) se reparten por los slots del carril de forma consecutiva a lo largo
+  // de las bandas (antes cada banda repetía las mismas 5 piezas y un segundo objetivo no cabía nunca).
   const objetivos = objetivosDeReparto(GRID_TAG_TARGETS, await gridLeerObjetivosExtra(env));
-  // Varios objetivos pueden compartir pantalla+carril: cada uno ocupa los slots que siguen a los del anterior.
-  const ocupados = new Map();
+  const grupos = new Map();
   for (const target of objetivos) {
     const clave = claveObjetivo(target);
-    const claveCarril = `${target.screen}|${target.lane}`;
     const porId = new Map();
     const tagged = items.filter(x => { const por = motivoDeReparto(x, target); if (por) porId.set(String(x.id), por); return !!por; }).slice(0, 5);
-    const ensured = await gridEnsureDailyTaggedRundown(env, target.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
-    let laneSlots = 0;
-    for (const band of (await gridGetConfig(env, target.screen)).bands) {
-      const slots = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === target.lane)
+    const k = `${target.screen}|${target.lane}`;
+    if (!grupos.has(k)) grupos.set(k, { screen: target.screen, lane: target.lane, entradas: [], claves: new Set(), targets: [] });
+    const g = grupos.get(k);
+    g.claves.add(clave);
+    g.targets.push({ target, clave, tagged, porId, placed: 0 });
+    for (const stock of tagged) g.entradas.push({ stock, clave, por: porId.get(String(stock.id)) || 'tag', t: g.targets[g.targets.length - 1] });
+  }
+  for (const g of grupos.values()) {
+    const ensured = await gridEnsureDailyTaggedRundown(env, g.screen, date), bookings = ensured.bookings, before = JSON.stringify(bookings);
+    let laneSlots = 0, cursor = 0;
+    for (const band of (await gridGetConfig(env, g.screen)).bands) {
+      const slots = bookings.filter(x => x.bandId === band.id && x.playlistId === GRID_TAG_PLAYLIST && x.lane === g.lane)
         .sort((a, z) => (+a.position || 0) - (+z.position || 0));
       const overridesByContent = new Map(slots.filter(x => x.titleOverride && x.titleOverrideFor).map(x => [String(x.titleOverrideFor), String(x.titleOverride).slice(0, 120)]));
       laneSlots += slots.length;
-      const claveBanda = `${claveCarril}|${band.id}`;
-      const offset = ocupados.get(claveBanda) || 0; // slots de esta banda ya ocupados por objetivos anteriores del mismo carril
-      ocupados.set(claveBanda, offset + Math.min(tagged.length, Math.max(0, slots.length - offset)));
       for (let i = 0; i < slots.length; i++) {
-        if (i < offset) continue;
-        const slot = slots[i], stock = tagged[i - offset];
-        if (stock) {
-          if (!slot.tagFallback && slot.sourceTag !== clave) {
+        const slot = slots[i];
+        const entrada = g.entradas.length ? g.entradas[cursor++ % g.entradas.length] : null;
+        if (entrada) {
+          const stock = entrada.stock, clave = entrada.clave;
+          if (!slot.tagFallback && !g.claves.has(slot.sourceTag)) {
             slot.tagFallback = { title: slot.title, advertiser: slot.advertiser, category: slot.category, creative: slot.creative };
           }
           const stockTitle = stock.title || stock.prompt || ('Pixeria #' + (stock.num || stock.id));
@@ -1373,26 +1380,30 @@ async function gridSyncTaggedStock(env, stockItems) {
           if (carriedTitle) { slot.titleOverride = carriedTitle; slot.titleOverrideFor = contentKey; }
           else { delete slot.titleOverride; delete slot.titleOverrideFor; }
           slot.title = String(carriedTitle || stockTitle).slice(0, 120);
-          slot.advertiser = target.lane === 'municipal' ? 'Ajuntament de Gràcia' : 'Pixeria'; slot.category = target.lane;
+          slot.advertiser = g.lane === 'municipal' ? 'Ajuntament de Gràcia' : (stock.catalogo && stock.catalogo.cliente ? String(stock.catalogo.cliente).slice(0, 80) : 'Pixeria'); slot.category = g.lane;
           slot.creative = { type: stock.type, url: String(stock.url).slice(0, 500), name: slot.title };
-          slot.stockId = String(stock.id); slot.sourceTag = clave;
-        } else if (slot.sourceTag === clave) {
-          const fallback = slot.tagFallback || (target.lane === 'municipal'
+          slot.stockId = String(stock.id); slot.sourceTag = clave; slot.por = entrada.por;
+          entrada.t.placed++;
+        } else if (slot.sourceTag && g.claves.has(slot.sourceTag)) {
+          const fallback = slot.tagFallback || (g.lane === 'municipal'
             ? { title: 'Contenido del Ayuntamiento', advertiser: 'Ajuntament de Gràcia', category: 'municipal', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/sabias.svg', name: 'Contenido del Ayuntamiento' } }
-            : { title: 'Publicidad local ' + String.fromCharCode(65 + i), advertiser: 'Publicidad local', category: 'publicidad', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: 'Publicidad local' } });
+            : { title: 'Publicidad local ' + String.fromCharCode(65 + (i % 26)), advertiser: 'Publicidad local', category: 'publicidad', creative: { type: 'image', url: 'https://admira.tv/parrilla/assets/publicidad.svg', name: 'Publicidad local' } });
           slot.title = fallback.title; slot.advertiser = fallback.advertiser; slot.category = fallback.category; slot.creative = fallback.creative;
-          delete slot.stockId; delete slot.sourceTag; delete slot.tagFallback;
+          delete slot.stockId; delete slot.sourceTag; delete slot.tagFallback; delete slot.por;
         }
       }
     }
     const changed = JSON.stringify(bookings) !== before;
-    if (changed) await gridPutBookings(env, target.screen, date, bookings);
-    results.push({ screen: target.screen, tag: target.tag ? '#' + target.tag : clave, clave, cliente: target.cliente || null, audience: target.audience || null, age: target.age || null, lane: target.lane, matched: tagged.length, laneSlots, adSlots: target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type, por: porId.get(String(x.id)) || 'tag' })) });
+    if (changed) await gridPutBookings(env, g.screen, date, bookings);
+    for (const t of g.targets) {
+      results.push({ screen: t.target.screen, tag: t.target.tag ? '#' + t.target.tag : t.clave, clave: t.clave, cliente: t.target.cliente || null, audience: t.target.audience || null, age: t.target.age || null, lane: t.target.lane, matched: t.tagged.length, placed: t.placed, laneSlots, adSlots: t.target.lane === 'publicidad' ? laneSlots : 0, carried: ensured.carried, changed, items: t.tagged.map(x => ({ id: x.id, num: x.num || null, title: x.title || x.prompt || x.id, type: x.type, por: t.porId.get(String(x.id)) || 'tag' })) });
+    }
   }
   const status = { ok: true, date: gridFmtDate(date), syncedAt: Date.now(), targets: results };
   await env.SIGNAGE_KV.put('grid:tag-sync:status', JSON.stringify(status).slice(0, 16000));
   return status;
 }
+
 async function gridReadStockIndex(env) {
   if (!env.STOCK_BUCKET) return [];
   try { const obj = await env.STOCK_BUCKET.get('stock/index.json'); const data = obj ? await obj.json() : null; return Array.isArray(data) ? data : ((data && data.items) || []); } catch { return []; }
