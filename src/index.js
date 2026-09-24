@@ -2321,6 +2321,12 @@ async function npcSpawnHandler(req, env) {
   // name puede traer la AUDIENCIA empaquetada ("Anónimo||{json sex/age/desc}") → 300
   // chars para que el JSON del segmento NO se trunque (antes 40 lo partía).
   const entry = { id, img, ts: Date.now(), name: String(b.name || '').slice(0, 300), screen: String(b.screen || '').slice(0, 40) };
+  // Persona realista (+ NPC 16-bit) del Anonimizador → R2, nunca en KV. El gemelo
+  // la convierte en visitante para 16/32/64 bits (ver /twin/persona*).
+  if (b.persona && env.STOCK_BUCKET) {
+    const saved = await personaStoreInputs(env, id, b).catch(() => false);
+    if (saved) entry.persona = true;
+  }
   let q; try { q = JSON.parse((await env.SIGNAGE_KV.get(NPC_QUEUE_KEY)) || '[]'); } catch { q = []; }
   q.push(entry); q = q.slice(-30); // cap defensivo
   await env.SIGNAGE_KV.put(NPC_QUEUE_KEY, JSON.stringify(q));
@@ -2362,6 +2368,147 @@ async function npcStatusHandler(req, env, url) {
   if (!id) return json({ error: 'bad-id' }, { status: 400 });
   let a = null; try { a = JSON.parse((await env.SIGNAGE_KV.get(NPC_ACK_PREFIX + id)) || 'null'); } catch { a = null; }
   return json({ ok: true, consumed: !!a, at: (a && a.at) || null, screen: (a && a.screen) || null });
+}
+
+// ─── Personas Pixeria → gemelo en 8/16/32/64 bits (24-sep-2026 · NeoMBP14) ──
+// Una persona del Anonimizador se convierte UNA vez en paquete para todos los
+// modos: ficha (sexo/edad/paleta/peinado/ropa, visión de Grok) para 16 y 32 bits
+// y rejillas de caminata 3x3 (frente/espaldas) para Matrix 64 bits, vistiendo el
+// cuerpo base de XpaceOS con grok-imagine. Todo en R2 (personas/<id>/…); cada
+// paso se ejecuta una sola vez con cerrojo en el manifiesto (varias tiendas
+// abiertas no lo duplican). El recorte/alineado del croma lo hace el gemelo.
+const PERSONA_PREFIX = 'personas/';
+const PERSONA_BASE = 'https://www.xpaceos.com/admira-xp/assets/people/matrix-walk/';
+const PERSONA_STEPS = ['describe', 'front', 'back'];
+const PERSONA_LOCK_MS = 180000;
+function personaDataUrl(s, max) {
+  const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/s.exec(String(s || ''));
+  if (!m || m[2].length > max) return null;
+  return { mime: m[1], bytes: b64ToBytes(m[2]), ext: m[1] === 'image/png' ? 'png' : m[1] === 'image/webp' ? 'webp' : 'jpg' };
+}
+async function personaManifest(env, id) {
+  const o = await env.STOCK_BUCKET.get(PERSONA_PREFIX + id + '/manifest.json');
+  return o ? o.json() : null;
+}
+async function personaSave(env, id, m) {
+  await env.STOCK_BUCKET.put(PERSONA_PREFIX + id + '/manifest.json', JSON.stringify(m), { httpMetadata: { contentType: 'application/json' } });
+}
+async function personaStoreInputs(env, id, b) {
+  const persona = personaDataUrl(b.persona, 3000000);
+  if (!persona) return false;
+  await env.STOCK_BUCKET.put(`${PERSONA_PREFIX}${id}/persona.${persona.ext}`, persona.bytes, { httpMetadata: { contentType: persona.mime } });
+  const npc16 = personaDataUrl(b.npc16, 1500000);
+  if (npc16) await env.STOCK_BUCKET.put(`${PERSONA_PREFIX}${id}/npc16.${npc16.ext}`, npc16.bytes, { httpMetadata: { contentType: npc16.mime } });
+  let seg = null; const raw = String(b.name || ''), sep = raw.indexOf('||');
+  if (sep >= 0) { try { seg = JSON.parse(raw.slice(sep + 2)); } catch {} }
+  await personaSave(env, id, { id, created: Date.now(), inputs: { persona: `persona.${persona.ext}`, npc16: npc16 ? `npc16.${npc16.ext}` : null }, seg, steps: {}, style: null, body: null, walk: {} });
+  return true;
+}
+function personaPublic(m, origin) {
+  const file = name => name ? `${origin}/twin/persona/file?id=${encodeURIComponent(m.id)}&name=${encodeURIComponent(name)}` : null;
+  const ready = PERSONA_STEPS.every(s => m.steps?.[s]?.done);
+  return { ok: true, id: m.id, ready, steps: m.steps, style: m.style, body: m.body, seg: m.seg,
+    persona: file(m.inputs?.persona), npc16: file(m.inputs?.npc16),
+    walk: { front: file(m.walk?.front), back: file(m.walk?.back) },
+    base: m.body ? { sheet: `${PERSONA_BASE}base-${m.body}.webp` } : null };
+}
+async function personaGetHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  const id = String(url.searchParams.get('id') || '').slice(0, 40);
+  if (!/^npc_[a-z0-9-]{4,}$/i.test(id)) return json({ error: 'bad-id' }, { status: 400 });
+  const m = await personaManifest(env, id);
+  if (!m) return json({ ok: false, error: 'no-persona' }, { status: 404 });
+  return json(personaPublic(m, url.origin));
+}
+async function personaFileHandler(req, env, url) {
+  const id = String(url.searchParams.get('id') || '').slice(0, 40), name = String(url.searchParams.get('name') || '');
+  if (!/^npc_[a-z0-9-]{4,}$/i.test(id) || !/^(persona|npc16|walk-front|walk-back)\.(png|jpg|webp)$/.test(name)) return json({ error: 'bad-file' }, { status: 400 });
+  const o = await env.STOCK_BUCKET.get(PERSONA_PREFIX + id + '/' + name);
+  if (!o) return json({ error: 'not-found' }, { status: 404 });
+  const h = new Headers(corsHeaders(req));
+  h.set('Content-Type', o.httpMetadata?.contentType || 'image/jpeg');
+  h.set('Cache-Control', 'public, max-age=31536000, immutable');
+  return new Response(o.body, { headers: h });
+}
+function personaBody(style) {
+  const child = style?.age === 'child', female = style?.gender === 'f';
+  return `${child ? 'child-' : ''}${female ? 'female' : 'male'}`;
+}
+async function personaImageB64(env, id, name) {
+  const o = await env.STOCK_BUCKET.get(PERSONA_PREFIX + id + '/' + name);
+  if (!o) throw new Error('missing ' + name);
+  return `data:${o.httpMetadata?.contentType || 'image/jpeg'};base64,${bytesToB64(new Uint8Array(await o.arrayBuffer()))}`;
+}
+async function personaDescribe(env, m) {
+  const img = await personaImageB64(env, m.id, m.inputs.persona);
+  const prompt = 'Describe the visible person for a retail digital twin. Reply ONLY with JSON: {"gender":"m|f","age":"child|adult|senior",'
+    + '"skin":"#hex","hair":"#hex","top":"#hex","bottom":"#hex","shoes":"#hex","hairstyle":"short|long|curly|bob|bald|ponytail",'
+    + '"outfit":"tshirt|shirt|jacket|suit|dress|knit|coat","accessory":"none|glasses|cap|backpack|headphones|bag",'
+    + '"look":"one short English sentence describing hair, facial hair and full outfit with colours"}';
+  const r = await fetch('https://api.x.ai/v1/chat/completions', { method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-4-fast-non-reasoning', temperature: 0,
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: img } }, { type: 'text', text: prompt }] }] }) });
+  const d = await r.json().catch(() => ({}));
+  const text = d?.choices?.[0]?.message?.content || '';
+  const j = JSON.parse((/\{[\s\S]*\}/.exec(text) || ['{}'])[0]);
+  const hex = v => /^#[0-9a-f]{6}$/i.test(v || '') ? v : null;
+  // La segmentación elegida en Pixeria manda sobre lo que "ve" el modelo.
+  const segSex = m.seg?.sex === 'male' || m.seg?.sex === 'hombre' ? 'm' : m.seg?.sex === 'female' || m.seg?.sex === 'mujer' ? 'f' : null;
+  const style = { gender: segSex || (j.gender === 'f' ? 'f' : 'm'), age: ['child', 'adult', 'senior'].includes(j.age) ? j.age : 'adult',
+    hairstyle: String(j.hairstyle || 'short').slice(0, 12), outfit: String(j.outfit || 'tshirt').slice(0, 12), accessory: String(j.accessory || 'none').slice(0, 12),
+    height: 1, width: 1, look: String(j.look || '').slice(0, 240),
+    palette: { skin: hex(j.skin) || '#c9a283', hair: hex(j.hair) || '#3b3028', color: hex(j.top) || '#8a8a8a', pants: hex(j.bottom) || '#4a4a4a', shoes: hex(j.shoes) || '#2a2a2a' } };
+  m.style = style; m.body = personaBody(style);
+}
+async function personaWalk(env, m, view) {
+  const gridUrl = `${PERSONA_BASE}grid-${m.body}-${view}.jpg`;
+  const gr = await fetch(gridUrl); if (!gr.ok) throw new Error('grid ' + gr.status);
+  const grid = `data:image/jpeg;base64,${bytesToB64(new Uint8Array(await gr.arrayBuffer()))}`;
+  const persona = await personaImageB64(env, m.id, m.inputs.persona);
+  const prompt = `Image 1 is a 3x3 grid of the same walking body in grey placeholder clothes, seen from the ${view} three-quarter view from above. `
+    + `Image 2 is a reference person (${m.style?.look || 'the person in image 2'}). Repaint every figure in image 1 as a hyperrealistic photograph of that person: `
+    + 'same face type, age, hair, facial hair, skin tone, and the same full outfit and colours from image 2. Keep EXACTLY the 9 poses, leg positions, '
+    + 'positions in the grid, sizes, camera angle and grid layout of image 1. Same person in all 9 cells. Do not add items that are not in image 2. '
+    + 'Flat pure chroma green (#00FF00) background everywhere, no floor, no shadows, no text, no borders.';
+  const r = await fetch('https://api.x.ai/v1/images/edits', { method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'grok-imagine-image-quality', prompt, response_format: 'b64_json',
+      images: [{ url: grid, type: 'image_url' }, { url: persona, type: 'image_url' }] }) });
+  const d = await r.json().catch(() => ({}));
+  const b64 = d?.data?.[0]?.b64_json;
+  if (!r.ok || !b64) throw new Error('xai ' + r.status + ' ' + String(d?.error || '').slice(0, 120));
+  const name = `walk-${view}.jpg`;
+  await env.STOCK_BUCKET.put(PERSONA_PREFIX + m.id + '/' + name, b64ToBytes(b64), { httpMetadata: { contentType: d.data[0].mime_type || 'image/jpeg' } });
+  m.walk = { ...(m.walk || {}), [view]: name };
+}
+async function personaBuildHandler(req, env, url) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
+  const id = String(url.searchParams.get('id') || '').slice(0, 40), step = String(url.searchParams.get('step') || '');
+  if (!/^npc_[a-z0-9-]{4,}$/i.test(id) || !PERSONA_STEPS.includes(step)) return json({ error: 'bad-request' }, { status: 400 });
+  let m = await personaManifest(env, id);
+  if (!m) return json({ ok: false, error: 'no-persona' }, { status: 404 });
+  const state = m.steps?.[step];
+  if (state?.done) return json(personaPublic(m, url.origin));
+  if (step !== 'describe' && !m.steps?.describe?.done) return json({ ok: false, error: 'describe-first' }, { status: 409 });
+  if (state?.claimed && Date.now() - state.claimed < PERSONA_LOCK_MS) return json({ ok: false, busy: true, ...personaPublic(m, url.origin) }, { status: 202 });
+  m.steps = { ...(m.steps || {}), [step]: { claimed: Date.now() } };
+  await personaSave(env, id, m);
+  try {
+    if (step === 'describe') await personaDescribe(env, m); else await personaWalk(env, m, step);
+    m.steps[step] = { done: Date.now() };
+  } catch (e) {
+    m.steps[step] = { failed: Date.now(), error: String(e?.message || e).slice(0, 160) };
+    await personaSave(env, id, m);
+    return json({ ok: false, error: 'step-failed', step, detail: m.steps[step].error }, { status: 502 });
+  }
+  // Releer para no pisar un paso que otra tienda terminó mientras tanto.
+  const fresh = await personaManifest(env, id) || m;
+  fresh.steps = { ...(fresh.steps || {}), [step]: m.steps[step] };
+  if (step === 'describe') { fresh.style = m.style; fresh.body = m.body; } else fresh.walk = { ...(fresh.walk || {}), ...m.walk };
+  await personaSave(env, id, fresh);
+  return json(personaPublic(fresh, url.origin));
 }
 
 // ─── Proxy de imágenes externas para el editor de pixeria ──────────
@@ -7577,6 +7724,12 @@ export default {
         res = await npcAckHandler(req, env);
       } else if (path === '/twin/spawn/status' && req.method === 'GET') {
         res = await npcStatusHandler(req, env, url);
+      } else if (path === '/twin/persona' && req.method === 'GET') {
+        res = await personaGetHandler(req, env, url);
+      } else if (path === '/twin/persona/file' && req.method === 'GET') {
+        res = await personaFileHandler(req, env, url);
+      } else if (path === '/twin/persona/build' && req.method === 'POST') {
+        res = await personaBuildHandler(req, env, url);
       } else if (path === '/image/proxy' && req.method === 'GET') {
         res = await imageProxyHandler(req);
       } else if (path === '/xai/video' && req.method === 'POST') {
