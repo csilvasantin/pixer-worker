@@ -2462,7 +2462,7 @@ async function personaDescribe(env, m) {
   m.style = style; m.body = personaBody(style);
 }
 async function personaWalk(env, m, view) {
-  const gridUrl = `${PERSONA_BASE}grid-${m.body}-${view}.jpg`;
+  const gridUrl = `${env.PERSONA_BASE || PERSONA_BASE}grid-${m.body}-${view}.jpg`;
   const gr = await fetch(gridUrl); if (!gr.ok) throw new Error('grid ' + gr.status);
   const grid = `data:image/jpeg;base64,${bytesToB64(new Uint8Array(await gr.arrayBuffer()))}`;
   const persona = await personaImageB64(env, m.id, m.inputs.persona);
