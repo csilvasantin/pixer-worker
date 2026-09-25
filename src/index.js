@@ -1,4 +1,16 @@
 import { gridCircuitsHandler } from './grid-circuits.mjs';
+import { authorizePaidGeneration, isPaidGeneration } from './paid-auth.mjs';
+import {
+  CLIP_SECONDS,
+  archiveBody,
+  dataUrlFromImageField,
+  durationError,
+  normalizeScenes,
+  pollFinished,
+  providerVideoUrl,
+  stockImageDataUrl,
+  xaiClipPayload,
+} from './clip-from-image.mjs';
 import {
   classifyHttpNotification,
   flushNotificationAggregates,
@@ -91,14 +103,14 @@ function corsHeaders(req) {
     'Access-Control-Allow-Methods': 'POST, GET, PATCH, DELETE, OPTIONS',
     // X-AdmiraNeXT-Ingest / X-Notify-Key: sin ellas el preflight de las galerías
     // (PATCH /stock/:id/meta, DELETE con clave) fallaba en el navegador (12-sep-2026).
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AdmiraNeXT-Ingest, X-Notify-Key',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AdmiraNeXT-Ingest, X-Notify-Key, X-Fleet-Key, X-Auth-Probe',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   };
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.24.09.2026.r1.13:27';
+const WORKER_VERSION = 'v.25.09.2026.r1.09:35';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -1901,18 +1913,69 @@ async function xaiVideoStartHandler(req, env) {
   const { prompt, duration = 8, aspect_ratio = '16:9', resolution = '720p' } = body;
   if (!prompt || typeof prompt !== 'string') return json({ error: 'missing-prompt' }, { status: 400 });
   if (prompt.length > 4000) return json({ error: 'prompt-too-long', max: 4000 }, { status: 400 });
-  const dur = Math.max(1, Math.min(15, parseInt(duration, 10) || 8));
+  const durErr = durationError(body);
+  if (durErr) return json(durErr, { status: 400 });
+  let imageUrl = '';
+  if (body.image || body.stock_id || body.stockId) {
+    const resolved = body.image
+      ? dataUrlFromImageField(body.image)
+      : await stockImageDataUrl(env, body.stock_id || body.stockId);
+    if (resolved.error) return json(resolved, { status: resolved.error === 'image-too-big' ? 413 : 400 });
+    imageUrl = resolved.url;
+  }
+  const dur = imageUrl ? CLIP_SECONDS : Math.max(1, Math.min(15, parseInt(duration, 10) || 8));
+  const payload = imageUrl
+    ? xaiClipPayload({ prompt, imageUrl, aspect: aspect_ratio, resolution })
+    : { model: 'grok-imagine-video', prompt, duration: dur, aspect_ratio, resolution };
 
   const r = await fetch('https://api.x.ai/v1/videos/generations', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'grok-imagine-video', prompt, duration: dur, aspect_ratio, resolution }),
+    body: JSON.stringify(payload),
   });
   const data = await r.json().catch(() => ({}));
+  if (imageUrl && r.ok && data.request_id) await rememberClip(env, data.request_id, prompt, 'Clip 5s');
   return json(data, { status: r.status });
 }
 
-async function xaiVideoPollHandler(req, env, requestId) {
+async function rememberClip(env, requestId, prompt, title) {
+  if (!env.SIGNAGE_KV || !requestId) return;
+  await env.SIGNAGE_KV.put('clipjob:' + requestId, JSON.stringify({
+    prompt: String(prompt || '').slice(0, 500),
+    title: String(title || 'Clip 5s').slice(0, 120),
+    at: Date.now(),
+  }), { expirationTtl: 6 * 3600 });
+}
+
+async function xaiVideoScenesHandler(req, env) {
+  if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
+  let body;
+  try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const norm = normalizeScenes(body);
+  if (norm.error) return json(norm, { status: 400 });
+  const aspect = body.aspect_ratio === '9:16' ? '9:16' : '16:9';
+  const started = [];
+  for (const scene of norm.scenes) {
+    const resolved = scene.image
+      ? dataUrlFromImageField(scene.image)
+      : await stockImageDataUrl(env, scene.stock_id);
+    if (resolved.error) return json({ ...resolved, index: scene.index }, { status: resolved.error === 'image-too-big' ? 413 : 400 });
+    const r = await fetch('https://api.x.ai/v1/videos/generations', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(xaiClipPayload({ prompt: scene.text, imageUrl: resolved.url, aspect })),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.request_id) {
+      return json({ error: 'scene-failed', index: scene.index, status: r.status }, { status: 502 });
+    }
+    await rememberClip(env, data.request_id, scene.text, `Escena ${scene.index + 1}`);
+    started.push({ index: scene.index, request_id: data.request_id, duration: CLIP_SECONDS });
+  }
+  return json({ ok: true, duration: CLIP_SECONDS, scenes: started });
+}
+
+async function xaiVideoPollHandler(req, env, ctx, requestId) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return json({ error: 'bad-request-id' }, { status: 400 });
 
@@ -1920,6 +1983,26 @@ async function xaiVideoPollHandler(req, env, requestId) {
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}` },
   });
   const data = await r.json().catch(() => ({}));
+  if (r.ok && pollFinished(data) && env.SIGNAGE_KV) {
+    const raw = await env.SIGNAGE_KV.get('clipjob:' + requestId);
+    if (raw) {
+      let job = {};
+      try { job = JSON.parse(raw); } catch { job = {}; }
+      const src = providerVideoUrl(data);
+      if (!src) return json({ error: 'archive-failed', request_id: requestId, detail: 'sin-url' }, { status: 502 });
+      const pub = await stockPublishHandler(new Request('https://api.admira.store/stock/publish', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(archiveBody({ providerUrl: src, prompt: job.prompt, title: job.title })),
+      }), env, ctx || { waitUntil() {} });
+      const saved = await pub.json().catch(() => ({}));
+      if (!pub.ok || !saved.url) {
+        return json({ error: 'archive-failed', request_id: requestId, detail: saved.error || pub.status }, { status: 502 });
+      }
+      await env.SIGNAGE_KV.delete('clipjob:' + requestId);
+      return json({ status: 'done', archived: true, id: saved.id, url: saved.url, video: { url: saved.url } });
+    }
+  }
   return json(data, { status: r.status });
 }
 
@@ -7579,7 +7662,14 @@ export default {
     const t0 = Date.now();
     let res;
     try {
-      if (path === '/healthz') {
+      if (isPaidGeneration(req.method, path)) {
+        const auth = await authorizePaidGeneration(req, env);
+        if (!auth.ok) res = json({ error: 'unauthorized' }, { status: 401 });
+        else if (req.headers.get('X-Auth-Probe') === '1') res = json({ ok: true, via: auth.via });
+      }
+      if (res) {
+        // La puerta de generación de pago ya contestó.
+      } else if (path === '/healthz') {
         res = json({ ok: true, version: WORKER_VERSION, hasPosterKey: !!env.STOCK_POSTER_KEY, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV, notificationAggregatorAvailable: !!env.SIGNAGE_KV });
       } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
         res = grokLatestHandler();
@@ -7732,11 +7822,13 @@ export default {
         res = await personaBuildHandler(req, env, url);
       } else if (path === '/image/proxy' && req.method === 'GET') {
         res = await imageProxyHandler(req);
+      } else if (path === '/xai/video/scenes' && req.method === 'POST') {
+        res = await xaiVideoScenesHandler(req, env);
       } else if (path === '/xai/video' && req.method === 'POST') {
         res = await xaiVideoStartHandler(req, env);
       } else if (path.startsWith('/xai/video/') && req.method === 'GET') {
         const id = path.slice('/xai/video/'.length);
-        res = await xaiVideoPollHandler(req, env, id);
+        res = await xaiVideoPollHandler(req, env, ctx, id);
       } else if (path === '/pvideo' && req.method === 'GET') {
         res = await pollinationsVideoHandler(req, env, url);
       } else if (path === '/lyria/generate' && req.method === 'POST') {
