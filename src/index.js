@@ -2397,6 +2397,7 @@ const NPC_QUEUE_KEY = 'twin:spawn:queue';
 async function npcSpawnHandler(req, env) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  if (b.demo_id && b.demo_id !== 'visitor-green-v1') return json({error:'unknown-demo'}, {status:400});
   const img = String(b.image || '');
   if (!/^data:image\//.test(img)) return json({ error: 'bad-image' }, { status: 400 });
   if (img.length > 1500000) return json({ error: 'image-too-big' }, { status: 413 });
@@ -2482,16 +2483,24 @@ async function personaStoreInputs(env, id, b) {
   await env.STOCK_BUCKET.put(`${PERSONA_PREFIX}${id}/persona.${persona.ext}`, persona.bytes, { httpMetadata: { contentType: persona.mime } });
   const npc16 = personaDataUrl(b.npc16, 1500000);
   if (npc16) await env.STOCK_BUCKET.put(`${PERSONA_PREFIX}${id}/npc16.${npc16.ext}`, npc16.bytes, { httpMetadata: { contentType: npc16.mime } });
+  const npc32 = personaDataUrl(b.npc32, 1500000);
+  if (npc32) await env.STOCK_BUCKET.put(`${PERSONA_PREFIX}${id}/npc32.${npc32.ext}`, npc32.bytes, {httpMetadata:{contentType:npc32.mime}});
+  const demo = b.demo_id === 'visitor-green-v1';
   let seg = null; const raw = String(b.name || ''), sep = raw.indexOf('||');
   if (sep >= 0) { try { seg = JSON.parse(raw.slice(sep + 2)); } catch {} }
-  await personaSave(env, id, { id, created: Date.now(), inputs: { persona: `persona.${persona.ext}`, npc16: npc16 ? `npc16.${npc16.ext}` : null }, seg, steps: {}, style: null, body: null, walk: {} });
+  await personaSave(env, id, { id, created: Date.now(), demo: demo ? b.demo_id : null,
+    inputs: { persona: `persona.${persona.ext}`, npc16: npc16 ? `npc16.${npc16.ext}` : null, npc32: npc32 ? `npc32.${npc32.ext}` : null }, seg,
+    steps: demo ? {describe:{done:Date.now()}} : {},
+    style: demo ? {gender:'m',age:'adult',hairstyle:'curly',outfit:'jacket',accessory:'none',height:1,width:1,
+      palette:{skin:'#c99b78',hair:'#35251d',color:'#193d30',pants:'#343438',shoes:'#eeede5'}} : null,
+    body: demo ? 'male' : null, walk: {} });
   return true;
 }
 function personaPublic(m, origin) {
   const file = name => name ? `${origin}/twin/persona/file?id=${encodeURIComponent(m.id)}&name=${encodeURIComponent(name)}` : null;
-  const ready = PERSONA_STEPS.every(s => m.steps?.[s]?.done);
-  return { ok: true, id: m.id, ready, steps: m.steps, style: m.style, body: m.body, seg: m.seg,
-    persona: file(m.inputs?.persona), npc16: file(m.inputs?.npc16),
+  const ready = !!m.demo || PERSONA_STEPS.every(s => m.steps?.[s]?.done);
+  return { ok: true, id: m.id, ready, demo: m.demo || null, steps: m.steps, style: m.style, body: m.body, seg: m.seg,
+    persona: file(m.inputs?.persona), npc16: file(m.inputs?.npc16), npc32: file(m.inputs?.npc32),
     walk: { front: file(m.walk?.front), back: file(m.walk?.back) },
     base: m.body ? { sheet: `${PERSONA_BASE}base-${m.body}.webp` } : null };
 }
@@ -2505,7 +2514,7 @@ async function personaGetHandler(req, env, url) {
 }
 async function personaFileHandler(req, env, url) {
   const id = String(url.searchParams.get('id') || '').slice(0, 40), name = String(url.searchParams.get('name') || '');
-  if (!/^npc_[a-z0-9-]{4,}$/i.test(id) || !/^(persona|npc16|walk-front|walk-back)\.(png|jpg|webp)$/.test(name)) return json({ error: 'bad-file' }, { status: 400 });
+  if (!/^npc_[a-z0-9-]{4,}$/i.test(id) || !/^(persona|npc16|npc32|walk-front|walk-back)\.(png|jpg|webp)$/.test(name)) return json({ error: 'bad-file' }, { status: 400 });
   const o = await env.STOCK_BUCKET.get(PERSONA_PREFIX + id + '/' + name);
   if (!o) return json({ error: 'not-found' }, { status: 404 });
   const h = new Headers(corsHeaders(req));
@@ -2572,6 +2581,7 @@ async function personaBuildHandler(req, env, url) {
   if (!/^npc_[a-z0-9-]{4,}$/i.test(id) || !PERSONA_STEPS.includes(step)) return json({ error: 'bad-request' }, { status: 400 });
   let m = await personaManifest(env, id);
   if (!m) return json({ ok: false, error: 'no-persona' }, { status: 404 });
+  if (m.demo) return json(personaPublic(m, url.origin));
   const state = m.steps?.[step];
   if (state?.done) return json(personaPublic(m, url.origin));
   if (step !== 'describe' && !m.steps?.describe?.done) return json({ ok: false, error: 'describe-first' }, { status: 409 });

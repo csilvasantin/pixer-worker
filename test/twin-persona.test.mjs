@@ -69,3 +69,18 @@ test('spawns without a persona keep the old 8-bit-only behaviour', async () => {
   assert.ok(r.ok); assert.equal([...e.r2.keys()].length, 0);
   assert.equal((await call(e, 'GET', `/twin/persona?id=${r.id}`)).status, 404);
 });
+
+test('prepared demo carries 16/32 assets and never invokes generation', async () => {
+  const e = env(), before = calls.length;
+  const result = await (await call(e,'POST','/twin/spawn',{image:png,persona:png,npc16:png,npc32:png,demo_id:'visitor-green-v1'})).json();
+  const id=result.id, manifest=await (await call(e,'GET',`/twin/persona?id=${id}`)).json();
+  assert.equal(manifest.demo,'visitor-green-v1'); assert.equal(manifest.ready,true);
+  assert.equal(manifest.style.palette.color,'#193d30');assert.match(manifest.npc32,/npc32.png/);
+  for(const step of ['describe','front','back'])await call(e,'POST',`/twin/persona/build?id=${id}&step=${step}`);
+  assert.equal(calls.length,before);
+  assert.equal((await call(e,'GET',`/twin/persona/file?id=${id}&name=npc32.png`)).status,200);
+  assert.equal((await (await call(e,'GET',`/twin/spawn/status?id=${id}`)).json()).consumed,false);
+  await call(e,'POST','/twin/spawn/ack',{id,screen:'demo-test'});
+  assert.equal((await (await call(e,'GET',`/twin/spawn/status?id=${id}`)).json()).consumed,true);
+  assert.equal((await call(e,'POST','/twin/spawn',{image:png,demo_id:'unknown'})).status,400);
+});
