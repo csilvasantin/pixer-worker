@@ -2,6 +2,11 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.04.10.2026.r1 — Orígenes de admira.biz (intercambio de dominios, paso 1)
+- `ALLOWED_ORIGINS` admite `https://admira.biz` y `https://www.admira.biz`, que pasarán a
+  servir la parte de negocio hoy en admira.app. admira.app se mantiene para que todo
+  funcione antes y después del corte.
+
 ## v.12.09.2026.r2 — Póster representativo y validación de vídeos (Yokup #3199)
 - Por qué: admira.tv/contentcatalogue enseñaba el previo del «Langostino cocido» en
   NEGRO. El máster no era negro: solo su fotograma 0 (relleno `#020508` del canvas

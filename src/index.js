@@ -79,6 +79,9 @@ const ALLOWED_ORIGINS = [
   'https://www.clearchannel.tv',
   'https://admira.app',
   'https://www.admira.app',
+  // admira.biz sirve la parte de negocio tras el intercambio de dominios con admira.app.
+  'https://admira.biz',
+  'https://www.admira.biz',
   'https://admira.live',
   'https://www.admira.live',
   'https://admira.tv',
@@ -110,7 +113,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.25.09.2026.r1.09:35';
+const WORKER_VERSION = 'v.04.10.2026.r1.00:46';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
