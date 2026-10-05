@@ -5239,7 +5239,7 @@ export async function stockPublishHandler(req, env, ctx) {
   const hashHint = isSha256Hex(body.contentHash) ? body.contentHash : null;
   const recentInput = externalId ? null : recentFingerprintInput({ title, motor, sourceUrl });
   const reusedResponse = (ownerId, reason, ownerMeta) => json({
-    ok: true, reused: true, reason, id: ownerId,
+    ok: true, reused: true, reason, id: ownerId, num: ownerMeta?.num || null,
     url: `${new URL(req.url).origin}/stock/asset/${ownerId}`,
     createdAt: (ownerMeta && ownerMeta.createdAt) || null,
     contentHash: (ownerMeta && ownerMeta.contentHash) || null,
