@@ -1,5 +1,5 @@
 name = "pixer-eleven"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2026-05-02"
 
 # Secrets se ponen con: npx wrangler secret put NOMBRE
