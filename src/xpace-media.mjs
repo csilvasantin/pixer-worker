@@ -38,7 +38,7 @@ async function archive(env,ctx,key,job,deps){
  const request=new Request('https://api.admira.store/stock/publish',{method:'POST',headers,body:JSON.stringify(body)});
  let response,data;
  try{response=await deps.publish(request,env,ctx);data=await response.json();}catch(_){response=null;}
- if(!response?.ok||!data?.ok||!data.id||!data.url){job.status='archiving';job.error='stock_pending';await save(env,key,job);return job;}
+ if(!response?.ok||!data?.ok||!data.id||!data.url){console.warn(JSON.stringify({event:'xpace_media_archive',id:job.id,kind:job.kind,status:response?.status||0,reason:/^[a-z0-9:_-]{1,80}$/i.test(data?.error||'')?data.error:'publish_failed'}));job.status='archiving';job.error='stock_pending';await save(env,key,job);return job;}
  job.status='done';job.stock={id:data.id,num:data.num||null,url:data.url,contentHash:data.contentHash||job.contentHash||null,mime:job.mime};
  delete job.base64;delete job.sourceUrl;delete job.providerId;delete job.error;
  await save(env,key,job);await unqueue(env,key);return job;
