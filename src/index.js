@@ -5512,15 +5512,19 @@ export async function stockPublishHandler(req, env, ctx) {
   const mbStr = (assetSize / 1024 / 1024).toFixed(2);
   const promptSnip = meta.prompt ? `\n💬 <i>${escHtml(meta.prompt.slice(0, 140))}${meta.prompt.length > 140 ? '…' : ''}</i>` : '';
   const commentSnip = meta.comment ? `\n📝 <i>${escHtml(String(meta.comment).slice(0, 140))}${meta.comment.length > 140 ? '…' : ''}</i>` : '';
-  const footer = await buildStatsFooter(env);
-  const tagsSnip = (meta.tags && meta.tags.length)
-    ? `\n🏷 ${meta.tags.map(t => '<code>#' + escHtml(t) + '</code>').join(' ')}`
-    : '';
-  const text = `📦 <b>STOCK PUBLISH</b>${replacing ? ' · sustituido' : ''} · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
-               `· ${mbStr} MB · ${escHtml(meta.mime)}\n` +
-               `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}${tagsSnip}` +
-               footer;
-  notify(ctx, env, text);
+  // Stock receipt is authoritative once the file/meta/hash are committed.
+  // Catalogue-wide statistics must not hold up the media response or PA playback.
+  ctx.waitUntil((async () => {
+    const footer = await buildStatsFooter(env);
+    const tagsSnip = (meta.tags && meta.tags.length)
+      ? `\n🏷 ${meta.tags.map(t => '<code>#' + escHtml(t) + '</code>').join(' ')}`
+      : '';
+    const text = `📦 <b>STOCK PUBLISH</b>${replacing ? ' · sustituido' : ''} · ${escHtml(meta.type)} · <code>${escHtml(meta.motor)}</code>\n` +
+                 `· ${mbStr} MB · ${escHtml(meta.mime)}\n` +
+                 `· <a href="${escHtml(publicUrl)}">ver asset</a>${promptSnip}${commentSnip}${tagsSnip}` +
+                 footer;
+    notify(ctx, env, text);
+  })().catch(() => {}));
 
   // ─── UNA CÁPSULA NACE CON SU VÍDEO ──────────────────────────────────────────
   // Una cápsula de conocimiento es texto: se lee, no se ve. Desde aquí se avisa al
