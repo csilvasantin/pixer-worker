@@ -1,3 +1,4 @@
+import {ttsCatalog} from './tts-catalog.mjs';
 import { gridCircuitsHandler } from './grid-circuits.mjs';
 import { authorizePaidGeneration, isPaidGeneration } from './paid-auth.mjs';
 import {
@@ -113,7 +114,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.04.10.2026.r1.00:46';
+const WORKER_VERSION = 'v.05.10.2026.r1.20:30';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -474,23 +475,26 @@ async function ttsHandler(req, env) {
   if (!env.ELEVENLABS_KEY) return json({ error: 'server-missing-key', service: 'elevenlabs' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
-  const { text, voice_id = 'EXAVITQu4vr4xnSDxMaL', model_id = 'eleven_multilingual_v2', voice_settings } = body;
+  const { text, voice_id = 'EXAVITQu4vr4xnSDxMaL', model_id = 'eleven_multilingual_v2', voice_settings, output_format = 'mp3_44100_128', language_code } = body;
+  if (!['mp3_44100_128','mp3_44100_192','pcm_44100'].includes(output_format)) return json({error:'invalid-output-format'}, {status:400});
   if (!text || typeof text !== 'string') return json({ error: 'missing-text' }, { status: 400 });
   if (text.length > 5000) return json({ error: 'text-too-long', max: 5000 }, { status: 400 });
 
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}`, {
+  const dialogue = model_id === 'eleven_v4';
+  const endpoint = dialogue ? 'text-to-dialogue' : `text-to-speech/${encodeURIComponent(voice_id)}`;
+  const r = await fetch(`https://api.elevenlabs.io/v1/${endpoint}?output_format=${output_format}`, {
     method: 'POST',
     headers: { 'xi-api-key': env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
     body: JSON.stringify({
-      text, model_id,
-      voice_settings: voice_settings || { stability: 0.5, similarity_boost: 0.75 },
+      model_id, ...(language_code ? {language_code} : {}),
+      ...(dialogue ? {inputs:[{text,voice_id}],apply_text_normalization:'on'} : {text,voice_settings:voice_settings || { stability: 0.5, similarity_boost: 0.75 }}),
     }),
   });
   if (!r.ok) {
     const errText = await r.text();
     return json({ error: 'elevenlabs-failed', status: r.status, detail: errText.slice(0, 500) }, { status: r.status });
   }
-  return new Response(r.body, { status: 200, headers: { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' } });
+  return new Response(r.body, { status: 200, headers: { 'Content-Type': output_format === 'pcm_44100' ? 'audio/pcm' : 'audio/mpeg', 'Cache-Control': 'no-store' } });
 }
 
 // ─── ElevenLabs Dubbing API ────────────────────────────────
@@ -7688,6 +7692,8 @@ export default {
         res = grokLatestHandler();
       } else if (path === '/grok/agent-ack' && req.method === 'POST') {
         res = await grokAgentAckHandler(req);
+      } else if (path === '/tts/catalog' && req.method === 'GET') {
+        res = json(await ttsCatalog(env));
       } else if (path === '/tts' && req.method === 'POST') {
         res = await ttsHandler(req, env);
       } else if (path === '/dubbing' && req.method === 'POST') {

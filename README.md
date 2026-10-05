@@ -221,3 +221,9 @@ MCP: https://mcp-pixeria.admira.store/mcp → anonymizer_demo {action:"info"} re
 API: POST https://api.admira.store/twin/spawn with image (8-bit data URL), persona (fictional original), npc16, npc32 (PNG data URLs), demo_id:"visitor-green-v1", name and optional screen. GET /twin/persona?id=… returns demo, ready, style, npc16 and npc32. This allowlisted preset supplies the style without paid generation. /twin/spawn/status?id=… returns consumed. Existing personal-photo generation remains unchanged.
 
 Assets: https://www.pixeria.com/assets/anonymizer-demo/{original.jpg,8-bit.png,16-bit.png,32-bit.png}. Artistic 8/16/32-bit labels describe visual style, not file color depth. Generated with imagegen from a fictional adult, dark wavy hair, forest-green cardigan, ivory T-shirt, charcoal trousers and white sneakers. Source prompt: front-facing full-body studio photo, neutral background, no logos. Variant prompts: same outfit and pose, transparent background; coarse chibi NES sprite, detailed SNES pixel sprite, early PlayStation low-poly 3D character respectively. Generation originals retained locally; optimized assets are checked into Pixeria.
+
+## Locuciones de España / Spain announcements
+
+`GET /tts/catalog` returns native voice metadata, TTS model IDs and subscription tier with the same authentication as paid TTS. `POST /tts` keeps its existing defaults; it also supports `output_format=mp3_44100_192|pcm_44100` and `language_code`. `model_id=eleven_v4` uses the official `/v1/text-to-dialogue` API; prior models retain text-to-speech. Creator supports MP3 192 kbps; PCM 44.1 kHz requires Pro. Provider keys remain server-side.
+
+`GET /tts/catalog` devuelve metadatos de voces, modelos TTS y plan con la misma autenticación que TTS de pago. `POST /tts` conserva sus valores originales y admite formato 192 kbps/PCM e idioma. Eleven v4 usa la API oficial de diálogo. Creator admite MP3 192 kbps; PCM 44,1 kHz exige Pro. Las claves se quedan en el servidor.

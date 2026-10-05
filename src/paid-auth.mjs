@@ -7,6 +7,7 @@ export function isPaidGeneration(method, path) {
   const m = String(method || '').toUpperCase();
   const p = String(path || '');
   if (m === 'POST' && p === '/tts') return true;
+  if (m === 'GET' && p === '/tts/catalog') return true;
   if (m === 'POST' && (
     p === '/xai/image' || p === '/xai/video' || p === '/xai/video/scenes' ||
     p === '/image/edit' || p === '/lyria/generate' || p === '/lyria3/generate' ||
