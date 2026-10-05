@@ -1,3 +1,4 @@
+import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
 import { gridCircuitsHandler } from './grid-circuits.mjs';
 import { authorizePaidGeneration, isPaidGeneration } from './paid-auth.mjs';
@@ -1913,7 +1914,7 @@ export async function xaiImageHandler(req, env) {
   return json(data, { status: r.status });
 }
 
-async function xaiVideoStartHandler(req, env) {
+export async function xaiVideoStartHandler(req, env) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -1982,7 +1983,7 @@ async function xaiVideoScenesHandler(req, env) {
   return json({ ok: true, duration: CLIP_SECONDS, scenes: started });
 }
 
-async function xaiVideoPollHandler(req, env, ctx, requestId) {
+export async function xaiVideoPollHandler(req, env, ctx, requestId) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return json({ error: 'bad-request-id' }, { status: 400 });
 
@@ -5115,7 +5116,7 @@ async function stockUploadAbortHandler(req, env) {
   return json({ ok: true, aborted: true });
 }
 
-async function stockPublishHandler(req, env, ctx) {
+export async function stockPublishHandler(req, env, ctx) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
 
   let body;
@@ -7649,6 +7650,7 @@ export default {
         .catch(() => console.warn('notification-aggregator-flush-failed')));
     }
     if (event && event.cron === '*/2 * * * *') {
+      ctx.waitUntil(recoverMedia(env,ctx));
       ctx.waitUntil(capsulasEnVuelo(env));
       ctx.waitUntil(tgEntregarPendientes(env));
       ctx.waitUntil(agoraActivityMonitor(env));
