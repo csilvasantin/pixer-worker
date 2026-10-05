@@ -1874,7 +1874,7 @@ async function ttsFreeHandler(req) {
 }
 
 // ─── xAI / Grok ────────────────────────────────────────────────────
-async function xaiImageHandler(req, env) {
+export async function xaiImageHandler(req, env) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }

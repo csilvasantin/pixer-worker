@@ -229,3 +229,9 @@ Assets: https://www.pixeria.com/assets/anonymizer-demo/{original.jpg,8-bit.png,1
 `GET /tts/catalog` devuelve metadatos de voces, modelos TTS y plan con la misma autenticación que TTS de pago. `POST /tts` conserva sus valores originales y admite formato 192 kbps/PCM e idioma. Eleven v4 usa la API oficial de diálogo. Creator admite MP3 192 kbps; PCM 44,1 kHz exige Pro. Las claves se quedan en el servidor.
 
 `AnnouncementTts` is a named private Worker entrypoint with only `generate({text,voice})`. Voice is `male` (David Martín) or `female` (Sara Martín); maximum 1500 characters. It uses Eleven v4 at 44.1 kHz/192 kbps. Pages validates its signed session and same origin before invoking this internal binding. No credential is copied to Pages, and no public route exposes this entrypoint.
+
+## Retail announcement preview / Vista previa de anuncios
+
+ES: El entrypoint privado AnnouncementTts conserva generate({text,voice,language}) para las voces ESP/ENG y añade generateImage({text,language}) para una imagen PixerIA de la pantalla del contador. Pages comprueba sesión y origen. El texto admite hasta 1500 caracteres; la imagen fija grok-imagine-image, n=1 y base64, reutilizando xaiImageHandler. No publica campañas, no escribe Stock y no copia credenciales.
+
+EN: Private AnnouncementTts retains generate({text,voice,language}) for ESP/ENG voices and adds generateImage({text,language}) for one PixerIA counter-screen image. Pages validates session and origin. Briefs are limited to 1500 characters; images use fixed grok-imagine-image, n=1 and base64 through the existing xaiImageHandler. No campaign publication, Stock writes or copied credentials.
