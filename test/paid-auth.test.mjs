@@ -59,3 +59,20 @@ test('la sesión de Pixeria abre la puerta y un token caducado no', async () => 
   const expired = await verifyPixeriaApiToken(old, 'firma', now);
   assert.equal(expired, null);
 });
+
+test('Studio uses its own signed-session verifier even with the Pixeria local key configured',async()=>{
+  for(const origin of ['https://admira.studio','https://www.admira.studio']){
+    let called=0;const r=await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer studio-session'}),{PIXERIA_SIGNING_KEY:'pixeria-key'},async(url,init)=>{called++;assert.equal(url,'https://admira.studio/auth/verify');assert.deepEqual(JSON.parse(init.body),{token:'studio-session'});return Response.json({ok:true,email:'allowed@example.test'});});
+    assert.equal(called,1);assert.deepEqual(r,{ok:true,via:'session',email:'allowed@example.test'});
+  }
+});
+test('forged Studio origin or rejected/failed verifier cannot authorize generation',async()=>{
+  const origin='https://admira.studio';
+  for(const fetchImpl of [async()=>Response.json({ok:false},{status:401}),async()=>{throw new Error('offline')}])assert.deepEqual(await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer invalid'}),{PIXERIA_SIGNING_KEY:'pixeria-key'},fetchImpl),{ok:false});
+  for(const origin of ['https://admira.studio.evil.test','http://admira.studio','https://other.test']){
+    let called=0;const r=await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer invalid'}),{PIXERIA_SIGNING_KEY:'pixeria-key'},async()=>{called++;return Response.json({ok:true});});assert.equal(called,0);assert.equal(r.ok,false);
+  }
+});
+test('Studio origin without bearer never calls its verifier',async()=>{
+  let calls=0;const r=await authorizePaidGeneration(req({Origin:'https://admira.studio'}),{},async()=>{calls++;return Response.json({ok:true});});assert.equal(r.ok,false);assert.equal(calls,0);
+});

@@ -89,12 +89,16 @@ export async function authorizePaidGeneration(req, env, fetchImpl = fetch) {
   }
   const bearer = (/^Bearer\s+(\S+)$/i.exec(req.headers.get('Authorization') || '') || [])[1] || '';
   if (!bearer) return { ok: false };
-  if (env && env.PIXERIA_SIGNING_KEY) {
+  // Studio already uses this generation engine, but its session has its own signing key.
+  // Verify only at a fixed, trusted Studio endpoint; an Origin header alone grants nothing.
+  const origin=req.headers.get('Origin')||'';
+  const studio=origin==='https://admira.studio'||origin==='https://www.admira.studio';
+  if (!studio && env && env.PIXERIA_SIGNING_KEY) {
     const local = await verifyPixeriaApiToken(bearer, env.PIXERIA_SIGNING_KEY);
     if (local) return { ok: true, via: 'session', email: local.email };
     return { ok: false };
   }
-  const url = (env && env.PIXERIA_AUTH_VERIFY) || 'https://www.pixeria.com/auth/verify';
+  const url = studio ? 'https://admira.studio/auth/verify' : (env && env.PIXERIA_AUTH_VERIFY) || 'https://www.pixeria.com/auth/verify';
   try {
     // Límite de 10 s: la verificación remota nunca deja colgada la generación.
     const r = await fetchImpl(url, {
