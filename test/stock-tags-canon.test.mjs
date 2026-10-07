@@ -1,7 +1,7 @@
 // Vocabulario canónico de etiquetas (Carlos, 7-oct-2026: «normaliza al guardar»).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TAG_CANON, applyCatalogoTags, applyMetaPatch, canonTag, cleanTag, composeTags, itemHasTag, tagKey } from '../src/stock-catalogo.mjs';
+import { STOCK_TAG_MAX_LEN, TAG_CANON, applyCatalogoTags, applyMetaPatch, canonTag, cleanTag, composeTags, hashtagsIn, itemHasTag, tagKey } from '../src/stock-catalogo.mjs';
 import { motivoDeReparto, tagsDeItem } from '../src/stock-via1.mjs';
 
 test('una variante conocida se guarda en su forma buena; lo demás no se toca', () => {
@@ -57,4 +57,21 @@ test('el reparto por etiqueta casa sin tildes', () => {
   assert.equal(motivoDeReparto({ tags: ['música'] }, { tag: 'musica' }), 'tag');
   assert.equal(motivoDeReparto({ tags: ['música'] }, { tag: 'música' }), 'tag');
   assert.equal(motivoDeReparto({ tags: ['rock'] }, { tag: 'musica' }), null);
+});
+
+// Hashtags de destino (Carlos, 7-oct-2026): cliente, centro y pantalla escritos al importar o crear.
+test('un hashtag de pantalla cabe entero y dos pantallas no acaban en la misma etiqueta', () => {
+  assert.equal(STOCK_TAG_MAX_LEN, 80);
+  assert.equal(cleanTag('#Starbucks_PaseodeGracia_103_Pantalla1'), 'starbucks_paseodegracia_103_pantalla1');
+  assert.notEqual(cleanTag('#starbucks_paseodegracia_103_pantalla1'), cleanTag('#starbucks_paseodegracia_103_pantalla2'));
+  assert.equal(canonTag('Starbucks_PaseodeGracia_103_Pantalla_1'), 'starbucks_paseodegracia_103_pantalla_1', 'no es una variante: se guarda tal cual');
+  assert.deepEqual(composeTags(['starbucks', 'starbucks_paseodegracia_103_pantalla1', 'Musica']), ['starbucks', 'starbucks_paseodegracia_103_pantalla1', 'música']);
+});
+
+test('los hashtags escritos en el comentario, el título o el texto son etiquetas de la pieza', () => {
+  assert.deepEqual(hashtagsIn('Promo otoño #Starbucks #starbucks_paseodegracia_103_pantalla1', null, 'vídeo de café,#otoño'), ['starbucks', 'starbucks_paseodegracia_103_pantalla1', 'otoño']);
+  assert.deepEqual(hashtagsIn('fondo #ff8800 y #333, calle #103, mira https://x.es/p#seccion y el C#'), [], 'ni colores, ni números, ni anclas de enlace');
+  assert.deepEqual(hashtagsIn('#cafe #cafe #Café'), ['cafe', 'café']);
+  assert.deepEqual(hashtagsIn(undefined, '', 'sin etiquetas'), []);
+  assert.equal(hashtagsIn(Array.from({ length: 30 }, (_, i) => '#tag' + i + 'x').join(' ')).length, 10);
 });

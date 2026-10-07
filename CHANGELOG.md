@@ -2,6 +2,15 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.07.10.2026.r4.22:03 · NeoMBP16 · MacBookPro16
+
+- **Hashtags de destino** (Carlos, 7-oct-2026). Una etiqueta admite 80 caracteres (antes 30): el hashtag de una
+  pantalla —`#starbucks_paseodegracia_103_pantalla1`— se cortaba y dos pantallas acababan en la misma etiqueta.
+- Al publicar (`POST /stock/publish`, también las importaciones por Telegram) los hashtags escritos en el comentario,
+  el título o el texto pasan a ser etiquetas de la pieza y van delante de las automáticas. No cuentan colores
+  (`#ff8800`), números sueltos ni anclas de enlace.
+- `POST /stock/:id/tags` guarda en la misma forma canónica que el resto y ya no descarta en silencio las largas.
+
 ## v.07.10.2026.r3 — Las etiquetas del Stock se guardan en una sola forma
 - Por qué: la misma etiqueta convivía con y sin tilde («musica»/«música»), en inglés y castellano
   («tech»/«tecnología») y en singular y plural. Se limpiaron los datos (306 piezas) y esto evita
