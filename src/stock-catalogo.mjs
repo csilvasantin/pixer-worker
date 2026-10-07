@@ -53,6 +53,39 @@ export function cleanTag(t) {
     .slice(0, STOCK_TAG_MAX_LEN);
 }
 
+// ── Vocabulario canónico (Carlos, 7-oct-2026: «normaliza al guardar») ───────────────────
+// El Stock tenía la misma etiqueta escrita de varias formas («musica»/«música»), en dos
+// idiomas («tech»/«tecnología») y en singular y plural. Se limpiaron los datos y, para que no
+// vuelva a ensuciarse, toda etiqueta que se GUARDA pasa por aquí: si es una variante conocida
+// se guarda la forma buena. No se inventan tildes: sólo se corrige lo que está en la tabla.
+// Fuera a propósito: «animaciones» (etiqueta y categoría de sistema), «song» (marca de tipo de
+// la demo 365) y good/better/best (calidad). La tabla de LECTURA equivalente vive en admira.tv
+// (canal.html, /parrilla/ y functions/api/_playlist-live.js).
+const foldTag = (t) => cleanTag(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[_\-\s]+/g, ' ').trim();
+export const TAG_CANON = Object.freeze({
+  // misma palabra, otra grafía
+  tecnologia: 'tecnología', musica: 'música', inspiracion: 'inspiración', innovacion: 'innovación', robotica: 'robótica',
+  cancion: 'canción', ingenieria: 'ingeniería', 'digital twin': 'digital-twin', adaptacion: 'adaptación',
+  cafeteria: 'cafetería', opinion: 'opinión',
+  // sinónimos en inglés
+  tech: 'tecnología', technology: 'tecnología', music: 'música', muscia: 'música', business: 'negocio', creativity: 'creatividad',
+  ai: 'ia', gaming: 'videojuego', robotics: 'robótica',
+  // singular y plural: una sola forma
+  videojuegos: 'videojuego', historias: 'historia', bebida: 'bebidas', canciones: 'canción', robot: 'robots', comics: 'comic',
+  curiosidad: 'curiosidades', oferta: 'ofertas', artistas: 'artista', pelicula: 'películas', peliculas: 'películas',
+  personaje: 'personajes', herramienta: 'herramientas',
+});
+/** Forma en la que se GUARDA una etiqueta: la saneada, o la canónica si es una variante conocida. */
+export function canonTag(t) {
+  const c = cleanTag(t);
+  if (!c) return '';
+  return TAG_CANON[foldTag(c)] || c;
+}
+/** Clave para COMPARAR etiquetas: sin tildes ni separadores y con las equivalencias resueltas. */
+export function tagKey(t) {
+  return foldTag(canonTag(t));
+}
+
 // Devuelve el catálogo saneado o null si no hay id utilizable.
 //   id/cliente/producto/proyecto → slug [a-z0-9-]; fechas → ISO; nombre ≤ 120.
 //   Sin cliente se toma el primer tramo del id (`alcampo-2026-09-10` → `alcampo`).
@@ -89,7 +122,10 @@ export function composeTags(base = [], required = [], max = STOCK_TAGS_MAX) {
   const req = [...new Set((Array.isArray(required) ? required : []).map(cleanTag).filter(Boolean))];
   const seen = new Set();
   const all = [];
-  for (const t of [...(Array.isArray(base) ? base : []), ...req]) {
+  // Las etiquetas libres se guardan en su forma canónica; las obligatorias (hashtags del
+  // catálogo y calidad) son identificadores y se dejan tal cual.
+  const libres = (Array.isArray(base) ? base : []).map(canonTag);
+  for (const t of [...libres, ...req]) {
     const c = cleanTag(t);
     if (!c || seen.has(c)) continue;
     seen.add(c);
@@ -136,7 +172,9 @@ export function itemMatchesQuery(item, q) {
 export function itemHasTag(item, tag) {
   const t = cleanTag(tag);
   if (!t) return true;
-  return (Array.isArray(item && item.tags) ? item.tags : []).some(x => cleanTag(x) === t);
+  // Se compara sin tildes y con equivalencias: ?tag=musica, ?tag=música y ?tag=music traen lo mismo.
+  const k = tagKey(t);
+  return (Array.isArray(item && item.tags) ? item.tags : []).some(x => tagKey(x) === k);
 }
 
 export function isVigente(catalogo, today) {
