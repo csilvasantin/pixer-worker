@@ -2,6 +2,30 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.07.10.2026.r1 — Límites de espera en las llamadas a proveedores (Anonimizador y resto)
+- Por qué: si x.ai o Gemini no contestaban, el worker se quedaba colgado y el navegador
+  cortaba por su cuenta (pixeria `assets/anonimizador-fiable.js`: 60 s Grok, 90 s Gemini)
+  sin saber qué había pasado. Y si fallaba la descarga de la imagen de x.ai, `/xai/image`
+  devolvía 200 sin imagen.
+- Nuevo `src/fetch-limite.mjs`: `fetchConLimite` (hasta cabeceras, para streaming),
+  `pedirConLimite` (incluye la lectura del cuerpo), `crearPresupuesto` y `conReintentos`
+  (429/5xx, solo si queda presupuesto). Distingue timeout, error de red y abort.
+- Límites: Grok imagen 55 s en total (generación + reintento + descarga); Gemini imagen
+  (`/image/edit`, `/imagen/generate`, `/segmentado/generate`) 85 s; texto/chat 30 s
+  (cápsula de artículo 45 s); descargas 30 s; vídeo asíncrono: inicio 30 s y cada sondeo
+  20 s (el polling no cambia); Veo descarga y Pollinations hasta cabeceras (30 s / 180 s);
+  ElevenLabs TTS 60 s, doblaje 120 s, catálogo 30 s; Lyria 120 s; token GCP 10 s;
+  verificación de sesión Pixeria 10 s; trozos de TTS gratuito y etiquetas og: 10 s.
+- Respuestas nuevas: tiempo agotado → `504 {ok:false, error:'timeout', reason:'timeout',
+  proveedor, etapa, ms, detail}`; proveedor inaccesible → `502 {ok:false, error:'red',
+  reason:'network', proveedor, etapa, detail}` (antes 500 `worker-exception`); descarga de
+  la imagen de x.ai fallida → `502 {ok:false, error:'descarga_imagen', reason:'no-data',
+  proveedor:'xai', etapa:'descarga', status, detail}`. Con varias imágenes, solo se
+  entregan las descargadas. Las respuestas de éxito no cambian.
+- `/xai/image` y `/image/edit` reintentan una vez un 429/5xx si queda presupuesto.
+- `test/fetch-limite.test.mjs`: helper, presupuesto, reintentos, 504 por ruta con fetch
+  colgado, 502 de descarga y éxito sin cambios.
+
 ## v.04.10.2026.r1 — Orígenes de admira.biz (intercambio de dominios, paso 1)
 - `ALLOWED_ORIGINS` admite `https://admira.biz` y `https://www.admira.biz`, que pasarán a
   servir la parte de negocio hoy en admira.app. admira.app se mantiene para que todo
