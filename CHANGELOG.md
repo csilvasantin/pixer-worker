@@ -2,6 +2,18 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.07.10.2026.r3 — Las etiquetas del Stock se guardan en una sola forma
+- Por qué: la misma etiqueta convivía con y sin tilde («musica»/«música»), en inglés y castellano
+  («tech»/«tecnología») y en singular y plural. Se limpiaron los datos (306 piezas) y esto evita
+  que vuelva a ensuciarse (Carlos, 7-oct-2026: «normaliza al guardar»).
+- `src/stock-catalogo.mjs`: tabla `TAG_CANON` y `canonTag`. Toda etiqueta libre que se guarda
+  (publish y `PATCH /stock/:id/meta`) pasa por ella; los hashtags del catálogo y la calidad no.
+  No se inventan tildes: sólo se corrige lo que está en la tabla.
+- `?tag=` de `/stock/list` y el reparto por etiqueta (`stock-via1`) comparan sin tildes y con las
+  equivalencias: `musica`, `música` y `music` traen lo mismo.
+- Fuera a propósito: `animaciones` (etiqueta y categoría de sistema), `song` (demo 365) y
+  good/better/best. La tabla de lectura equivalente vive en admira.tv.
+
 ## v.07.10.2026.r2 — ACK de otra pantalla sin tormenta de Telegram
 - El 403 `command_screen_mismatch` de `/locations/cmd/ack` conserva el rechazo
   y el primer aviso, pero agrupa sus repeticiones como incidente (recordatorio

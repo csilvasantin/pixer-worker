@@ -87,13 +87,15 @@ export function objetivosDeReparto(base, extra) {
   }
   return out;
 }
+// Sin tildes (7-oct-2026): el Stock guarda «música» y un objetivo «musica» no casaba nunca.
+const sinTildes = (t) => String(t).toLowerCase().trim().replace(/^#/, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 export function tagsDeItem(item) {
-  return new Set((Array.isArray(item && item.tags) ? item.tags : []).map((t) => String(t).toLowerCase().trim().replace(/^#/, '')));
+  return new Set((Array.isArray(item && item.tags) ? item.tags : []).map(sinTildes));
 }
 /** ¿Casa el item con el objetivo? Devuelve el motivo ('tag' | 'cliente' | 'segmento') o null. */
 export function motivoDeReparto(item, target) {
   if (!item || !target) return null;
-  if (target.tag && tagsDeItem(item).has(target.tag)) return 'tag';
+  if (target.tag && tagsDeItem(item).has(sinTildes(target.tag))) return 'tag';
   if (target.cliente && item.catalogo && slug(item.catalogo.cliente) === target.cliente) return 'cliente';
   if (target.audience || target.age) {
     const seg = item.segmentation || null;
