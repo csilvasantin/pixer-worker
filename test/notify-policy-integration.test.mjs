@@ -445,3 +445,46 @@ test('otros errores de negocio no heredan el rate-limit específico del ACK inv�
     globalThis.fetch = originalFetch;
   }
 });
+
+test('403 ACK de otra pantalla agrupa repeticiones, conserva rechazo y explica la causa', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const telegram = telegramFetchSpy();
+  globalThis.fetch = telegram.fetch;
+  let timestamp = 1_790_000_000_000;
+  Date.now = () => timestamp;
+  try {
+    let failure = true;
+    const env = {
+      SIGNAGE_KV: new MemoryKv(),
+      TELEGRAM_BOT_TOKEN: 'fake-token', TELEGRAM_CHAT_ID: 'fake-chat',
+      OMNI: { async fetch() {
+        return Response.json(failure ? { error: 'command_screen_mismatch' } : { ok: true }, { status: failure ? 403 : 200 });
+      } },
+    };
+    const ack = (path = '/locations/cmd/ack') => runRequest(new Request('https://worker.test' + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ screen: 'private-screen-name', action: 'private-action-reference' }),
+    }), env);
+    for (let i = 0; i < 3; i++) {
+      const response = await ack(i === 1 ? '/locations/cmd/ack/' : undefined);
+      assert.equal(response.status, 403);
+      assert.equal((await response.json()).error, 'command_screen_mismatch');
+      timestamp += 120_000;
+    }
+    assert.equal(telegram.calls.length, 1, 'los avisos cada dos minutos se agrupan');
+    assert.match(telegram.calls[0].body.text, /el acuse pertenece a otra pantalla/);
+    assertSafeSummary(telegram.calls[0].body.text, ['private-screen-name', 'private-action-reference']);
+    await ack();
+    assert.equal(telegram.calls.length, 2, 'tras cinco minutos llega un recordatorio');
+    assert.match(telegram.calls[1].body.text, /4 fallos · 2 repetición/);
+    failure = false;
+    await ack();
+    await ack();
+    assert.equal(telegram.calls.length, 3);
+    assert.match(telegram.calls[2].body.text, /RECUPERADO/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+  }
+});

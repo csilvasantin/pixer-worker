@@ -2,6 +2,14 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.07.10.2026.r2 — ACK de otra pantalla sin tormenta de Telegram
+- El 403 `command_screen_mismatch` de `/locations/cmd/ack` conserva el rechazo
+  y el primer aviso, pero agrupa sus repeticiones como incidente (recordatorio
+  cada cinco minutos y recuperación). Antes sólo entraba `invalid_ack_reference`.
+- El aviso explica que el acuse corresponde a otra pantalla. Diagnóstico de
+  estado/código/acción en los logs, sin body, identidad del equipo ni credenciales.
+- Los otros errores de negocio y los 5xx mantienen sus alertas.
+
 ## v.07.10.2026.r1 — Límites de espera en las llamadas a proveedores (Anonimizador y resto)
 - Por qué: si x.ai o Gemini no contestaban, el worker se quedaba colgado y el navegador
   cortaba por su cuenta (pixeria `assets/anonimizador-fiable.js`: 60 s Grok, 90 s Gemini)
