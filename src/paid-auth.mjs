@@ -96,10 +96,12 @@ export async function authorizePaidGeneration(req, env, fetchImpl = fetch) {
   }
   const url = (env && env.PIXERIA_AUTH_VERIFY) || 'https://www.pixeria.com/auth/verify';
   try {
+    // Límite de 10 s: la verificación remota nunca deja colgada la generación.
     const r = await fetchImpl(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token: bearer }),
+      signal: AbortSignal.timeout(10000),
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok && data && data.ok) return { ok: true, via: 'session', email: data.email || '' };

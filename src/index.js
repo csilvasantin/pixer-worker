@@ -50,6 +50,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
+import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 import { siguienteNum, renumerarDuplicados, etiquetasHonestas, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
@@ -115,7 +116,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.05.10.2026.r1.20:30';
+const WORKER_VERSION = 'v.07.10.2026.r1.07:20';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -483,14 +484,14 @@ async function ttsHandler(req, env) {
 
   const dialogue = model_id === 'eleven_v4';
   const endpoint = dialogue ? 'text-to-dialogue' : `text-to-speech/${encodeURIComponent(voice_id)}`;
-  const r = await fetch(`https://api.elevenlabs.io/v1/${endpoint}?output_format=${output_format}`, {
+  const r = await fetchConLimite(`https://api.elevenlabs.io/v1/${endpoint}?output_format=${output_format}`, {
     method: 'POST',
     headers: { 'xi-api-key': env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
     body: JSON.stringify({
       model_id, ...(language_code ? {language_code} : {}),
       ...(dialogue ? {inputs:[{text,voice_id}],apply_text_normalization:'on'} : {text,voice_settings:voice_settings || { stability: 0.5, similarity_boost: 0.75 }}),
     }),
-  });
+  }, { ms: LIMITES.voz, proveedor: 'elevenlabs', etapa: 'tts' });
   if (!r.ok) {
     const errText = await r.text();
     return json({ error: 'elevenlabs-failed', status: r.status, detail: errText.slice(0, 500) }, { status: r.status });
@@ -519,11 +520,11 @@ async function dubbingProxy(req, env, upstreamPath, accept = 'application/json')
   const contentType = req.headers.get('Content-Type');
   if (contentType) headers.set('Content-Type', contentType);
 
-  const upstream = await fetch(`https://api.elevenlabs.io/v1${upstreamPath}`, {
+  const upstream = await fetchConLimite(`https://api.elevenlabs.io/v1${upstreamPath}`, {
     method: req.method,
     headers,
     body: req.method === 'GET' || req.method === 'HEAD' ? undefined : req.body,
-  });
+  }, { ms: req.method === 'GET' || req.method === 'HEAD' ? LIMITES.catalogo : LIMITES.doblaje, proveedor: 'elevenlabs', etapa: 'doblaje' });
   const responseHeaders = new Headers({ 'Cache-Control': 'no-store' });
   const upstreamType = upstream.headers.get('Content-Type');
   const disposition = upstream.headers.get('Content-Disposition');
@@ -552,13 +553,12 @@ async function megafoniaPushHandler(req, env) {
   const model_id = String(body.model_id || 'eleven_multilingual_v2').slice(0, 40);
   const lang = String(body.lang || '').slice(0, 8);
   // 1) sintetiza con ElevenLabs (multilingüe: el idioma lo infiere del texto)
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}`, {
+  const { r, datos: buf } = await pedirConLimite(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice_id)}`, {
     method: 'POST',
     headers: { 'xi-api-key': env.ELEVENLABS_KEY, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
     body: JSON.stringify({ text, model_id, voice_settings: body.voice_settings || { stability: 0.5, similarity_boost: 0.75 } }),
-  });
-  if (!r.ok) { const e = await r.text(); return json({ error: 'elevenlabs-failed', status: r.status, detail: e.slice(0, 300) }, { status: r.status }); }
-  const buf = await r.arrayBuffer();
+  }, { ms: LIMITES.voz, proveedor: 'elevenlabs', etapa: 'megafonia', leer: 'arrayBuffer' });
+  if (!r.ok) { const e = new TextDecoder().decode(buf); return json({ error: 'elevenlabs-failed', status: r.status, detail: e.slice(0, 300) }, { status: r.status }); }
   // 2) guarda el mp3 en R2
   const id = 'm' + Date.now().toString(36) + '-' + (crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.floor(Math.random() * 1e9).toString(36));
   try { await env.STOCK_BUCKET.put(MEGAFONIA_PREFIX + id + '.mp3', buf, { httpMetadata: { contentType: 'audio/mpeg' } }); }
@@ -654,11 +654,10 @@ async function segmentadoGenerateHandler(req, env, ctx) {
   const audD = SEG_AUD_DESC[audience], ageD = age ? (' ' + SEG_AGE_DESC[age]) : '';
   const segPrompt = `${brief}. Cartel publicitario vertical de digital signage para tienda, pensado para atraer a ${audD}${ageD}. Estética premium y actual, un único mensaje claro, mucho espacio negativo, composición limpia, sin texto ilegible.`;
   // 2) genera con Imagen 4.0
-  const gr = await fetch('https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict', {
+  const { r: gr, datos: gd } = await pedirConLimite('https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict', {
     method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ instances: [{ prompt: segPrompt }], parameters: { sampleCount: 1, aspectRatio, personGeneration: 'allow_adult' } }),
-  });
-  const gd = await gr.json().catch(() => ({}));
+  }, { ms: LIMITES.geminiImagen, proveedor: 'gemini', etapa: 'imagen-segmentado' });
   const pred = gd && gd.predictions && gd.predictions[0];
   const b64 = pred && (pred.bytesBase64Encoded || pred.image);
   if (!gr.ok || !b64) return json({ error: 'imagen-failed', status: gr.status, detail: String((gd && gd.error && gd.error.message) || 'sin imagen').slice(0, 200) }, { status: 502 });
@@ -1862,8 +1861,8 @@ async function ttsFreeHandler(req) {
     const u = 'https://translate.google.com/translate_tts?ie=UTF-8&q=' + encodeURIComponent(c) +
       '&tl=' + lang + '&client=tw-ob&total=' + chunks.length + '&idx=' + i + '&textlen=' + c.length;
     let r;
-    try { r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'Referer': 'https://translate.google.com/' } }); }
-    catch (e) { return json({ error: 'gtts-fetch-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
+    try { r = await fetchConLimite(u, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 'Referer': 'https://translate.google.com/' } }, { ms: LIMITES.corto, proveedor: 'google-tts', etapa: 'trozo-' + (i + 1) }); }
+    catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ error: 'gtts-fetch-failed', detail: String(e).slice(0, 120) }, { status: 502 }); }
     if (!r.ok) return json({ error: 'gtts-' + r.status }, { status: 502 });
     parts.push(new Uint8Array(await r.arrayBuffer()));
   }
@@ -1876,6 +1875,11 @@ async function ttsFreeHandler(req) {
 
 // ─── xAI / Grok ────────────────────────────────────────────────────
 export async function xaiImageHandler(req, env) {
+  return conLimite(() => xaiImageHandlerConLimite(req, env));
+}
+// Límite total 55 s (generación + reintento + descarga), por debajo de los 60 s
+// del cliente (assets/anonimizador-fiable.js de pixeria): el worker contesta antes.
+async function xaiImageHandlerConLimite(req, env) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -1889,32 +1893,47 @@ export async function xaiImageHandler(req, env) {
   // fondo del furni en Pixeria antes de publicarlo al gemelo).
   const wantB64 = body.b64 === true || body.response_format === 'b64_json';
 
-  const r = await fetch('https://api.x.ai/v1/images/generations', {
+  const presupuesto = crearPresupuesto(LIMITES.grokImagen);
+  const { r, datos: data } = await conReintentos((intento) => pedirConLimite('https://api.x.ai/v1/images/generations', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: safeModel, prompt, n: Math.min(4, Math.max(1, n)), response_format: wantB64 ? 'b64_json' : 'url' }),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { presupuesto, proveedor: 'xai', etapa: intento > 1 ? 'imagen-reintento' : 'imagen' }), { presupuesto });
   if (r.ok && wantB64 && data && Array.isArray(data.data)) {
     // Si x.ai devolvió `url` en vez de `b64_json`, la traemos aquí (server-side,
     // sin CORS) y la convertimos a base64 para que el cliente la reciba lista.
+    // Si NINGUNA imagen se pudo traer, 502 descarga_imagen (antes: 200 sin imagen).
+    let fallo = null;
     for (const item of data.data) {
       if (item && !item.b64_json && item.url) {
         try {
-          const ir = await fetch(item.url);
-          if (ir.ok) {
-            const buf = await ir.arrayBuffer();
+          const { r: ir, datos: buf } = await pedirConLimite(item.url, {}, { ms: LIMITES.descarga, presupuesto, proveedor: 'xai', etapa: 'descarga', leer: 'arrayBuffer' });
+          if (ir.ok && buf && buf.byteLength) {
             item.b64_json = bytesToB64(new Uint8Array(buf));
             item.mime = ir.headers.get('Content-Type') || 'image/jpeg';
-          }
-        } catch (e) {}
+          } else fallo = fallo || { status: ir.status, detail: `x.ai entregó la imagen con HTTP ${ir.status}` + (ir.ok ? ' pero vacía' : '') };
+        } catch (e) {
+          if (esErrorLimite(e) && e.tipo === 'timeout') throw e;
+          fallo = fallo || { status: 0, detail: String((e && e.message) || e).slice(0, 200) };
+        }
       }
     }
+    const conImagen = data.data.filter((item) => item && item.b64_json);
+    if (!conImagen.length) {
+      return json({ ok: false, error: 'descarga_imagen', reason: 'no-data', proveedor: 'xai', etapa: 'descarga',
+        status: fallo ? fallo.status : 0, detail: fallo ? fallo.detail : 'x.ai no entregó ninguna imagen' }, { status: 502 });
+    }
+    // Varias imágenes y alguna sin descargar: se entregan solo las que llegaron
+    // (data[0] siempre trae imagen, que es lo que leen los clientes).
+    if (conImagen.length !== data.data.length) data.data = conImagen;
   }
   return json(data, { status: r.status });
 }
 
 export async function xaiVideoStartHandler(req, env) {
+  return conLimite(() => xaiVideoStartHandlerConLimite(req, env));
+}
+async function xaiVideoStartHandlerConLimite(req, env) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
@@ -1936,12 +1955,12 @@ export async function xaiVideoStartHandler(req, env) {
     ? xaiClipPayload({ prompt, imageUrl, aspect: aspect_ratio, resolution })
     : { model: 'grok-imagine-video', prompt, duration: dur, aspect_ratio, resolution };
 
-  const r = await fetch('https://api.x.ai/v1/videos/generations', {
+  // Modo asíncrono: aquí solo se encola el trabajo en x.ai (el vídeo se sondea aparte).
+  const { r, datos: data } = await pedirConLimite('https://api.x.ai/v1/videos/generations', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.videoInicio, proveedor: 'xai', etapa: 'video-inicio' });
   if (imageUrl && r.ok && data.request_id) await rememberClip(env, data.request_id, prompt, 'Clip 5s');
   return json(data, { status: r.status });
 }
@@ -1968,12 +1987,11 @@ async function xaiVideoScenesHandler(req, env) {
       ? dataUrlFromImageField(scene.image)
       : await stockImageDataUrl(env, scene.stock_id);
     if (resolved.error) return json({ ...resolved, index: scene.index }, { status: resolved.error === 'image-too-big' ? 413 : 400 });
-    const r = await fetch('https://api.x.ai/v1/videos/generations', {
+    const { r, datos: data } = await pedirConLimite('https://api.x.ai/v1/videos/generations', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(xaiClipPayload({ prompt: scene.text, imageUrl: resolved.url, aspect })),
-    });
-    const data = await r.json().catch(() => ({}));
+    }, { ms: LIMITES.videoInicio, proveedor: 'xai', etapa: `video-escena-${scene.index + 1}` });
     if (!r.ok || !data.request_id) {
       return json({ error: 'scene-failed', index: scene.index, status: r.status }, { status: 502 });
     }
@@ -1984,13 +2002,16 @@ async function xaiVideoScenesHandler(req, env) {
 }
 
 export async function xaiVideoPollHandler(req, env, ctx, requestId) {
+  return conLimite(() => xaiVideoPollHandlerConLimite(req, env, ctx, requestId));
+}
+async function xaiVideoPollHandlerConLimite(req, env, ctx, requestId) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(requestId)) return json({ error: 'bad-request-id' }, { status: 400 });
 
-  const r = await fetch(`https://api.x.ai/v1/videos/${encodeURIComponent(requestId)}`, {
+  // Cada sondeo tiene su propio límite; si vence, el cliente (o el cron) vuelve a sondear.
+  const { r, datos: data } = await pedirConLimite(`https://api.x.ai/v1/videos/${encodeURIComponent(requestId)}`, {
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}` },
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.videoSondeo, proveedor: 'xai', etapa: 'video-sondeo' });
   if (r.ok && pollFinished(data) && env.SIGNAGE_KV) {
     const raw = await env.SIGNAGE_KV.get('clipjob:' + requestId);
     if (raw) {
@@ -2033,8 +2054,11 @@ async function pollinationsVideoHandler(req, env, url) {
 
   let r;
   try {
-    r = await fetch(target, { headers: { 'Authorization': `Bearer ${env.POLLINATIONS_KEY}` } });
+    // Síncrono: Pollinations genera el mp4 dentro de la petición. Límite hasta las
+    // cabeceras; el cuerpo se reenvía en streaming sin cortar.
+    r = await fetchConLimite(target, { headers: { 'Authorization': `Bearer ${env.POLLINATIONS_KEY}` } }, { ms: LIMITES.videoSincrono, proveedor: 'pollinations', etapa: 'video' });
   } catch (e) {
+    if (esErrorLimite(e) && e.tipo === 'timeout') return respuestaLimite(e);
     return json({ error: 'upstream-fetch-failed', message: String(e) }, { status: 502 });
   }
   const cors = corsHeaders(req);
@@ -2097,11 +2121,11 @@ async function getGcpAccessToken(env) {
   const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(signingInput));
   const jwt = `${signingInput}.${b64urlEncode(sig)}`;
 
-  const r = await fetch('https://oauth2.googleapis.com/token', {
+  const r = await fetchConLimite('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${encodeURIComponent(jwt)}`,
-  });
+  }, { ms: LIMITES.auth, proveedor: 'gcp', etapa: 'token' });
   if (!r.ok) throw new Error(`gcp-token-failed: ${r.status} ${(await r.text()).slice(0, 300)}`);
   const data = await r.json();
   _gcpToken = data.access_token;
@@ -2125,7 +2149,7 @@ async function lyriaHandler(req, env) {
 
   let token;
   try { token = await getGcpAccessToken(env); }
-  catch (e) { return json({ error: 'gcp-auth-failed', message: String(e) }, { status: 500 }); }
+  catch (e) { return respuestaLimite(e) || json({ error: 'gcp-auth-failed', message: String(e) }, { status: 500 }); }
 
   const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${safeModel}:predict`;
   const instance = { prompt };
@@ -2137,12 +2161,11 @@ async function lyriaHandler(req, env) {
   };
   if (seed != null && sample_count === 1) delete reqBody.parameters.sample_count;
 
-  const r = await fetch(url, {
+  const { r, datos: data } = await pedirConLimite(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(reqBody),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.musica, proveedor: 'gcp', etapa: 'lyria' });
   return json(data, { status: r.status });
 }
 
@@ -2183,18 +2206,17 @@ Transforma la IDEA en versos emotivos, cantables y con rima natural (NO la copie
 
   let token;
   try { token = await getGcpAccessToken(env); }
-  catch (e) { return json({ error: 'gcp-auth-failed', message: String(e) }, { status: 500 }); }
+  catch (e) { return respuestaLimite(e) || json({ error: 'gcp-auth-failed', message: String(e) }, { status: 500 }); }
 
   const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${safeModel}:generateContent`;
-  const r = await fetch(url, {
+  const { r, datos: data } = await pedirConLimite(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
       generationConfig: { temperature, maxOutputTokens, topP: 0.95, thinkingConfig: { thinkingBudget: 0 } },
     }),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.texto, proveedor: 'gemini', etapa: 'texto' });
   if (!r.ok) return json(data, { status: r.status });
   // Extrae texto
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -2223,7 +2245,7 @@ async function lyria3Handler(req, env) {
   const fullText = parts.join('\n\n');
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent`;
-  const r = await fetch(url, {
+  const { r, datos: data } = await pedirConLimite(url, {
     method: 'POST',
     headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -2232,8 +2254,7 @@ async function lyria3Handler(req, env) {
         responseModalities: ['AUDIO', 'TEXT'],
       },
     }),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.musica, proveedor: 'gemini', etapa: 'lyria3' });
   if (!r.ok) return json(data, { status: r.status });
 
   // Extraer audio (inlineData base64) y texto opcional
@@ -2272,12 +2293,11 @@ async function imagenHandler(req, env) {
   if (imageSize) parameters.imageSize = imageSize;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:predict`;
-  const r = await fetch(url, {
+  const { r, datos: data } = await pedirConLimite(url, {
     method: 'POST',
     headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ instances: [{ prompt }], parameters }),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.geminiImagen, proveedor: 'gemini', etapa: 'imagen' });
   return json(data, { status: r.status });
 }
 
@@ -2285,6 +2305,9 @@ async function imagenHandler(req, env) {
 // Recibe una imagen (base64) + instrucción y devuelve la imagen EDITADA.
 // Lo usa el editor pixel-art de pixeria ("la moto ahora rosa" → la pinta).
 async function imageEditHandler(req, env) {
+  return conLimite(() => imageEditHandlerConLimite(req, env));
+}
+async function imageEditHandlerConLimite(req, env) {
   if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key', service: 'gemini' }, { status: 500 });
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const prompt = String(b.prompt || '').trim();
@@ -2299,11 +2322,12 @@ async function imageEditHandler(req, env) {
     ? b.sys.trim()
     : 'Eres un editor de sprites pixel-art de mobiliario. Edita la imagen dada siguiendo la instrucción. MANTÉN el estilo pixel-art, el mismo encuadre/pose y el fondo transparente; cambia SOLO lo que se pide. Devuelve la imagen editada.';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const r = await fetch(url, {
+  // Límite total 85 s (por debajo de los 90 s del cliente), reintento por 429/5xx incluido.
+  const presupuesto = crearPresupuesto(LIMITES.geminiImagen);
+  const { r, datos: d } = await conReintentos((intento) => pedirConLimite(url, {
     method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType: mime, data: img } }, { text: sys + '\n\nInstrucción: ' + prompt }] }] }),
-  });
-  const d = await r.json().catch(() => ({}));
+  }, { presupuesto, proveedor: 'gemini', etapa: intento > 1 ? 'edicion-reintento' : 'edicion' }), { presupuesto });
   if (!r.ok) return json({ error: 'gemini-' + r.status, detail: (d && d.error && d.error.message) || '' }, { status: r.status });
   let outImg = null, outMime = 'image/png';
   try { const parts = (((d.candidates || [])[0] || {}).content || {}).parts || []; for (const p of parts) { if (p.inlineData && p.inlineData.data) { outImg = p.inlineData.data; outMime = p.inlineData.mimeType || outMime; break; } } } catch (e) {}
@@ -2545,11 +2569,11 @@ async function personaDescribe(env, m) {
     + '"skin":"#hex","hair":"#hex","top":"#hex","bottom":"#hex","shoes":"#hex","hairstyle":"short|long|curly|bob|bald|ponytail",'
     + '"outfit":"tshirt|shirt|jacket|suit|dress|knit|coat","accessory":"none|glasses|cap|backpack|headphones|bag",'
     + '"look":"one short English sentence describing hair, facial hair and full outfit with colours"}';
-  const r = await fetch('https://api.x.ai/v1/chat/completions', { method: 'POST',
+  const { datos: d } = await pedirConLimite('https://api.x.ai/v1/chat/completions', { method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'grok-4-fast-non-reasoning', temperature: 0,
-      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: img } }, { type: 'text', text: prompt }] }] }) });
-  const d = await r.json().catch(() => ({}));
+      messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: img } }, { type: 'text', text: prompt }] }] }) },
+    { ms: LIMITES.texto, proveedor: 'xai', etapa: 'persona-describe' });
   const text = d?.choices?.[0]?.message?.content || '';
   const j = JSON.parse((/\{[\s\S]*\}/.exec(text) || ['{}'])[0]);
   const hex = v => /^#[0-9a-f]{6}$/i.test(v || '') ? v : null;
@@ -2563,19 +2587,20 @@ async function personaDescribe(env, m) {
 }
 async function personaWalk(env, m, view) {
   const gridUrl = `${env.PERSONA_BASE || PERSONA_BASE}grid-${m.body}-${view}.jpg`;
-  const gr = await fetch(gridUrl); if (!gr.ok) throw new Error('grid ' + gr.status);
-  const grid = `data:image/jpeg;base64,${bytesToB64(new Uint8Array(await gr.arrayBuffer()))}`;
+  const { r: gr, datos: gridBuf } = await pedirConLimite(gridUrl, {}, { ms: LIMITES.descarga, proveedor: 'persona-base', etapa: 'descarga-grid', leer: 'arrayBuffer' });
+  if (!gr.ok) throw new Error('grid ' + gr.status);
+  const grid = `data:image/jpeg;base64,${bytesToB64(new Uint8Array(gridBuf))}`;
   const persona = await personaImageB64(env, m.id, m.inputs.persona);
   const prompt = `Image 1 is a 3x3 grid of the same walking body in grey placeholder clothes, seen from the ${view} three-quarter view from above. `
     + `Image 2 is a reference person (${m.style?.look || 'the person in image 2'}). Repaint every figure in image 1 as a hyperrealistic photograph of that person: `
     + 'same face type, age, hair, facial hair, skin tone, and the same full outfit and colours from image 2. Keep EXACTLY the 9 poses, leg positions, '
     + 'positions in the grid, sizes, camera angle and grid layout of image 1. Same person in all 9 cells. Do not add items that are not in image 2. '
     + 'Flat pure chroma green (#00FF00) background everywhere, no floor, no shadows, no text, no borders.';
-  const r = await fetch('https://api.x.ai/v1/images/edits', { method: 'POST',
+  const { r, datos: d } = await pedirConLimite('https://api.x.ai/v1/images/edits', { method: 'POST',
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'grok-imagine-image-quality', prompt, response_format: 'b64_json',
-      images: [{ url: grid, type: 'image_url' }, { url: persona, type: 'image_url' }] }) });
-  const d = await r.json().catch(() => ({}));
+      images: [{ url: grid, type: 'image_url' }, { url: persona, type: 'image_url' }] }) },
+    { ms: LIMITES.grokEdicion, proveedor: 'xai', etapa: `persona-${view}` });
   const b64 = d?.data?.[0]?.b64_json;
   if (!r.ok || !b64) throw new Error('xai ' + r.status + ' ' + String(d?.error || '').slice(0, 120));
   const name = `walk-${view}.jpg`;
@@ -2602,6 +2627,7 @@ async function personaBuildHandler(req, env, url) {
   } catch (e) {
     m.steps[step] = { failed: Date.now(), error: String(e?.message || e).slice(0, 160) };
     await personaSave(env, id, m);
+    if (esErrorLimite(e) && e.tipo === 'timeout') return respuestaLimite(e);
     return json({ ok: false, error: 'step-failed', step, detail: m.steps[step].error }, { status: 502 });
   }
   // Releer para no pisar un paso que otra tienda terminó mientras tanto.
@@ -2642,11 +2668,11 @@ async function imageProxyHandler(req) {
   if (isBlockedHost(target.hostname)) return json({ error: 'blocked-host' }, { status: 403 });
   let r;
   try {
-    r = await fetch(target.toString(), {
+    r = await fetchConLimite(target.toString(), {
       redirect: 'follow',
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PixeriaImportBot/1.0)', 'Accept': 'image/*,*/*;q=0.8' },
-    });
-  } catch (e) { return json({ error: 'fetch-failed', detail: String(e).slice(0, 200) }, { status: 502 }); }
+    }, { ms: LIMITES.descarga, proveedor: target.hostname, etapa: 'descarga' });
+  } catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ error: 'fetch-failed', detail: String(e).slice(0, 200) }, { status: 502 }); }
   if (!r.ok) return json({ error: 'upstream-' + r.status }, { status: 502 });
   const ct = r.headers.get('Content-Type') || '';
   if (!/^image\//i.test(ct)) return json({ error: 'not-an-image', contentType: ct.slice(0, 80) }, { status: 415 });
@@ -2678,15 +2704,14 @@ async function veoStartHandler(req, env) {
   const safeModel = ['veo-3.0-generate-001', 'veo-3.0-fast-generate-001'].includes(model) ? model : 'veo-3.0-fast-generate-001';
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:predictLongRunning`;
-  const r = await fetch(url, {
+  const { r, datos: data } = await pedirConLimite(url, {
     method: 'POST',
     headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       instances: [{ prompt }],
       parameters: { aspectRatio, durationSeconds: parseInt(durationSeconds, 10) || 8, resolution },
     }),
-  });
-  const data = await r.json().catch(() => ({}));
+  }, { ms: LIMITES.videoInicio, proveedor: 'gemini', etapa: 'veo-inicio' });
   return json(data, { status: r.status });
 }
 
@@ -2694,8 +2719,7 @@ async function veoPollHandler(req, env, opName) {
   if (!env.GEMINI_API_KEY) return json({ error: 'server-missing-key' }, { status: 500 });
   if (!/^[A-Za-z0-9_./-]+$/.test(opName)) return json({ error: 'bad-op-name' }, { status: 400 });
   const url = `https://generativelanguage.googleapis.com/v1beta/${opName}`;
-  const r = await fetch(url, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
-  const data = await r.json().catch(() => ({}));
+  const { r, datos: data } = await pedirConLimite(url, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } }, { ms: LIMITES.videoSondeo, proveedor: 'gemini', etapa: 'veo-sondeo' });
   return json(data, { status: r.status });
 }
 
@@ -2708,7 +2732,7 @@ async function veoDownloadHandler(req, env, url) {
   if (!uri.startsWith('https://generativelanguage.googleapis.com/')) {
     return json({ error: 'invalid-uri' }, { status: 400 });
   }
-  const r = await fetch(uri, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+  const r = await fetchConLimite(uri, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } }, { ms: LIMITES.videoDescarga, proveedor: 'gemini', etapa: 'veo-descarga' });
   if (!r.ok) {
     const errText = await r.text();
     return json({ error: 'veo-download-failed', status: r.status, detail: errText.slice(0, 300) }, { status: r.status });
@@ -3863,12 +3887,12 @@ async function saveTelegramImportFailure(env, data) {
 // mandaba a yt-dlp por defecto y moría con "Unable to extract video" — no había vídeo.
 async function sniffOpenGraph(url) {
   try {
-    const r = await fetch(url, {
+    const { r, datos: pagina } = await pedirConLimite(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/1.0; +https://www.pixeria.com)', 'Accept': 'text/html' },
       redirect: 'follow',
-    });
+    }, { ms: LIMITES.corto, proveedor: 'opengraph', etapa: 'descarga', leer: 'text' });
     if (!r.ok) return { image: null, video: false };
-    const html = (await r.text()).slice(0, 400000);
+    const html = String(pagina || '').slice(0, 400000);
     const meta = (prop) => {
       const re = new RegExp('<meta[^>]+(?:property|name)=["\']' + prop + '["\'][^>]*content=["\']([^"\']+)', 'i');
       const m = html.match(re);
@@ -4341,7 +4365,7 @@ async function generateAutoMeta(env, info) {
 
   try {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
-    const r = await fetch(url, {
+    const { r, datos: d } = await pedirConLimite(url, {
       method: 'POST',
       headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4351,9 +4375,8 @@ async function generateAutoMeta(env, info) {
           responseMimeType: 'application/json',
         },
       }),
-    });
+    }, { ms: LIMITES.texto, proveedor: 'gemini', etapa: 'auto-meta' });
     if (!r.ok) return empty;
-    const d = await r.json();
     const text = d?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     let parsed = null;
     try { parsed = JSON.parse(text); }
@@ -4731,16 +4754,15 @@ async function siteCapsuleGemini(env, source) {
     `aplicacion: siguiente experimento concreto, 180-350 caracteres.\n` +
     `No inventes datos, no cites fuentes ajenas, no uses Markdown y distingue hechos de recomendaciones.\n\n` +
     `TÍTULO: ${source.title}\nDESCRIPCIÓN: ${source.description}\nAUTOR: ${source.author}\nURL: ${source.url}\n\nTEXTO:\n${source.text}`;
-  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+  const { r: response, datos: data } = await pedirConLimite('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
     method: 'POST',
     headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.15, responseMimeType: 'application/json' },
     }),
-  });
+  }, { ms: LIMITES.textoLargo, proveedor: 'gemini', etapa: 'capsula' });
   if (!response.ok) throw new Error(`gemini-${response.status}`);
-  const data = await response.json();
   const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error('gemini-invalid-json'); }
@@ -4790,11 +4812,11 @@ async function stockSiteCapsuleHandler(req, env, ctx) {
 
   let response;
   try {
-    response = await fetch(requested.href, {
+    response = await fetchConLimite(requested.href, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/2.0; +https://www.pixeria.com)', Accept: 'text/html,application/xhtml+xml' },
       redirect: 'follow',
-    });
-  } catch { return json({ error: 'source-unreachable' }, { status: 502 }); }
+    }, { ms: LIMITES.descarga, proveedor: requested.hostname, etapa: 'fuente' });
+  } catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ error: 'source-unreachable' }, { status: 502 }); }
   if (!response.ok) return json({ error: 'source-fetch-failed', status: response.status }, { status: 502 });
   const finalUrl = siteCapsuleUrl(response.url);
   if (!finalUrl) return json({ error: 'unsafe-redirect' }, { status: 400 });
@@ -4830,7 +4852,7 @@ async function stockSiteCapsuleHandler(req, env, ctx) {
 
   let summary;
   try { summary = await siteCapsuleGemini(env, { title, description, author, url: canonical.href, text }); }
-  catch (error) { return json({ error: 'capsule-synthesis-failed', detail: String(error.message || error).slice(0, 120) }, { status: 502 }); }
+  catch (error) { return (esErrorLimite(error) && error.tipo === 'timeout' && respuestaLimite(error)) || json({ error: 'capsule-synthesis-failed', detail: String(error.message || error).slice(0, 120) }, { status: 502 }); }
 
   items = await siteCapsuleItems(env);
   let preview = siteCapsuleFind(items, canonical.href, counselorTag, 'image');
@@ -5299,7 +5321,7 @@ export async function stockPublishHandler(req, env, ctx) {
         }
       } catch { /* sourceUrl no es URL absoluta → fetch tal cual */ }
 
-      const r = await fetch(fetchUrl, { headers: fetchHeaders });
+      const r = await fetchConLimite(fetchUrl, { headers: fetchHeaders }, { ms: LIMITES.descarga, proveedor: 'origen', etapa: 'descarga-fuente' });
       if (!r.ok) {
         return json({ error: 'sourceUrl-fetch-failed', status: r.status }, { status: 502 });
       }
@@ -5311,6 +5333,8 @@ export async function stockPublishHandler(req, env, ctx) {
       finalMime = mime || r.headers.get('Content-Type') || 'application/octet-stream';
     }
   } catch (e) {
+    const limite = respuestaLimite(e);
+    if (limite) return limite;
     return json({ error: 'decode-failed', detail: String(e) }, { status: 400 });
   }
 
@@ -6964,22 +6988,22 @@ async function agoraAnalyzeHandler(req, env) {
   if (!env.GEMINI_API_KEY) return json({ ok: false, detail: 'no-gemini-key' });
   const prompt = b.prompt || 'Analiza esta imagen de forma concisa.';
   try {
-    const ir = await fetch(b.imageUrl);
+    const { r: ir, datos: irBuf } = await pedirConLimite(b.imageUrl, {}, { ms: LIMITES.descarga, proveedor: 'agora', etapa: 'descarga', leer: 'arrayBuffer' });
     if (!ir.ok) return json({ ok: false, detail: `image-fetch ${ir.status}` });
     const mime = ir.headers.get('content-type') || 'image/jpeg';
-    const buf = new Uint8Array(await ir.arrayBuffer());
+    const buf = new Uint8Array(irBuf);
     let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-    const gr = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+    const { r: gr, datos: gd } = await pedirConLimite('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
       method: 'POST',
       headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: mime, data: btoa(bin) } }] }] }),
-    });
-    const gd = await gr.json().catch(() => ({}));
+    }, { ms: LIMITES.texto, proveedor: 'gemini', etapa: 'analisis' });
     if (!gr.ok) return json({ ok: false, detail: `gemini ${gr.status}: ${JSON.stringify(gd).slice(0, 200)}` });
     const parts = (((gd.candidates || [])[0] || {}).content || {}).parts || [];
     const text = parts.map(p => p.text).filter(Boolean).join('');
     return json({ ok: true, text, model: 'gemini-2.5-flash' });
   } catch (e) {
+    if (esErrorLimite(e) && e.tipo === 'timeout') return respuestaLimite(e);
     return json({ ok: false, detail: String(e).slice(0, 200) });
   }
 }
@@ -8040,7 +8064,8 @@ export default {
         res = json({ error: 'not-found', path }, { status: 404 });
       }
     } catch (e) {
-      res = json({ error: 'worker-exception', message: String(e) }, { status: 500 });
+      // Límite de espera agotado o proveedor inaccesible: 504/502 con motivo claro.
+      res = respuestaLimite(e) || json({ error: 'worker-exception', message: String(e) }, { status: 500 });
     }
     const ms = Date.now() - t0;
     await handleAutomaticHttpNotification(ctx, env, req, path, res, ms);
