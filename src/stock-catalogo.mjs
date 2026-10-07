@@ -18,7 +18,9 @@
 import { sanitizeValidacion } from './stock-poster.mjs';
 
 export const STOCK_TAGS_MAX = 10;
-export const STOCK_TAG_MAX_LEN = 30;
+// 30 → 80 (Carlos, 7-oct-2026): un hashtag de destino es el nombre único de un centro o de una pantalla
+// (#starbucks_paseodegracia_103_pantalla1 = 37 caracteres) y a 30 se cortaba, con dos pantallas en el mismo tag.
+export const STOCK_TAG_MAX_LEN = 80;
 export const CATALOGO_NOMBRE_MAX = 120;
 export const CATALOGOS_MAX_IDS = 500;
 export const CATALOGO_TAG = 'catalogo';
@@ -84,6 +86,25 @@ export function canonTag(t) {
 /** Clave para COMPARAR etiquetas: sin tildes ni separadores y con las equivalencias resueltas. */
 export function tagKey(t) {
   return foldTag(canonTag(t));
+}
+
+// HASHTAGS ESCRITOS (Carlos, 7-oct-2026): al importar o crear un contenido basta escribir el hashtag en el
+// comentario, el título o el texto —«Promo otoño #starbucks #starbucks_paseodegracia_103_pantalla1»— para que la
+// pieza nazca con esas etiquetas: la del cliente decide quién la ve y la del centro o la pantalla, dónde se emite.
+// No son hashtags un color (#ff8800) ni un número suelto (#103).
+const HASHTAG = /(?:^|[\s,;:(«"'¡¿>])#([\p{L}\p{N}][\p{L}\p{N}_-]{1,79})/gu;
+export function hashtagsIn(...texts) {
+  const out = [];
+  for (const text of texts) {
+    if (text == null) continue;
+    for (const m of String(text).matchAll(HASHTAG)) {
+      const raw = m[1];
+      if (/^\d+$/.test(raw) || (/^[0-9a-f]{3,8}$/i.test(raw) && /\d/.test(raw))) continue;
+      const tag = cleanTag(raw);
+      if (tag && !out.includes(tag)) out.push(tag);
+    }
+  }
+  return out.slice(0, STOCK_TAGS_MAX);
 }
 
 // Devuelve el catálogo saneado o null si no hay id utilizable.

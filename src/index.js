@@ -38,6 +38,9 @@ import {
   applyMetaPatch,
   buildCatalogos,
   cleanTag,
+  canonTag,
+  hashtagsIn,
+  STOCK_TAG_MAX_LEN,
   itemHasTag,
   itemMatchesQuery,
   refreshVigente,
@@ -116,7 +119,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.07.10.2026.r3.20:12';
+const WORKER_VERSION = 'v.07.10.2026.r4.22:03';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5162,6 +5165,8 @@ export async function stockPublishHandler(req, env, ctx) {
   // base `admiranext,tiktok,vertical` solo dejaba hueco a UNA etiqueta y los hashtags
   // de catálogo no cabían.
   let tags = Array.isArray(body.tags) ? body.tags.map(cleanTag).filter(Boolean).slice(0, STOCK_TAGS_MAX) : null;
+  // Hashtags escritos en el comentario, el título o el texto: etiquetas de la pieza (cliente, centro, pantalla).
+  const hashtags = hashtagsIn(body.comment, body.title, body.prompt);
   // Catálogo (opcional): {id, cliente, nombre, desde, hasta, proyecto, producto}.
   // Se guarda saneado en meta.catalogo; si viene pero no trae id utilizable → 400.
   const catalogo = body.catalogo == null ? null : sanitizeCatalogo(body.catalogo);
@@ -5438,6 +5443,8 @@ export async function stockPublishHandler(req, env, ctx) {
     audience = auto.audience;
     category = auto.category;
   } catch { if (!tags) tags = []; }
+  // Los hashtags escritos van DELANTE: si hay que recortar, se caen las etiquetas automáticas, no el destino.
+  if (hashtags.length) tags = [...new Set([...hashtags, ...(tags || [])])].slice(0, STOCK_TAGS_MAX);
   // En campañas segmentadas el frontend manda el público explícito → prevalece
   // sobre la clasificación de Gemini (es el segmento exacto de esta versión).
   if (bodyAudience) audience = bodyAudience;
@@ -6014,9 +6021,9 @@ async function stockEditTagsHandler(req, env, ctx, id) {
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!Array.isArray(body.tags)) return json({ error: 'missing-tags-array' }, { status: 400 });
 
-  const cleaned = body.tags
-    .map(t => String(t).toLowerCase().trim().replace(/^[#·.\s]+|[#·.\s]+$/g, ''))
-    .filter(t => t && t.length <= 30)
+  // Misma forma que al publicar: canónica y con el mismo largo máximo (antes se descartaban en silencio las de más
+  // de 30 caracteres, justo las que nombran un centro o una pantalla).
+  const cleaned = [...new Set(body.tags.map(canonTag).filter(Boolean))]
     .slice(0, 12); // hasta 12 etiquetas (auto ~4 + metatags propias para agrupar)
 
   const metaKey = `stock/${id}/meta.json`;
