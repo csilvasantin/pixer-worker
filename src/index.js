@@ -116,7 +116,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.07.10.2026.r1.07:20';
+const WORKER_VERSION = 'v.07.10.2026.r2.09:27';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -310,7 +310,8 @@ function notificationRouteIsSkipped(path, status, method) {
 function notificationUsesIncidentRateLimit(path, method, status, errorCode) {
   const exactPath = String(path || '/').length > 1 ? String(path).replace(/\/+$/, '') : String(path || '/');
   return String(method || '').toUpperCase() === 'POST' && exactPath === '/locations/cmd/ack' &&
-    Number(status) >= 400 && Number(status) < 500 && errorCode === 'invalid_ack_reference';
+    Number(status) >= 400 && Number(status) < 500 &&
+    (errorCode === 'invalid_ack_reference' || (Number(status) === 403 && errorCode === 'command_screen_mismatch'));
 }
 
 function notificationSafePath(path) {
@@ -333,11 +334,13 @@ async function responseErrorCode(res) {
   } catch { return ''; }
 }
 
-function automaticHttpMessage(req, path, status, ms) {
+function automaticHttpMessage(req, path, status, ms, errorCode = '') {
   const emoji = status >= 500 ? '🚨' : status >= 400 ? '⚠️' : '✅';
+  const reason = errorCode === 'command_screen_mismatch' && String(path).replace(/\/+$/, '') === '/locations/cmd/ack'
+    ? '\n· motivo: el acuse pertenece a otra pantalla' : '';
   return `${emoji} <b>${escHtml(req.method)} ${escHtml(notificationSafePath(path))}</b>\n` +
     `· ${status} · ${ms}ms\n` +
-    `· origen seguro <code>${escHtml(notificationSourceClass(req))}</code>`;
+    `· origen seguro <code>${escHtml(notificationSourceClass(req))}</code>${reason}`;
 }
 
 async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
@@ -361,19 +364,22 @@ async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
         errorCode,
         ...identity,
       });
+      if (status >= 400 && notificationUsesIncidentRateLimit(path, req.method, status, errorCode)) {
+        console.warn(`ack-notification status=${status} error=${errorCode} action=${result.action}`);
+      }
       if (result.action === 'send_first') {
-        await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+        await sendTelegram(env, automaticHttpMessage(req, path, status, ms, errorCode));
       } else if (result.action === 'send_reminder') {
-        await sendTelegram(env, `${automaticHttpMessage(req, path, status, ms)}\n· ${result.count} fallos · ${result.suppressed} repetición(es) suprimida(s)`);
+        await sendTelegram(env, `${automaticHttpMessage(req, path, status, ms, errorCode)}\n· ${result.count} fallos · ${result.suppressed} repetición(es) suprimida(s)`);
       } else if (result.action === 'send_recovery') {
         await sendTelegram(env, formatIncidentRecovery(result));
       } else if (status < 400 && policy.action === 'immediate') {
-        await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+        await sendTelegram(env, automaticHttpMessage(req, path, status, ms, errorCode));
       }
     } catch {
       // Una avería del rate-limit nunca puede ocultar el primer error. Para una
       // recuperación no se inventa señal si no se pudo leer el estado previo.
-      if (status >= 400) await sendTelegram(env, automaticHttpMessage(req, path, status, ms));
+      if (status >= 400) await sendTelegram(env, automaticHttpMessage(req, path, status, ms, errorCode));
       console.warn(`notification-incident-policy-failed path=${notificationSafePath(path)} status=${status}`);
     }
   };
@@ -394,7 +400,7 @@ async function handleAutomaticHttpNotification(ctx, env, req, path, res, ms) {
       if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(incident());
       else await incident();
     } else {
-      notify(ctx, env, automaticHttpMessage(req, path, status, ms));
+      notify(ctx, env, automaticHttpMessage(req, path, status, ms, errorCode));
     }
     return;
   }
