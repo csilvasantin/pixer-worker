@@ -22,7 +22,7 @@ test('observed type blocks retain colour, proportions, weight and safe style val
  assert.equal(validateAdvertisement(sample).texts[0].typography,undefined,'legacy documents remain valid');
 });
 test('analysis requests separate colour blocks and observed typography without claiming font identity',async()=>{
- await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{const prompt=JSON.parse(init.body).contents[0].parts[1].text;assert.match(prompt,/whenever type colour, size, weight or family changes/);assert.match(prompt,/Never claim to identify a proprietary font/);return response(styled);});
+ await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{const prompt=JSON.parse(init.body).contents[0].parts[1].text;assert.match(prompt,/whenever type colour, size, weight or family changes/);assert.match(prompt,/Never claim to identify a proprietary font/);assert.match(prompt,/do not duplicate it in texts/);return response(styled);});
 });
 
 test('new extractions require every observed type field while legacy documents remain readable',async()=>{
