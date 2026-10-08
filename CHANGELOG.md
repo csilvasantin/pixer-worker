@@ -2,6 +2,22 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## Sin sellar · rama morfeo/stock-subida-partes · SubMorfeoMacMini · MacMini
+
+- **Subida por partes, a prueba de MP4 truncados y sin basura** (8-oct-2026). El Adaptador de Pixeria
+  mandaba MP4 de ~70 MB en base64 dentro de un JSON y el isolate pasaba de 128 MB (503 «Worker exceeded
+  resource limits»). Pasa a usar `/stock/upload/*` + `/stock/publish {r2Staged}`, que ya existía; aquí se
+  endurece:
+  - `/stock/upload/init` guarda `size` en el customMetadata de la subida (`declaredSize`); `size` no
+    entero o negativo → 400 `bad-size`.
+  - `/stock/upload/complete` compara lo ensamblado con lo anunciado: si no cuadra, borra el fichero y
+    responde 400 `size-mismatch {declared, size}`.
+  - `/stock/publish` con `r2Staged` borra también la copia de `uploads/` cuando responde `reused`.
+  - El cron de cada 10 min borra de `uploads/` lo cerrado hace más de 24 h y nunca publicado
+    (`stockStagingSweep`).
+- Test: `test/stock-subida-partes.test.mjs` (trozos en streaming sin leerlos a memoria, tamaño, abort,
+  limpieza y misma entrada del Stock que el carril base64).
+
 ## v.07.10.2026.r4.22:03 · NeoMBP16 · MacBookPro16
 
 - **Hashtags de destino** (Carlos, 7-oct-2026). Una etiqueta admite 80 caracteres (antes 30): el hashtag de una

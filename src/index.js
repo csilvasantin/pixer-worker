@@ -120,7 +120,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.07.10.2026.r5.22:27';
+const WORKER_VERSION = 'v.09.10.2026.r1.00:10';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5066,10 +5066,22 @@ async function stockExistsHandler(req, env, url) {
 //
 // Cupos: 25 MB por trozo (holgado bajo los 100 del borde) y 400 trozos. El
 // techo de verdad lo pone STOCK_STAGED_MAX. (Carlos, 28-08-2026 · NeoMBP16.)
+//
+// Tamaño anunciado (8-oct-2026 · SubMorfeoMacMini): /init guarda el `size` del
+// cliente en el customMetadata de la propia subida (`declaredSize`) y /complete
+// lo compara con lo que R2 ensambló. Si no coincide, el fichero se borra y
+// responde 400 size-mismatch: mejor fallar ahí que publicar un MP4 truncado. Va
+// en R2 y no en KV para no gastar una escritura del tope diario por subida.
+//
+// Limpieza: lo que se cierra con /complete pero nunca llega a /stock/publish se
+// queda en `uploads/`. El cron de cada 10 min borra lo que lleve ahí más de
+// STOCK_STAGING_TTL_MS (stockStagingSweep). Las subidas sin cerrar no son
+// objetos y no salen al listar: esas las aborta el ciclo de vida del bucket.
 const STOCK_PART_MAX = 25 * 1024 * 1024;
 const STOCK_PARTS_MAX = 400;
 const STOCK_STAGED_MAX = 2 * 1024 * 1024 * 1024;   // 2 GB
 const STOCK_STAGING_PREFIX = 'uploads/';
+const STOCK_STAGING_TTL_MS = 24 * 60 * 60 * 1000;  // 24 h en uploads/ = abandonado
 
 // Solo se acepta tocar claves de `uploads/`: sin esto, un `key` cualquiera
 // dejaría escribir encima de un asset ya publicado.
@@ -5085,6 +5097,7 @@ async function stockUploadInitHandler(req, env) {
   try { body = await req.json(); } catch {}
   const mime = (typeof body.mime === 'string' && body.mime) ? body.mime : 'application/octet-stream';
   const size = Number(body.size || 0);
+  if (!Number.isSafeInteger(size) || size < 0) return json({ error: 'bad-size' }, { status: 400 });
   if (size && size > STOCK_STAGED_MAX) {
     return json({ error: 'too-big', max: STOCK_STAGED_MAX }, { status: 413 });
   }
@@ -5092,6 +5105,8 @@ async function stockUploadInitHandler(req, env) {
   const key = `${STOCK_STAGING_PREFIX}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
   const up = await env.STOCK_BUCKET.createMultipartUpload(key, {
     httpMetadata: { contentType: mime },
+    // El tamaño anunciado viaja con la subida: /complete lo comprueba.
+    ...(size > 0 ? { customMetadata: { declaredSize: String(size) } } : {}),
   });
   return json({ ok: true, key, uploadId: up.uploadId, partSize: STOCK_PART_MAX, maxParts: STOCK_PARTS_MAX });
 }
@@ -5129,12 +5144,45 @@ async function stockUploadCompleteHandler(req, env) {
   if (limpias.length !== parts.length) return json({ error: 'bad-parts' }, { status: 400 });
   limpias.sort((a, b) => a.partNumber - b.partNumber);
   const up = env.STOCK_BUCKET.resumeMultipartUpload(key, uploadId);
+  let obj;
   try {
-    const obj = await up.complete(limpias);
-    return json({ ok: true, key, size: (obj && obj.size) || 0 });
+    obj = await up.complete(limpias);
   } catch (e) {
     return json({ error: 'complete-failed', detail: String((e && e.message) || e) }, { status: 502 });
   }
+  const size = (obj && obj.size) || 0;
+  // Lo ensamblado tiene que medir lo anunciado en /init. Si R2 no devolviera el
+  // customMetadata con el objeto, se pregunta con un head.
+  let custom = obj && obj.customMetadata;
+  if (!custom) {
+    try { const h = await env.STOCK_BUCKET.head(key); custom = h && h.customMetadata; } catch {}
+  }
+  const declared = Number((custom && custom.declaredSize) || 0);
+  if (declared > 0 && size !== declared) {
+    try { await env.STOCK_BUCKET.delete(key); } catch {}
+    return json({ error: 'size-mismatch', declared, size }, { status: 400 });
+  }
+  return json({ ok: true, key, size });
+}
+
+// Barrido del cron: borra de `uploads/` lo cerrado hace más de STOCK_STAGING_TTL_MS
+// y nunca publicado (el publish lo borra él mismo al copiarlo a stock/<id>/).
+// Acotado a 5 páginas de 1000 por pasada para no alargar el cron.
+export async function stockStagingSweep(env, now = Date.now()) {
+  if (!env.STOCK_BUCKET) return { deleted: 0 };
+  const limite = now - STOCK_STAGING_TTL_MS;
+  let cursor, deleted = 0;
+  for (let pagina = 0; pagina < 5; pagina++) {
+    const r = await env.STOCK_BUCKET.list({ prefix: STOCK_STAGING_PREFIX, limit: 1000, cursor });
+    const viejas = (r.objects || [])
+      .filter(o => stagingKeyOk(o.key) && o.uploaded && new Date(o.uploaded).getTime() < limite)
+      .map(o => o.key);
+    if (viejas.length) { await env.STOCK_BUCKET.delete(viejas); deleted += viejas.length; }
+    if (!r.truncated || !r.cursor) break;
+    cursor = r.cursor;
+  }
+  if (deleted) console.log(JSON.stringify({ message: 'stock uploads/ abandonados borrados', deleted }));
+  return { deleted };
 }
 
 // Una subida empezada y no terminada deja los trozos ocupando sitio: se aborta.
@@ -5275,6 +5323,9 @@ export async function stockPublishHandler(req, env, ctx) {
   const hashHint = isSha256Hex(body.contentHash) ? body.contentHash : null;
   const recentInput = externalId ? null : recentFingerprintInput({ title, motor, sourceUrl });
   const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
+    // Un duplicado no se copia: si venía de una subida por partes, su fichero de
+    // `uploads/` sobra (la dedup temprana responde antes de llegar a borrarlo).
+    if (r2Staged) ctx.waitUntil(env.STOCK_BUCKET.delete(r2Staged).catch(() => {}));
     // Reimporting identical content keeps its identity, history and user tags.
     // Only enrich the measured orientation; existing master measurements take priority.
     if (ownerMeta && ['image', 'video'].includes(ownerMeta.type)) {
@@ -7717,6 +7768,8 @@ export default {
       ctx.waitUntil(rebuildAndSyncTaggedStock(env));
       ctx.waitUntil(maybeDailyReport(env));
       ctx.waitUntil(gridAlertsCheck(env, ctx));
+      // Subidas por partes cerradas y nunca publicadas (ver stockStagingSweep).
+      ctx.waitUntil(stockStagingSweep(env).catch(() => console.warn('stock-staging-sweep-failed')));
     }
   },
 
