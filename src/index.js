@@ -1,3 +1,4 @@
+import {advertisementAnalysis} from './advertisement-analysis.mjs';
 import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
 import { gridCircuitsHandler } from './grid-circuits.mjs';
@@ -2335,7 +2336,7 @@ async function imageEditHandlerConLimite(req, env) {
   const presupuesto = crearPresupuesto(LIMITES.geminiImagen);
   const { r, datos: d } = await conReintentos((intento) => pedirConLimite(url, {
     method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType: mime, data: img } }, { text: sys + '\n\nInstrucción: ' + prompt }] }] }),
+    body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType: mime, data: img } }, { text: sys + '\n\nInstrucción: ' + prompt }] }], ...(['1:1','2:3','3:2','3:4','4:3','4:5','5:4','9:16','16:9','21:9'].includes(b.aspect_ratio)?{generationConfig:{responseModalities:['TEXT','IMAGE'],imageConfig:{aspectRatio:b.aspect_ratio}}}:{}) }),
   }, { presupuesto, proveedor: 'gemini', etapa: intento > 1 ? 'edicion-reintento' : 'edicion' }), { presupuesto });
   if (!r.ok) return json({ error: 'gemini-' + r.status, detail: (d && d.error && d.error.message) || '' }, { status: r.status });
   let outImg = null, outMime = 'image/png';
@@ -7856,6 +7857,8 @@ export default {
         res = await ttsFreeHandler(req);
       } else if (path === '/xai/image' && req.method === 'POST') {
         res = await xaiImageHandler(req, env);
+      } else if (path === '/image/analyze' && req.method === 'POST') {
+        res = await advertisementAnalysis(req, env);
       } else if (path === '/image/edit' && req.method === 'POST') {
         res = await imageEditHandler(req, env);
       } else if (path === '/twin/match' && req.method === 'POST') {

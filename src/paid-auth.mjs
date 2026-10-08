@@ -10,7 +10,7 @@ export function isPaidGeneration(method, path) {
   if (m === 'GET' && p === '/tts/catalog') return true;
   if (m === 'POST' && (
     p === '/xai/image' || p === '/xai/video' || p === '/xai/video/scenes' ||
-    p === '/image/edit' || p === '/lyria/generate' || p === '/lyria3/generate' ||
+    p === '/image/edit' || p === '/image/analyze' || p === '/lyria/generate' || p === '/lyria3/generate' ||
     p === '/imagen/generate' || p === '/veo/generate' || p === '/llm/lyrics' || p === '/pvideo'
   )) return true;
   if (m === 'GET' && (p === '/pvideo' || p === '/veo/download')) return true;
