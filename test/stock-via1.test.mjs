@@ -14,9 +14,9 @@ test('num al publicar: max(KV, índice)+1; duplicados se renumeran conservando e
 
 test('etiquetas honestas: la orientación real del máster sustituye a la declarada; sin dimensiones no se toca', () => {
   const r = etiquetasHonestas(['admiranext', 'tiktok', 'horizontal', 'catalogo', 'alcampo'], { ancho: 1080, alto: 1920 });
-  assert.deepEqual(r.tags, ['admiranext', 'tiktok', 'vertical', 'catalogo', 'alcampo']); assert.equal(r.orientacion, 'vertical'); assert.equal(r.corregida, true);
-  const ok = etiquetasHonestas(['tiktok', 'vertical'], { ancho: 1080, alto: 1920 }); assert.equal(ok.corregida, false); assert.deepEqual(ok.tags, ['tiktok', 'vertical']);
-  const sin = etiquetasHonestas(['tiktok', 'best'], { ancho: 1920, alto: 1080 }); assert.deepEqual(sin.tags, ['tiktok', 'best', 'horizontal']);
+  assert.deepEqual(r.tags, ['admiranext', 'tiktok', 'vertical', 'portrait', 'catalogo', 'alcampo']); assert.equal(r.orientacion, 'vertical'); assert.equal(r.corregida, true);
+  const ok = etiquetasHonestas(['tiktok', 'vertical'], { ancho: 1080, alto: 1920 }); assert.equal(ok.corregida, false); assert.deepEqual(ok.tags, ['tiktok', 'vertical', 'portrait']);
+  const sin = etiquetasHonestas(['tiktok', 'best'], { ancho: 1920, alto: 1080 }); assert.deepEqual(sin.tags, ['tiktok', 'best', 'horizontal', 'landscape']);
   const nada = etiquetasHonestas(['tiktok', 'vertical'], null); assert.equal(nada.orientacion, null); assert.deepEqual(nada.tags, ['tiktok', 'vertical']);
 });
 
@@ -25,7 +25,7 @@ test('reparto: objetivos por etiqueta, por cliente de catálogo o por segmento; 
   const extra = [{ screen: 'sim-gracia-kiosko', tag: '#canalkioskpubli', lane: 'publicidad' }, { screen: 'xtore-escaparate-pn1w', cliente: 'Alcampo', lane: 'publicidad' }, { screen: 'mupi-1', audience: 'f', age: 'joven', lane: 'publicidad' }, { screen: '', tag: 'x' }, { screen: 'y', lane: 'z' }];
   const t = objetivosDeReparto(base, extra);
   assert.deepEqual(t.map(claveObjetivo), ['canalkioskpubli', 'cliente:alcampo', 'seg:f:joven']);
-  const pieza = { tags: ['admiranext', 'tiktok', 'vertical', 'catalogo', 'alcampo'], catalogo: { cliente: 'alcampo' }, audience: 'all', segmentation: null };
+  const pieza = { tags: ['admiranext', 'tiktok', 'vertical', 'portrait', 'catalogo', 'alcampo'], catalogo: { cliente: 'alcampo' }, audience: 'all', segmentation: null };
   assert.equal(motivoDeReparto(pieza, t[0]), null);
   assert.equal(motivoDeReparto(pieza, t[1]), 'cliente');
   assert.equal(motivoDeReparto(pieza, t[2]), null, 'audience all no casa un objetivo f');

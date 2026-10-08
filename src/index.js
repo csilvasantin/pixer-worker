@@ -55,7 +55,7 @@ import {
   sanitizeValidacion,
 } from './stock-poster.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
-import { siguienteNum, renumerarDuplicados, etiquetasHonestas, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
+import { siguienteNum, renumerarDuplicados, etiquetasHonestas, contentDimensions, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
 // Proxy server-side para llamadas de Pixer.ai a ElevenLabs y xAI/Grok.
@@ -5180,6 +5180,8 @@ export async function stockPublishHandler(req, env, ctx) {
   const posterIn = (body.poster != null && body.poster !== '') ? parsePoster(body.poster) : null;
   if (posterIn && posterIn.error) return json({ error: posterIn.error, ...(posterIn.max ? { max: posterIn.max } : {}) }, { status: posterIn.error === 'poster-too-big' ? 413 : 400 });
   const validacionIn = sanitizeValidacion(body.validacion);
+  const dimensionsIn = ['image', 'video'].includes(type) ? contentDimensions(body.dimensions) : null;
+  const measuredDimensions = validacionIn?.ancho && validacionIn?.alto ? validacionIn : dimensionsIn;
   // Calidad del asset (good/better/best, según el motor); default 'good'.
   const QUALITY_TIERS = ['good', 'better', 'best'];
   const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
@@ -5272,12 +5274,26 @@ export async function stockPublishHandler(req, env, ctx) {
   const existingMeta = externalId ? await stockMetaById(env, id) : null;
   const hashHint = isSha256Hex(body.contentHash) ? body.contentHash : null;
   const recentInput = externalId ? null : recentFingerprintInput({ title, motor, sourceUrl });
-  const reusedResponse = (ownerId, reason, ownerMeta) => json({
+  const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
+    // Reimporting identical content keeps its identity, history and user tags.
+    // Only enrich the measured orientation; existing master measurements take priority.
+    if (ownerMeta && ['image', 'video'].includes(ownerMeta.type)) {
+      const dims = contentDimensions({width:ownerMeta.ancho, height:ownerMeta.alto}) || (verifiedContent ? measuredDimensions : null);
+      const orientation = etiquetasHonestas(ownerMeta.tags, dims);
+      if (dims && (JSON.stringify(orientation.tags) !== JSON.stringify(ownerMeta.tags) || ownerMeta.orientacion !== orientation.orientacion)) {
+        ownerMeta = {...ownerMeta, tags:orientation.tags, orientacion:orientation.orientacion, ancho:dims.ancho, alto:dims.alto};
+        await env.STOCK_BUCKET.put(`stock/${ownerId}/meta.json`, JSON.stringify(ownerMeta), {httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=300'}});
+        ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+      }
+    }
+    return json({
     ok: true, reused: true, reason, id: ownerId, num: ownerMeta?.num || null,
     url: `${new URL(req.url).origin}/stock/asset/${ownerId}`,
     createdAt: (ownerMeta && ownerMeta.createdAt) || null,
     contentHash: (ownerMeta && ownerMeta.contentHash) || null,
-  });
+    tags: ownerMeta?.tags || [], orientacion: ownerMeta?.orientacion || null,
+    ancho: ownerMeta?.ancho || null, alto: ownerMeta?.alto || null,
+  }); };
   if (hashHint) {
     const owner = await stockHashLookup(env, hashHint);
     const early = stockDedupDecision({ id, externalId, existingMeta, contentHash: hashHint, hashOwnerId: owner });
@@ -5376,7 +5392,7 @@ export async function stockPublishHandler(req, env, ctx) {
     const keepsOwnFile = decision.id === id && existingMeta && existingMeta.assetKey === assetKey;
     if (written && !keepsOwnFile) { try { await env.STOCK_BUCKET.delete(assetKey); } catch {} }
     console.log(JSON.stringify({ message: 'stock publish dedup', id, reused: decision.id, reason: decision.reason, contentHash }));
-    return reusedResponse(decision.id, decision.reason, decision.id === id ? existingMeta : await stockMetaById(env, decision.id));
+    return reusedResponse(decision.id, decision.reason, decision.id === id ? existingMeta : await stockMetaById(env, decision.id), true);
   };
 
   if (sourceResponse) {
@@ -5467,7 +5483,7 @@ export async function stockPublishHandler(req, env, ctx) {
   tags = applyCatalogoTags(Array.isArray(tags) ? tags : [], catalogo, { quality });
   // VÍA 1 (FLT-100477): etiquetas HONESTAS por dimensiones. `vertical`/`horizontal` las pone el cliente
   // según el formato que pidió; si la validación trae ancho/alto reales del máster, manda la realidad.
-  const honestas = etiquetasHonestas(tags, validacionIn);
+  const honestas = etiquetasHonestas(tags, measuredDimensions);
   tags = honestas.tags;
 
   let meta = {
@@ -5479,8 +5495,8 @@ export async function stockPublishHandler(req, env, ctx) {
     comment: comment ? String(comment).slice(0, 2000) : null,
     tags: tags || [],
     orientacion: honestas.orientacion,                                   // vertical|horizontal|cuadrado según el máster real (null si no se midió)
-    ancho: (validacionIn && validacionIn.ancho) || null,
-    alto: (validacionIn && validacionIn.alto) || null,
+    ancho: (measuredDimensions && measuredDimensions.ancho) || null,
+    alto: (measuredDimensions && measuredDimensions.alto) || null,
     quality,
     audience,
     category,
@@ -8101,4 +8117,3 @@ export function shouldFlushNotificationAggregates(event) {
 }
 
 export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
-

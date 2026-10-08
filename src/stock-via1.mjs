@@ -40,20 +40,28 @@ export function renumerarDuplicados(metas) {
 }
 
 /**
- * Etiquetas honestas por dimensiones: `vertical`/`horizontal` las pone el cliente según el formato que
- * pidió; con las dimensiones reales del máster (validacion.ancho/alto) el Stock las corrige. Devuelve
+ * Etiquetas ES/EN por dimensiones reales: vertical+portrait u horizontal+landscape.
+ * Corrige etiquetas contradictorias y conserva el resto, incluidos destinos y calidad. Devuelve
  * {tags, orientacion, corregida}. Sin dimensiones no toca nada (orientacion null).
  */
 export function etiquetasHonestas(tags, dims) {
   const lista = (Array.isArray(tags) ? tags : []).map((t) => String(t).toLowerCase().trim()).filter(Boolean);
   const w = dims && +dims.ancho, h = dims && +dims.alto;
-  if (!(w > 0 && h > 0)) return { tags: lista, orientacion: null, corregida: false };
+  if (!(Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0)) return { tags: lista, orientacion: null, corregida: false };
   const orientacion = h > w ? 'vertical' : (w > h ? 'horizontal' : 'cuadrado');
-  const declarada = lista.find((t) => t === 'vertical' || t === 'horizontal' || t === 'cuadrado') || null;
-  const sin = lista.filter((t) => t !== 'vertical' && t !== 'horizontal' && t !== 'cuadrado');
+  const aliases = {vertical:'vertical', portrait:'vertical', horizontal:'horizontal', landscape:'horizontal', cuadrado:'cuadrado', square:'cuadrado'};
+  const declarada = lista.find(t => aliases[t]) || null;
+  const sin = lista.filter(t => !aliases[t]);
   const idx = declarada ? lista.indexOf(declarada) : sin.length;
-  sin.splice(Math.min(idx, sin.length), 0, orientacion);
-  return { tags: [...new Set(sin)], orientacion, corregida: !!declarada && declarada !== orientacion };
+  sin.splice(Math.min(idx, sin.length), 0, orientacion, ...(orientacion === 'vertical' ? ['portrait'] : orientacion === 'horizontal' ? ['landscape'] : []));
+  return { tags: [...new Set(sin)], orientacion, corregida: lista.some(t => aliases[t] && aliases[t] !== orientacion) };
+}
+
+// Import metadata is independent from video quality validation (no invented ok:true).
+export function contentDimensions(input) {
+  if (!input || typeof input !== 'object') return null;
+  const {width, height} = input;
+  return Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && width <= 65535 && height <= 65535 ? {ancho:width, alto:height} : null;
 }
 
 // ─── Reparto a parrilla: objetivos por etiqueta, por cliente de catálogo o por segmento ───
