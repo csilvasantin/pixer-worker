@@ -1,12 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {advertisementAnalysis,validateAdvertisement} from '../src/advertisement-analysis.mjs';import {isPaidGeneration} from '../src/paid-auth.mjs';
+import {advertisementAnalysis,validateAdvertisement,validateExtraction,EXTRACT_SCHEMA} from '../src/advertisement-analysis.mjs';import {isPaidGeneration} from '../src/paid-auth.mjs';
 const sample={texts:[{text:'UN CAFÉ CON HIELO\nEN LA PLAYA DE BARCELONA',role:'headline',box:[70,270,250,740],confidence:.98}],subjects:[{label:'iced coffee glass',box:[300,440,800,600]}],scene:'Coffee on Barcelona beach',needsRecreation:true,uncertain:false};
+const styled={...sample,texts:sample.texts.map(t=>({...t,typography:{family:'condensed',weight:900,color:'#FFFFFF',align:'center',italic:false,trackingEm:0,lineHeight:1.08,outlineEm:0,outlineColor:'#102D36',shadow:false}}))};
 const req=body=>new Request('https://api.admira.store/image/analyze',{method:'POST',body:JSON.stringify(body)});
 const response=d=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify(d)}]}}]});
 test('new OCR and visual-check endpoint is protected by existing paid auth',()=>assert.equal(isPaidGeneration('POST','/image/analyze'),true));
 test('extracts exact accents, prices and legal blocks; no fabricated completion',()=>{const d=validateAdvertisement({...sample,texts:[...sample.texts,{text:'2,50 € · Hasta agotar existencias',role:'legal',box:[900,10,950,900],confidence:.5}]});assert.equal(d.texts[1].text,'2,50 € · Hasta agotar existencias');assert.equal(d.uncertain,true);});
 test('rejects incomplete schema, inverted or unbounded OCR boxes and unknown roles',()=>{for(const change of [{subjects:null},{uncertain:null},{texts:[{...sample.texts[0],box:[100,200,50,900]}]},{texts:[{...sample.texts[0],box:[0,0,1001,400]}]},{texts:[{...sample.texts[0],role:'instruction'}]}])assert.throws(()=>validateAdvertisement({...sample,...change}));});
-test('uses inline image and structured output with bounded provider deadline',async()=>{const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{assert.match(url,/gemini-2.5-flash:generateContent$/);const b=JSON.parse(init.body);assert.equal(b.generationConfig.responseMimeType,'application/json');assert.equal(b.contents[0].parts[0].inlineData.data,'YQ==');assert.ok(init.signal);return response(sample);});assert.equal(r.status,200);assert.equal((await r.json()).document.texts[0].text,'UN CAFÉ CON HIELO EN LA PLAYA DE BARCELONA');});
+test('uses inline image and structured output with bounded provider deadline',async()=>{const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{assert.match(url,/gemini-2.5-flash:generateContent$/);const b=JSON.parse(init.body);assert.equal(b.generationConfig.responseMimeType,'application/json');assert.equal(b.contents[0].parts[0].inlineData.data,'YQ==');assert.ok(init.signal);return response(styled);});assert.equal(r.status,200);assert.equal((await r.json()).document.texts[0].text,'UN CAFÉ CON HIELO EN LA PLAYA DE BARCELONA');});
 test('does not fetch arbitrary URLs, rejects malformed or oversized requests',async()=>{let calls=0;for(const body of [{image:'https://private.test/image'},{image:'data:text/html;base64,YQ=='},{image:'data:image/png;base64,YQ==',action:'execute'}]){const r=await advertisementAnalysis(req(body),{GEMINI_API_KEY:'test'},()=>{calls++;});assert.equal(r.status,400);}assert.equal(calls,0);const r=await advertisementAnalysis(new Request('https://x',{method:'POST',headers:{'Content-Length':'99999999'},body:'{}'}),{GEMINI_API_KEY:'test'});assert.equal(r.status,413);});
 test('provider errors and invalid JSON fail closed',async()=>{for(const fetcher of [async()=>Response.json({}, {status:429}),async()=>response('not object'),async()=>Response.json({candidates:[]})])assert.equal((await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},fetcher)).status,502);});
 test('visual review returns factual flags and refuses ambiguous results',async()=>{for(const result of [{hasText:true,productPresent:true,issues:[]},{hasText:false,productPresent:false,issues:['Product truncated']}]){const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ==',action:'verify-visual',scene:'Coffee'}),{GEMINI_API_KEY:'test'},async()=>response(result));assert.deepEqual((await r.json()).verification,result);}assert.equal((await advertisementAnalysis(req({image:'data:image/png;base64,YQ==',action:'verify-visual'}),{GEMINI_API_KEY:'test'},async()=>response({}))).status,502);});
@@ -21,5 +22,22 @@ test('observed type blocks retain colour, proportions, weight and safe style val
  assert.equal(validateAdvertisement(sample).texts[0].typography,undefined,'legacy documents remain valid');
 });
 test('analysis requests separate colour blocks and observed typography without claiming font identity',async()=>{
- await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{const prompt=JSON.parse(init.body).contents[0].parts[1].text;assert.match(prompt,/whenever type colour, size, weight or family changes/);assert.match(prompt,/Never claim to identify a proprietary font/);return response(sample);});
+ await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{const prompt=JSON.parse(init.body).contents[0].parts[1].text;assert.match(prompt,/whenever type colour, size, weight or family changes/);assert.match(prompt,/Never claim to identify a proprietary font/);return response(styled);});
+});
+
+test('new extractions require every observed type field while legacy documents remain readable',async()=>{
+ assert.equal(validateAdvertisement(sample).texts[0].typography,undefined);
+ assert.throws(()=>validateExtraction(sample),/missing-observed-typography/);
+ assert.equal(validateExtraction({...sample,texts:[]}).texts.length,0);
+ for(const data of [sample,{...styled,texts:[{...styled.texts[0],typography:{family:'sans'}}]}]){
+  const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async()=>response(data));
+  assert.equal(r.status,502);
+ }
+ await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{
+  const schema=JSON.parse(init.body).generationConfig.responseSchema;
+  assert.deepEqual(schema,EXTRACT_SCHEMA);
+  assert.ok(schema.properties.texts.items.required.includes('typography'));
+  assert.equal(schema.properties.texts.items.properties.typography.required.length,11);
+  return response(styled);
+ });
 });
