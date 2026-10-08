@@ -21,11 +21,11 @@ const number={type:'NUMBER'},string={type:'STRING'},boolean={type:'BOOLEAN'};
 const object=properties=>({type:'OBJECT',properties,required:Object.keys(properties)});
 const enumString=values=>({type:'STRING',enum:values});
 export const EXTRACT_SCHEMA=object({
- texts:{type:'ARRAY',maxItems:32,items:object({
+ texts:{type:'ARRAY',items:object({
   text:string,role:enumString(['headline','body','brand','legal']),box:{type:'ARRAY',items:number,minItems:4,maxItems:4},confidence:number,
   typography:object({family:enumString(['condensed','sans','serif','script','mono']),weight:number,color:string,align:enumString(['left','center','right']),italic:boolean,trackingEm:number,lineHeight:number,outlineEm:number,outlineColor:string,shadow:boolean})
  })},
- subjects:{type:'ARRAY',maxItems:12,items:object({label:string,box:{type:'ARRAY',items:number,minItems:4,maxItems:4}})},
+ subjects:{type:'ARRAY',items:object({label:string,box:{type:'ARRAY',items:number,minItems:4,maxItems:4}})},
  scene:string,needsRecreation:boolean,uncertain:boolean
 });
 export function validateExtraction(d){
