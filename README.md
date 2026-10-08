@@ -34,6 +34,10 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | POST | `/xai/video`            | Grok Imagine Video — start (devuelve `{request_id}`) |
 | GET  | `/xai/video/{id}`       | Grok Imagine Video — poll status |
 | POST | `/stock/publish`        | Publica en Stock; `externalId` requiere el secreto interno y evita duplicados (ver «Dedup del Stock») |
+| POST | `/stock/upload/init`    | `{mime, size}` → `{ok, key, uploadId, partSize, maxParts}`; abre una subida por partes en `uploads/` (ver «Subida por partes») |
+| PUT/POST | `/stock/upload/part` | `?key=&uploadId=&n=` + cuerpo crudo (≤ `partSize`, con `Content-Length`) → `{ok, partNumber, etag}` |
+| POST | `/stock/upload/complete` | `{key, uploadId, parts:[{partNumber, etag}]}` → `{ok, key, size}`; 400 `size-mismatch` si no mide lo anunciado |
+| POST | `/stock/upload/abort`   | `{key, uploadId}` → `{ok, aborted}` |
 | GET  | `/stock/exists`         | `?hash=<sha256>` o `?externalId=<id>` → `{exists, id, url}`; pregunta ANTES de subir |
 | DELETE | `/stock/{id}`         | Borra asset+meta. Con clave: `X-AdmiraNeXT-Ingest` o `NOTIFY_KEY` (`?secret=`, `X-Notify-Key` o `{secret}`) |
 | GET  | `/stock/list`           | Listado; filtros `type`, `motor`, `catalogo=<id>`, `cliente=<slug>`, `tag=<tag>`, `q=<texto>` (ver «Catálogo») |
@@ -41,6 +45,32 @@ curl https://pixer-eleven.<tu-subdomain>.workers.dev/healthz
 | PATCH | `/stock/{id}/meta`     | `{catalogo?, tags_add?, tags_remove?, oculto?, validacion?}` — backfill/edición; misma clave que el DELETE |
 | GET  | `/stock/poster/{id}`    | Póster representativo (`image/jpeg`, caché 1 día, CORS `*`); 404 si no lo tiene. Es `meta.poster` |
 | POST | `/stock/poster`         | `{id, poster:<data URL> \| base64+mime, at?, validacion?}` — clave `STOCK_POSTER_KEY`/`NOTIFY_KEY` en `secret`, `X-Notify-Key` o `?secret=` |
+
+### Subida por partes (28-ago-2026 · tamaño y limpieza 8-oct-2026)
+
+`/stock/publish` con `base64` no sirve para ficheros grandes: base64 infla un 33 %, el borde
+corta el cuerpo en 100 MB y, antes de eso, parsear ~100 MB de JSON pasa de los 128 MB de memoria
+del isolate (503 «Worker exceeded resource limits», Adaptador de Pixeria, 8-oct-2026). Para eso:
+
+1. `POST /stock/upload/init {mime, size}` abre un multipart de R2 en `uploads/<aleatorio>.<ext>`.
+   `size` (bytes, entero ≥ 0, ≤ 2 GB) se guarda en el customMetadata de la subida.
+2. `PUT /stock/upload/part?key=&uploadId=&n=` con el trozo CRUDO (sin base64). Todos los trozos
+   miden `partSize` (25 MB) salvo el último, como exige R2; máximo 400. El cuerpo va en streaming
+   a `uploadPart` (nunca se lee a memoria). Se admite POST por el preflight CORS del navegador.
+3. `POST /stock/upload/complete {key, uploadId, parts}` ensambla. Si `init` trajo `size` y lo
+   ensamblado no mide eso, el fichero se borra y responde 400 `size-mismatch`.
+4. `POST /stock/publish {…metadatos de siempre, r2Staged:<key>}` (sin `base64`): el MISMO
+   handler copia el fichero en streaming a `stock/<id>/asset.<ext>` (hash al vuelo para la dedup)
+   y sigue igual que siempre: tags, póster, validación, índice y aviso. La entrada sale idéntica a
+   la del carril base64 (lo fija `test/stock-subida-partes.test.mjs`).
+5. Si algo falla antes de cerrar: `POST /stock/upload/abort {key, uploadId}`.
+
+Limpieza: el publish borra la copia de `uploads/`, también cuando responde `reused`. Lo cerrado
+y nunca publicado lo borra el cron de cada 10 min a las 24 h (`stockStagingSweep`). Las subidas
+sin cerrar no se listan: las aborta el ciclo de vida del bucket (R2 aborta multipart incompletos
+a los 7 días por defecto). Mismo acceso que `/stock/publish`: público con CORS de la casa;
+`externalId` y el resto de campos privilegiados siguen exigiendo su secreto en el publish.
+Test: `node --test test/stock-subida-partes.test.mjs`.
 
 ### Póster y validación de vídeos (v.12.09.2026.r2 · Yokup #3199)
 
