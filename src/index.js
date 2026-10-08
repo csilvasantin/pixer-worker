@@ -1939,17 +1939,17 @@ async function xaiImageHandlerConLimite(req, env) {
   return json(data, { status: r.status });
 }
 
-export async function xaiVideoStartHandler(req, env) {
-  return conLimite(() => xaiVideoStartHandlerConLimite(req, env));
+export async function xaiVideoStartHandler(req, env, {imageDuration=5}={}) {
+  return conLimite(() => xaiVideoStartHandlerConLimite(req, env, imageDuration));
 }
-async function xaiVideoStartHandlerConLimite(req, env) {
+async function xaiVideoStartHandlerConLimite(req, env, imageDuration=5) {
   if (!env.XAI_KEY) return json({ error: 'server-missing-key', service: 'xai' }, { status: 500 });
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { prompt, duration = 8, aspect_ratio = '16:9', resolution = '720p' } = body;
   if (!prompt || typeof prompt !== 'string') return json({ error: 'missing-prompt' }, { status: 400 });
   if (prompt.length > 4000) return json({ error: 'prompt-too-long', max: 4000 }, { status: 400 });
-  const durErr = durationError(body);
+  const durErr = imageDuration===10?null:durationError(body);
   if (durErr) return json(durErr, { status: 400 });
   let imageUrl = '';
   if (body.image || body.stock_id || body.stockId) {
@@ -1959,9 +1959,9 @@ async function xaiVideoStartHandlerConLimite(req, env) {
     if (resolved.error) return json(resolved, { status: resolved.error === 'image-too-big' ? 413 : 400 });
     imageUrl = resolved.url;
   }
-  const dur = imageUrl ? CLIP_SECONDS : Math.max(1, Math.min(15, parseInt(duration, 10) || 8));
+  const dur = imageUrl ? (imageDuration===10?10:CLIP_SECONDS) : Math.max(1, Math.min(15, parseInt(duration, 10) || 8));
   const payload = imageUrl
-    ? xaiClipPayload({ prompt, imageUrl, aspect: aspect_ratio, resolution })
+    ? xaiClipPayload({ prompt, imageUrl, aspect: aspect_ratio, resolution, duration:dur })
     : { model: 'grok-imagine-video', prompt, duration: dur, aspect_ratio, resolution };
 
   // Modo asíncrono: aquí solo se encola el trabajo en x.ai (el vídeo se sondea aparte).
@@ -1970,7 +1970,7 @@ async function xaiVideoStartHandlerConLimite(req, env) {
     headers: { 'Authorization': `Bearer ${env.XAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }, { ms: LIMITES.videoInicio, proveedor: 'xai', etapa: 'video-inicio' });
-  if (imageUrl && r.ok && data.request_id) await rememberClip(env, data.request_id, prompt, 'Clip 5s');
+  if (imageUrl && imageDuration!==10 && r.ok && data.request_id) await rememberClip(env, data.request_id, prompt, 'Clip 5s');
   return json(data, { status: r.status });
 }
 

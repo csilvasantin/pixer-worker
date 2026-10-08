@@ -56,11 +56,11 @@ export async function stockImageDataUrl(env, stockId) {
   return { url: `data:${mime};base64,${b64(bytes)}`, id };
 }
 
-export function xaiClipPayload({ prompt, imageUrl, aspect = '16:9', resolution = '720p' }) {
+export function xaiClipPayload({ prompt, imageUrl, aspect = '16:9', resolution = '720p', duration = CLIP_SECONDS }) {
   const body = {
     model: 'grok-imagine-video',
     prompt: String(prompt || '').slice(0, 4000),
-    duration: CLIP_SECONDS,
+    duration: duration===10?10:CLIP_SECONDS,
     aspect_ratio: aspect === '9:16' ? '9:16' : '16:9',
     resolution: resolution === '480p' ? '480p' : '720p',
   };
