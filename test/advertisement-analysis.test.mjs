@@ -33,11 +33,17 @@ test('new extractions require every observed type field while legacy documents r
   const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async()=>response(data));
   assert.equal(r.status,502);
  }
- await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{
+ const responseResult=await advertisementAnalysis(req({image:'data:image/png;base64,YQ=='}),{GEMINI_API_KEY:'test'},async(url,init)=>{
   const schema=JSON.parse(init.body).generationConfig.responseSchema;
   assert.deepEqual(schema,EXTRACT_SCHEMA);
   assert.ok(schema.properties.texts.items.required.includes('typography'));
-  assert.equal(schema.properties.texts.items.properties.typography.required.length,11);
+  assert.equal(schema.properties.texts.items.properties.typography.required.length,10);
   return response(styled);
  });
+ assert.equal(responseResult.status,200,'schema assertions must not be swallowed by handler');
+});
+
+test('verification uses structured flags and ignores thought parts',async()=>{
+ let config;const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ==',action:'verify-visual'}),{GEMINI_API_KEY:'test'},async(url,init)=>{config=JSON.parse(init.body).generationConfig;return Response.json({candidates:[{content:{parts:[{thought:true,text:'internal reasoning'},{text:JSON.stringify({hasText:false,productPresent:true,issues:[]})}]}}]});});
+ assert.equal(r.status,200);assert.equal(config.thinkingConfig.thinkingBudget,512);assert.ok(config.responseSchema.required.includes('issues'));
 });
