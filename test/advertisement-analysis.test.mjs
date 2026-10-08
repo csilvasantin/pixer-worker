@@ -47,3 +47,9 @@ test('verification uses structured flags and ignores thought parts',async()=>{
  let config;const r=await advertisementAnalysis(req({image:'data:image/png;base64,YQ==',action:'verify-visual'}),{GEMINI_API_KEY:'test'},async(url,init)=>{config=JSON.parse(init.body).generationConfig;return Response.json({candidates:[{content:{parts:[{thought:true,text:'internal reasoning'},{text:JSON.stringify({hasText:false,productPresent:true,issues:[]})}]}}]});});
  assert.equal(r.status,200);assert.equal(config.thinkingConfig.thinkingBudget,512);assert.ok(config.responseSchema.required.includes('issues'));
 });
+
+test('tiny copy inside a package remains protected without becoming a duplicate headline',()=>{
+ const d=validateExtraction({...styled,subjects:[{label:'blue perfume bottle',box:[300,400,900,700]}],texts:[styled.texts[0],{...styled.texts[0],text:'EAU DE PARFUM',role:'brand',box:[800,450,840,650]}]});
+ assert.equal(d.texts.length,1);assert.equal(d.packageLabels[0].text,'EAU DE PARFUM');assert.match(d.scene,/EAU DE PARFUM/);
+ const screen=validateExtraction({...styled,subjects:[{label:'advertising screen',box:[0,0,1000,1000]}]});assert.equal(screen.texts.length,1);
+});
