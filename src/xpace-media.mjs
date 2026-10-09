@@ -1,6 +1,7 @@
 // Authenticated Pages RPC jobs. Existing R2 gives conditional creation/leases;
 // provider calls are never repeated when an operation is retried or resumed.
 import {generateAdvertisingImage} from './advertising-image.mjs';
+import {finalArtworkPrompt} from './final-artwork.mjs';
 import {generateAnnouncement} from './announcement-tts.mjs';
 import {xaiVideoStartHandler,xaiVideoPollHandler,stockPublishHandler} from './index.js';
 import {pollFinished,providerVideoUrl} from './clip-from-image.mjs';
@@ -71,7 +72,7 @@ export async function startMedia(env,input,ctx={waitUntil(){}},deps=depsDefault)
    if(input.kind==='video'){
     const prefix=input.language==='en'?'Create a retail advertising video. Any spoken words or visible text must be in English. ':'Crea un vídeo publicitario para una tienda. Cualquier voz o texto visible debe estar en castellano de España. ';
     const imagePrompt=job.imageId?(input.language==='en'?'Animate the supplied image and expand its visual story with close-ups, product details and a clear sequence. Preserve identity, existing text, prices and claims; do not invent product facts. ':'Anima la imagen suministrada y amplía su relato visual con acercamientos, detalles del producto y una secuencia clara. Conserva identidad, textos, precios y afirmaciones existentes; no inventes datos del producto. '):'';
-    const response=await deps.video(new Request('https://api.admira.store/xai/video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:prefix+imagePrompt+job.text,duration:job.imageId?10:8,aspect_ratio:job.aspect||'16:9',resolution:'720p',...(job.imageId?{stock_id:job.imageId}:{})})}),env,job.imageId?{imageDuration:10}:{});
+    const response=await deps.video(new Request('https://api.admira.store/xai/video',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:finalArtworkPrompt(prefix+imagePrompt+job.text,{video:true}),duration:job.imageId?10:8,aspect_ratio:job.aspect||'16:9',resolution:'720p',...(job.imageId?{stock_id:job.imageId}:{})})}),env,job.imageId?{imageDuration:10}:{});
     const data=await response.json();if(!response.ok||!data.request_id)throw Error('generation');
     job.providerId=data.request_id;job.status='pending';job.duration=job.imageId?10:8;job.aspect=job.aspect||'16:9';job.resolution='720p';await save(env,key,job);
    }else{

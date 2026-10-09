@@ -1,4 +1,5 @@
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
+import {validateComposition,bindComposition} from './content-composition.mjs';
 import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
 import { gridCircuitsHandler } from './grid-circuits.mjs';
@@ -120,7 +121,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.09.10.2026.r3.13:03';
+const WORKER_VERSION = 'v.09.10.2026.r4.13:17';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -4988,9 +4989,13 @@ async function stockRememberHash(env, hash, id) {
   if (!(await reserveKvWrite(env, Date.now()))) return false;
   try { await env.SIGNAGE_KV.put(STOCK_HASH_KV_PREFIX + hash, String(id)); return true; } catch { return false; }
 }
-async function stockForgetHash(env, hash) {
+async function stockForgetHash(env, hash, ownerId = null) {
   if (!isSha256Hex(hash) || !env.SIGNAGE_KV) return;
-  try { await env.SIGNAGE_KV.delete(STOCK_HASH_KV_PREFIX + hash); } catch {}
+  try {
+    const key = STOCK_HASH_KV_PREFIX + hash;
+    if (ownerId && await env.SIGNAGE_KV.get(key) !== ownerId) return;
+    await env.SIGNAGE_KV.delete(key);
+  } catch {}
 }
 // Regla blanda: `stock:recent:<sha256(title|motor|sourceUrl)>` → id, con TTL de
 // STOCK_DEDUP_WINDOW_MIN minutos (10 por defecto; 0 la apaga). KV no admite TTL
@@ -5230,6 +5235,13 @@ export async function stockPublishHandler(req, env, ctx) {
   const validacionIn = sanitizeValidacion(body.validacion);
   const dimensionsIn = ['image', 'video'].includes(type) ? contentDimensions(body.dimensions) : null;
   const measuredDimensions = validacionIn?.ancho && validacionIn?.alto ? validacionIn : dimensionsIn;
+  // Authenticated compositor metadata is optional. Legacy imports stay public and carry no trust claim.
+  let compositionIn=null;
+  if(body.composition!=null){
+    try{if(!measuredDimensions)throw Error('composition-asset-mismatch');compositionIn=validateComposition(body.composition,{type,width:measuredDimensions.ancho,height:measuredDimensions.alto});}catch{return json({error:'invalid-composition'},{status:400});}
+    const auth=await authorizePaidGeneration(req,env);if(!auth.ok)return json({error:'composition-session-required'},{status:401});
+    if((body.r2Staged||body.sourceUrl)&&typeof crypto.DigestStream!=='function')return json({error:'composition-hash-unavailable'},{status:503});
+  }
   // Calidad del asset (good/better/best, según el motor); default 'good'.
   const QUALITY_TIERS = ['good', 'better', 'best'];
   const quality = (typeof body.quality === 'string' && QUALITY_TIERS.includes(body.quality.toLowerCase())) ? body.quality.toLowerCase() : 'good';
@@ -5320,8 +5332,8 @@ export async function stockPublishHandler(req, env, ctx) {
   //   un asset con ese hash, se responde reused sin bajar nada.
   // · reciente: mismo title+motor+sourceUrl dentro de la ventana → reused.
   const existingMeta = externalId ? await stockMetaById(env, id) : null;
-  const hashHint = isSha256Hex(body.contentHash) ? body.contentHash : null;
-  const recentInput = externalId ? null : recentFingerprintInput({ title, motor, sourceUrl });
+  const hashHint = !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
+  const recentInput = externalId || compositionIn ? null : recentFingerprintInput({ title, motor, sourceUrl });
   const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
     // Un duplicado no se copia: si venía de una subida por partes, su fichero de
     // `uploads/` sobra (la dedup temprana responde antes de llegar a borrarlo).
@@ -5337,11 +5349,18 @@ export async function stockPublishHandler(req, env, ctx) {
         ctx.waitUntil(rebuildAndSyncTaggedStock(env));
       }
     }
+    // Enrich only an identical, server-hashed binary, never a client hash hint or soft recent match.
+    if(ownerMeta&&compositionIn&&verifiedContent&&!ownerMeta.composition&&ownerMeta.contentHash&&ownerMeta.type===compositionIn.mediaType&&ownerMeta.ancho===compositionIn.width&&ownerMeta.alto===compositionIn.height){
+      ownerMeta={...ownerMeta,composition:bindComposition(compositionIn,ownerMeta.contentHash,{type:ownerMeta.type,width:ownerMeta.ancho,height:ownerMeta.alto})};
+      await env.STOCK_BUCKET.put(`stock/${ownerId}/meta.json`,JSON.stringify(ownerMeta),{httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=300'}});
+      ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+    }
     return json({
     ok: true, reused: true, reason, id: ownerId, num: ownerMeta?.num || null,
     url: `${new URL(req.url).origin}/stock/asset/${ownerId}`,
     createdAt: (ownerMeta && ownerMeta.createdAt) || null,
     contentHash: (ownerMeta && ownerMeta.contentHash) || null,
+    composition:ownerMeta?.composition||null,
     tags: ownerMeta?.tags || [], orientacion: ownerMeta?.orientacion || null,
     ancho: ownerMeta?.ancho || null, alto: ownerMeta?.alto || null,
   }); };
@@ -5574,6 +5593,8 @@ export async function stockPublishHandler(req, env, ctx) {
     price,
     // Catálogo al que pertenece la pieza (folleto de un cliente con fechas), o null.
     catalogo,
+    // Null is intentional: replacing a binary cannot inherit the old master's copy layers.
+    composition:compositionIn?bindComposition(compositionIn,contentHash,{type,width:measuredDimensions.ancho,height:measuredDimensions.alto}):null,
     // sha256 hex del binario completo: es la llave de la dedup por contenido.
     contentHash,
     createdAt: new Date(ts).toISOString(),
@@ -5677,7 +5698,7 @@ export async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, num: meta.num || null, orientacion: meta.orientacion || null, tags: meta.tags || [], url: publicUrl, createdAt: meta.createdAt, contentHash, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, num: meta.num || null, orientacion: meta.orientacion || null, tags: meta.tags || [], url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -5776,6 +5797,8 @@ async function stockReassetHandler(req, env, ctx) {
   const ext = extForMime(mime);
   let bytes; try { bytes = b64ToBytes(b.base64); } catch { return json({ error: 'bad-base64' }, { status: 400 }); }
   if (bytes.length > 50 * 1024 * 1024) return json({ error: 'too-big' }, { status: 413 });
+  const previousHash = meta.contentHash;
+  const contentHash = sha256HexOf(await crypto.subtle.digest('SHA-256', bytes));
   const newAssetKey = `stock/${id}/asset.${ext}`;
   await env.STOCK_BUCKET.put(newAssetKey, bytes, {
     httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
@@ -5783,9 +5806,13 @@ async function stockReassetHandler(req, env, ctx) {
   });
   if (meta.assetKey && meta.assetKey !== newAssetKey) { try { await env.STOCK_BUCKET.delete(meta.assetKey); } catch {} }
   meta.assetKey = newAssetKey; meta.mime = mime; meta.ext = ext; meta.size = bytes.length;
+  meta.contentHash=contentHash;
+  meta.composition=null; // A replaced raster cannot retain the old binary's exact-copy declaration.
   await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+  if (previousHash !== contentHash) await stockForgetHash(env, previousHash, id);
+  await stockRememberHash(env, contentHash, id);
   ctx.waitUntil(rebuildStockIndex(env));
   return json({ ok: true, id, mime, size: bytes.length });
 }
