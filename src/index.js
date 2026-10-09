@@ -121,7 +121,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.09.10.2026.r4.13:14';
+const WORKER_VERSION = 'v.09.10.2026.r4.13:17';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -4989,9 +4989,13 @@ async function stockRememberHash(env, hash, id) {
   if (!(await reserveKvWrite(env, Date.now()))) return false;
   try { await env.SIGNAGE_KV.put(STOCK_HASH_KV_PREFIX + hash, String(id)); return true; } catch { return false; }
 }
-async function stockForgetHash(env, hash) {
+async function stockForgetHash(env, hash, ownerId = null) {
   if (!isSha256Hex(hash) || !env.SIGNAGE_KV) return;
-  try { await env.SIGNAGE_KV.delete(STOCK_HASH_KV_PREFIX + hash); } catch {}
+  try {
+    const key = STOCK_HASH_KV_PREFIX + hash;
+    if (ownerId && await env.SIGNAGE_KV.get(key) !== ownerId) return;
+    await env.SIGNAGE_KV.delete(key);
+  } catch {}
 }
 // Regla blanda: `stock:recent:<sha256(title|motor|sourceUrl)>` → id, con TTL de
 // STOCK_DEDUP_WINDOW_MIN minutos (10 por defecto; 0 la apaga). KV no admite TTL
@@ -5793,6 +5797,8 @@ async function stockReassetHandler(req, env, ctx) {
   const ext = extForMime(mime);
   let bytes; try { bytes = b64ToBytes(b.base64); } catch { return json({ error: 'bad-base64' }, { status: 400 }); }
   if (bytes.length > 50 * 1024 * 1024) return json({ error: 'too-big' }, { status: 413 });
+  const previousHash = meta.contentHash;
+  const contentHash = sha256HexOf(await crypto.subtle.digest('SHA-256', bytes));
   const newAssetKey = `stock/${id}/asset.${ext}`;
   await env.STOCK_BUCKET.put(newAssetKey, bytes, {
     httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
@@ -5800,10 +5806,13 @@ async function stockReassetHandler(req, env, ctx) {
   });
   if (meta.assetKey && meta.assetKey !== newAssetKey) { try { await env.STOCK_BUCKET.delete(meta.assetKey); } catch {} }
   meta.assetKey = newAssetKey; meta.mime = mime; meta.ext = ext; meta.size = bytes.length;
+  meta.contentHash=contentHash;
   meta.composition=null; // A replaced raster cannot retain the old binary's exact-copy declaration.
   await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
   });
+  if (previousHash !== contentHash) await stockForgetHash(env, previousHash, id);
+  await stockRememberHash(env, contentHash, id);
   ctx.waitUntil(rebuildStockIndex(env));
   return json({ ok: true, id, mime, size: bytes.length });
 }

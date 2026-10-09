@@ -2,12 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
-## v.09.10.2026.r4.13:14 · TrinityMBP16 · MacBookPro16
+## v.09.10.2026.r4.13:17 · TrinityMBP16 · MacBookPro16
 
 - Stock admite el contrato opcional `admira.composition.v1` para capas de texto escritas por el compositor de Studio. Valida esquema, medio y dimensiones, exige la autenticación existente y vincula la declaración al SHA-256 calculado sobre el binario real. Ignora sellos y hashes aportados por el cliente; las importaciones conservan su recorrido anterior.
-- La deduplicación sólo añade capas a una pieza sin contrato cuando se ha comprobado el mismo binario y sus dimensiones. Reemplazar el archivo invalida las capas anteriores. Stock devuelve y conserva el contrato en su índice; no reconstruye textos desde prompts ni atribuye metadatos retroactivamente.
+- La deduplicación sólo añade capas a una pieza sin contrato cuando se ha comprobado el mismo binario y sus dimensiones. Reemplazar el archivo invalida las capas anteriores y actualiza su hash; el índice del hash antiguo se retira sólo si todavía pertenece a esa pieza. Stock devuelve y conserva el contrato en su índice; no reconstruye textos desde prompts ni atribuye metadatos retroactivamente.
 - La creación de anuncios e imagen/vídeo de Xpace pide la pieza final sin añadir marcos, pantallas o mockups ambientales. Respeta escenas que solicitan explícitamente una instalación o hardware; «para pantalla 9:16» sigue siendo un destino de emisión. No cambia el texto, idioma, producto ni referencia de origen del encargo.
-- Verificación: 249/249 pruebas con proveedores simulados, sintaxis y diff correctos, Wrangler `deploy --dry-run` correcto con las vinculaciones existentes. Sin llamadas a proveedores ni despliegue; no sustituye la revisión visual ni la aprobación de cada pieza.
+- Verificación: 251/251 pruebas con proveedores simulados, incluidas reemplazo de binario seguido de republicación del original y preservación de un índice propiedad de otra pieza. Sintaxis y diff correctos, Wrangler `deploy --dry-run` correcto con las vinculaciones existentes. Sin llamadas a proveedores ni despliegue; no sustituye la revisión visual ni la aprobación de cada pieza.
 
 ## v.09.10.2026.r3.13:03 · TrinityMBP16 · MacBookPro16
 

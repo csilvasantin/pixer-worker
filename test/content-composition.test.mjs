@@ -43,6 +43,25 @@ test('changing the asset raster invalidates the old copy declaration',async()=>{
  const e=env(),p=await(await stockPublishHandler(req(payload({composition:declared()})),e,ctx)).json();
  const r=await worker.fetch(new Request('https://api.admira.store/stock/reasset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,mime:'image/png',base64:btoa('new-binary')})}),e,ctx);assert.equal(r.status,200);assert.equal(JSON.parse(e.STOCK_BUCKET.map.get(`stock/${p.id}/meta.json`)).composition,null);
 });
+test('reasset refreshes binary identity, so old bytes cannot reattach composition to the replacement',async()=>{
+ const e=env();e.SIGNAGE_KV={map:new Map(),async get(k){return this.map.get(k)||null;},async put(k,v){this.map.set(k,v);},async delete(k){this.map.delete(k);}};
+ const p=await(await stockPublishHandler(req(payload({composition:declared()})),e,ctx)).json();await Promise.all(pending);
+ const oldHash=p.contentHash,newHash=createHash('sha256').update('replacement-raster').digest('hex');
+ assert.equal(e.SIGNAGE_KV.map.get(`stock:hash:${oldHash}`),p.id);
+ const r=await worker.fetch(new Request('https://api.admira.store/stock/reasset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,mime:'image/png',base64:btoa('replacement-raster')})}),e,ctx);assert.equal(r.status,200);
+ const replaced=JSON.parse(e.STOCK_BUCKET.map.get(`stock/${p.id}/meta.json`));assert.equal(replaced.contentHash,newHash);assert.equal(replaced.composition,null);assert.equal(e.SIGNAGE_KV.map.has(`stock:hash:${oldHash}`),false);
+ // Even a stale index cannot alias old bytes: stockHashLookup checks the current metadata hash.
+ e.STOCK_BUCKET.map.set('stock/index.json',JSON.stringify({items:[{...replaced,contentHash:oldHash}]}));
+ const fresh=await(await stockPublishHandler(req(payload({composition:declared()})),e,ctx)).json();assert.equal(fresh.ok,true);assert.notEqual(fresh.id,p.id);assert.equal(fresh.composition.assetHash,oldHash);assert.equal(JSON.parse(e.STOCK_BUCKET.map.get(`stock/${p.id}/meta.json`)).composition,null);
+ await Promise.all(pending);
+ const sameNew=await(await stockPublishHandler(req(payload({base64:btoa('replacement-raster')})),e,ctx)).json();assert.equal(sameNew.reused,true);assert.equal(sameNew.id,p.id);
+});
+test('reasset never removes an old hash mapping owned by another identical asset',async()=>{
+ const e=env();e.SIGNAGE_KV={map:new Map(),async get(k){return this.map.get(k)||null;},async put(k,v){this.map.set(k,v);},async delete(k){this.map.delete(k);}};
+ const p=await(await stockPublishHandler(req(payload({composition:declared()})),e,ctx)).json();
+ e.SIGNAGE_KV.map.set(`stock:hash:${p.contentHash}`,'another-owner');
+ const r=await worker.fetch(new Request('https://api.admira.store/stock/reasset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:p.id,mime:'image/png',base64:btoa('replacement-raster')})}),e,ctx);assert.equal(r.status,200);assert.equal(e.SIGNAGE_KV.map.get(`stock:hash:${p.contentHash}`),'another-owner');
+});
 test('staged upload binds the streamed hash; absence of a runtime digest fails before moving any asset',async t=>{
  const digestDescriptor=Object.getOwnPropertyDescriptor(crypto,'DigestStream'),fixedDescriptor=Object.getOwnPropertyDescriptor(globalThis,'FixedLengthStream');
  t.after(()=>{if(digestDescriptor)Object.defineProperty(crypto,'DigestStream',digestDescriptor);else delete crypto.DigestStream;if(fixedDescriptor)Object.defineProperty(globalThis,'FixedLengthStream',fixedDescriptor);else delete globalThis.FixedLengthStream;});
