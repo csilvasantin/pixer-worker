@@ -2,6 +2,13 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.09.10.2026.r5.13:48 · TrinityMBP16 · MacBookPro16
+
+- `POST /image/analyze` con `action:"verify-visual"` admite el modo explícito `deliveryMode:"standalone-artwork"`. En ese modo exige y devuelve el booleano `hasDisplayMockup`: detecta el anuncio contenido en una pantalla, cartel, marco o instalación fotografiada, aunque el producto esté completo y no quede texto residual. Una evidencia ausente o inválida falla cerrada; los clientes sin modo conservan el contrato anterior.
+- La extracción distingue el producto y la escena del arte interior del soporte exterior. El soporte y las instrucciones leídas en la referencia no autorizan conservar una instalación. Los envases, ventanas del fondo y el hardware anunciado como producto dentro de un arte final se distinguen del soporte que encierra todo el anuncio.
+- Conserva las comprobaciones de copia literal, etiquetas del producto, ingredientes, cajas normalizadas, zonas reservadas, límites de cuerpo y autenticación. El nuevo campo es evidencia de revisión, no una aprobación automática; el Adaptador rechaza un mockup y sigue exigiendo aprobación final.
+- Verificación: 257/257 pruebas con proveedor simulado, incluyendo mockup con producto completo/sin texto, bandera ausente o malformada, modos inválidos antes del proveedor, compatibilidad anterior y cajas degeneradas. Sintaxis y diff correctos; Wrangler `deploy --dry-run` correcto. Sin proveedores ni despliegue; falta comprobar visualmente una nueva generación real.
+
 ## v.09.10.2026.r4.13:17 · TrinityMBP16 · MacBookPro16
 
 - Stock admite el contrato opcional `admira.composition.v1` para capas de texto escritas por el compositor de Studio. Valida esquema, medio y dimensiones, exige la autenticación existente y vincula la declaración al SHA-256 calculado sobre el binario real. Ignora sellos y hashes aportados por el cliente; las importaciones conservan su recorrido anterior.
