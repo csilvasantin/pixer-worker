@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.09.10.2026.r3.13:03 · TrinityMBP16 · MacBookPro16
+
+- Las cajas de OCR y producto se validan antes y después de redondearlas a enteros: una caja que colapsa deja de ser evidencia válida y el análisis falla cerrado. No se adivina ni convierte una escala 0–1.
+- El esquema de salida pide coordenadas `INTEGER` de 0 a 1000; confianza y rasgos tipográficos conservan `NUMBER`. La verificación de composición pide cajas ajustadas al objeto en GENERATED, nunca coordenadas de REFERENCE ni cajas del fondo completo.
+- Pruebas con proveedor simulado cubren cajas degeneradas al redondear, ejemplos fraccionarios 0–1, decimales válidos y comparación con referencia. No cambia autenticación, márgenes ni controles de producto, texto y aprobación. Este endurecimiento no confirma la causa del rechazo real del anuncio de café.
+
 ## v.09.10.2026.r2.12:09 · TrinityMBP16 · MacBookPro16
 
 - El análisis de anuncios describe grafitis y rótulos ambientales fotografiados en la escena, sin convertirlos en copia publicitaria editable. Conserva titulares, precios, promociones y textos legales como copia externa.
