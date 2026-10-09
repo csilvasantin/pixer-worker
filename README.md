@@ -308,3 +308,32 @@ EN: `verify-visual` also accepts optional `referenceImage`, using the same PNG/J
 ES: `POST /stock/publish` acepta `dimensions:{width,height}` (enteros 1..65535) de imágenes y vídeos. Guarda `ancho`, `alto`, `orientacion` y `vertical,portrait` u `horizontal,landscape`; cuadrado no recibe estas parejas. Conserva otras etiquetas. Dimensiones del máster validado tienen prioridad. Audio/sin medición no se clasifican. Reimportar conserva identidad/historial, completando orientación sólo desde medidas existentes o contenido cuyo hash se ha comprobado; una pista de hash no autoriza a inventar dimensiones.
 
 EN: measured image/video imports receive both Spanish/English orientation tags. Other tags and reimport history stay. `dimensions` is metadata, never a fabricated `validacion.ok`. Unknown/audio are not classified; square retains cuadrado. Web guide: https://www.pixeria.com/docs/etiquetas-al-importar-y-crear.md
+
+### Authored composition / Composición del sistema (v.09.10.2026.r4)
+
+ES: `POST /stock/publish` admite un contrato opcional `composition` con las capas literales que el compositor de Studio ha dibujado. Requiere la autenticación existente de Studio/Pixeria o flota. Ejemplo para una imagen de 1080×1920:
+
+```json
+{
+  "type": "image",
+  "dimensions": {"width": 1080, "height": 1920},
+  "composition": {
+    "schema": "admira.composition.v1",
+    "producer": "admira.studio",
+    "renderer": "campaign-canvas.v1",
+    "mediaType": "image",
+    "width": 1080,
+    "height": 1920,
+    "complete": true,
+    "copy": [{"role": "headline", "text": "Tu campaña", "box": [100, 100, 250, 900]}]
+  }
+}
+```
+
+El ejemplo omite el binario y los metadatos habituales, que siguen siendo necesarios. `mediaType` admite `image` o `video`; dimensiones enteras de 64 a 16384 y hasta 16 777 216 píxeles, iguales a las medidas declaradas de la pieza. `copy` admite hasta 32 bloques, 2000 caracteres por bloque y 20 000 en total. `role`: `headline`, `body`, `brand` o `legal`. `box` usa `[ymin,xmin,ymax,xmax]` en escala 0–1000, con área positiva. La tipografía opcional lleva `family` (`condensed`, `rounded`, `sans`, `serif`, `script`, `mono`), `weight` (300–900), `color` (`#RRGGBB`) y `align` (`left`, `center`, `right`).
+
+Stock descarta los sellos y hashes del cliente, calcula el SHA-256 del binario y añade `assetHash` y `verification:"authenticated-compositor"`. La respuesta y el índice devuelven este contrato. Es una declaración del compositor autenticado vinculada al archivo, no una transcripción de IA ni una comprobación semántica de los píxeles. El consumidor debe exigir que `assetHash` coincida con `contentHash`, que tipo y dimensiones coincidan también con el medio decodificado y que `complete:true` antes de sustituir el OCR. Si un producto o logo importado puede contener texto desconocido, debe publicar `complete:false`.
+
+Errores antes de publicar: `400 invalid-composition`, `401 composition-session-required` y `503 composition-hash-unavailable` si el recorrido por streaming carece de SHA-256. Una deduplicación sólo añade el contrato a una pieza sin capas cuando comprueba el mismo binario y las mismas dimensiones; reemplazar el archivo elimina las capas anteriores. Las importaciones sin contrato conservan su recorrido previo. No se deduce copia del prompt, motor o nombre del archivo ni se atribuye a contenidos históricos. La revisión visual y la aprobación final se mantienen.
+
+EN: authenticated Studio compositors can attach literal rendered layers through optional `admira.composition.v1` metadata. Stock validates its bounded schema and declared media dimensions, hashes the actual asset, and returns a server-bound contract. This is an authenticated compositor declaration, not AI transcription or pixel-level semantic verification. Consumers must match the asset hash, type and decoded dimensions and require `complete:true` before replacing OCR. Unknown copy in imported product/logo artwork requires `complete:false`; imports and historical assets retain OCR/review. Replacing a binary clears previous layers. Free prompts and model names never supply trusted copy. Final visual review and approval remain required.
