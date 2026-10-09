@@ -2,6 +2,13 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.09.10.2026.r2.12:09 · TrinityMBP16 · MacBookPro16
+
+- El análisis de anuncios describe grafitis y rótulos ambientales fotografiados en la escena, sin convertirlos en copia publicitaria editable. Conserva titulares, precios, promociones y textos legales como copia externa.
+- `verify-visual` admite `referenceImage` opcional (PNG/JPEG/WebP en base64) para comparar referencia y resultado. Solo permite marcas naturales coincidentes; sigue señalando overlays, titulares publicitarios y letras inventadas, aunque el titular aparezca en la referencia. Sin referencia mantiene la revisión estricta anterior.
+- Ambas imágenes y el resto del JSON comparten un límite de 8 MiB en bytes, con lectura acotada y cancelación del stream. Las referencias inválidas se rechazan antes del proveedor; no se descargan URLs.
+- Pruebas con proveedor simulado: orden y etiquetas de las imágenes, contrato anterior, errores de referencia, overlays, protección de producto, límites y dos imágenes válidas cerca de 8 MiB sin desbordar la pila de expresiones regulares. No cambia la autenticación ni autoriza exportaciones automáticamente.
+
 ## Sin sellar · rama morfeo/stock-subida-partes · SubMorfeoMacMini · MacMini
 
 - **Subida por partes, a prueba de MP4 truncados y sin basura** (8-oct-2026). El Adaptador de Pixeria
