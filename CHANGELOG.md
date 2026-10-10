@@ -2,6 +2,13 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.10.10.2026.r1.16:43 · NeoMBP16 · MacBookPro16
+
+- `POST /signage/now` guarda el estado de los players de tinta electrónica (role `eink`): `device.eink` con `type`, `model`, `firmware`, `resolution`, `palette` (lista), `imageOnly`, `slowRefresh`, `battery`, `status`, `lastSendAt`, `lastError`, `sends`, `paused` y `pin`, y `health` con `ok`, `status` y `error`. Antes se descartaban y el puente los colaba como texto en `version`/`playerVersion`. Encargo 5579 (player «eink» en admira.tv).
+- `GET /signage/now` devuelve `health` junto a `device`; el censo de `/signage/screens` conserva los dos. Un envío nuevo al panel o un error se reflejan al momento en el censo (firma corta de estado), no en el siguiente refresco de presencia; el mismo estado repetido sigue sin gastar escrituras.
+- Sigue siendo una allowlist: la MAC y cualquier campo no listado se descartan. Una batería no informada (`null`) no se guarda como 0. Los grupos clásicos (`display`, `system`, `hardware`, `software`, `storage`, `network`) no cambian de forma.
+- Verificación: 263/263 pruebas, seis nuevas en `test/signage-eink-telemetry.test.mjs` que ejercitan el latido real contra un KV en memoria.
+
 ## v.09.10.2026.r5.13:48 · TrinityMBP16 · MacBookPro16
 
 - `POST /image/analyze` con `action:"verify-visual"` admite el modo explícito `deliveryMode:"standalone-artwork"`. En ese modo exige y devuelve el booleano `hasDisplayMockup`: detecta el anuncio contenido en una pantalla, cartel, marco o instalación fotografiada, aunque el producto esté completo y no quede texto residual. Una evidencia ausente o inválida falla cerrada; los clientes sin modo conservan el contrato anterior.

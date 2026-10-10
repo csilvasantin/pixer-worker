@@ -121,7 +121,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.09.10.2026.r5.13:48';
+const WORKER_VERSION = 'v.10.10.2026.r1.16:43';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -3498,6 +3498,10 @@ function sanitizeDeviceTelemetry(raw) {
     software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
     storage: { usage: 'num', quota: 'num', persisted: 'bool' },
     network: { online: 'bool', effectiveType: 'text', saveData: 'bool' },
+    // Player de tinta electrónica (role 'eink'): estado del panel y del último envío.
+    // Antes se descartaba y el puente lo colaba como texto en version/playerVersion.
+    eink: { type: 'text', model: 'text', firmware: 'text', resolution: 'text', palette: 'list', imageOnly: 'bool', slowRefresh: 'bool',
+      battery: 'num', status: 'text', lastSendAt: 'text', lastError: 'long', sends: 'num', paused: 'bool', pin: 'num' },
   };
   const out = {};
   for (const [group, fields] of Object.entries(schema)) {
@@ -3508,7 +3512,14 @@ function sanitizeDeviceTelemetry(raw) {
       const value = source[field];
       if (type === 'bool') {
         if (typeof value === 'boolean') clean[field] = value;
+      } else if (type === 'list') {
+        if (Array.isArray(value)) {
+          const list = value.map(v => String(v == null ? '' : v).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
+          if (list.length) clean[field] = list;
+        }
       } else if (type === 'num') {
+        // null/'' = «no informado» (p. ej. batería n/d): no se guarda como 0.
+        if (group === 'eink' && (value === null || value === undefined || value === '' || typeof value === 'boolean')) continue;
         const number = Number(value);
         if (Number.isFinite(number) && number >= 0) clean[field] = Math.min(number, Number.MAX_SAFE_INTEGER);
       } else if (value !== undefined && value !== null && String(value).trim()) {
@@ -3520,6 +3531,24 @@ function sanitizeDeviceTelemetry(raw) {
   return Object.keys(out).length ? out : null;
 }
 
+// Salud declarada por el player ({ok,status,error}). Mismo criterio de allowlist.
+function sanitizeHealth(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  if (typeof raw.ok === 'boolean') out.ok = raw.ok;
+  if (raw.status !== undefined && raw.status !== null && String(raw.status).trim()) out.status = String(raw.status).trim().slice(0, 40);
+  if (raw.error !== undefined && raw.error !== null && String(raw.error).trim()) out.error = String(raw.error).trim().slice(0, 300);
+  return Object.keys(out).length ? out : null;
+}
+// Firma corta del estado de tinta para el censo: un envío nuevo o un error deben
+// verse en /signage/screens sin esperar al refresco de presencia. Cambia como
+// mucho una vez por envío al panel (intervalo mínimo 60 s, playlist cada 15 min).
+function einkStateSig(device, health) {
+  const e = device && device.eink;
+  if (!e && !health) return '';
+  return JSON.stringify([e ? [e.status, e.lastSendAt, e.lastError, e.paused, e.pin] : null, health ? [health.ok, health.status, health.error] : null]);
+}
+
 async function signageNowGetHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const screen = String(url.searchParams.get('screen') || '').slice(0, 60);
@@ -3529,6 +3558,7 @@ async function signageNowGetHandler(req, env, url) {
   // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
   const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
   return json({ ok: true, screen, item: item || null, device: (stored && stored.device) || null,
+    health: (stored && stored.health) || null,
     standby: !!(stored && stored.standby), ip: (stored && stored.__ip) || null,
     lastSeen: (stored && stored.__w) || null, producer: (stored && stored.__producer) || null });
 }
@@ -3548,6 +3578,7 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`screen:${screen}`)); } catch {}
   const device = sanitizeDeviceTelemetry(body && body.device) || (prev && prev.device) || null;
+  const health = sanitizeHealth(body && body.health) || (prev && prev.health) || null;
   const data = Object.assign({}, prev || {}, {
     screen,
     last_seen: now,
@@ -3560,13 +3591,15 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
     // id del equipo donde corre el player → admira.live/control mapea pantalla↔máquina.
     machine: machine || (prev && prev.machine) || '',
     device,
+    health,
   });
   // El contenido y la telemetría técnica cambian mucho más rápido que la
   // presencia. Se guardan en el refresco periódico, pero no fuerzan un write:
   // /signage/now ya conserva el item actual y /signage/screens sólo necesita
   // saber que el player sigue vivo y dónde está cableado.
   const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine ||
-    prev.role !== data.role || prev.version !== data.version;
+    prev.role !== data.role || prev.version !== data.version ||
+    einkStateSig(prev.device, prev.health) !== einkStateSig(device, health);
   const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
   if (!changed && !stale) return { ok: true, updated: false }; // igual y reciente → no gastamos KV
   if (!(await reserveCriticalKvWrite(env, now))) return { ok: false, reason: kvCriticalDenyReason(env) };
@@ -3601,7 +3634,8 @@ async function signageNowPostHandler(req, env) {
   let prev = null;
   try { prev = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   const device = sanitizeDeviceTelemetry(body.device) || (prev && prev.device) || null;
-  const deviceSig = deviceStableSig(device);
+  const health = sanitizeHealth(body.health) || (prev && prev.health) || null;
+  const deviceSig = deviceStableSig(device) + JSON.stringify(health);
   const standby = typeof body.standby === 'boolean' ? body.standby : !!(prev && prev.standby);
   // La presencia usa su reserva crítica y se actualiza incluso si el pool
   // general ya está agotado. Antes este paso vivía después del early-return de
@@ -3615,7 +3649,7 @@ async function signageNowPostHandler(req, env) {
     return json({ ok: true, screen, throttled: kvWriteDenyReason(env), presence: presence && presence.ok !== false });
   }
   try {
-    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, device, standby, __w: now, __sig: sig, __deviceSig: deviceSig,
+    await env.SIGNAGE_KV.put(`now:${screen}`, JSON.stringify({ item, device, health, standby, __w: now, __sig: sig, __deviceSig: deviceSig,
       __producer: ownership.producer,
       __ip: (req.headers.get('CF-Connecting-IP') || req.headers.get('x-real-ip') || '').slice(0, 60) }), { expirationTtl: SIGNAGE_NOW_TTL });
   } catch (e) {
@@ -8196,4 +8230,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, signageClaimOwner, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, sanitizeDeviceTelemetry, sanitizeHealth, signageClaimOwner, signageNowGetHandler, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
