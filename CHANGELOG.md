@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.11.10.2026.r1.11:55 · GrokBotBox
+
+- `AnnouncementTts.generate` (entrypoint privado, solo por Service Binding) acepta un `voiceId` **opcional** restringido a una allowlist corta de 13 voces premade de ElevenLabs (`counselorVoiceIds`), una por consejero de la mesa de debate de admira.live (`/debatir mejor audio`). Aprobado por Carlos el 11-10-2026 a las 11:48.
+- Compatible hacia atrás: `voice` (male/female) sigue siendo obligatorio y se valida igual. Un `voiceId` ausente, que no sea string o que no esté en la lista se ignora y suena la voz male/female de siempre. Ni rutas HTTP ni secretos cambian.
+- Verificación: 264/264 pruebas (una nueva en `test/announcement-tts.test.mjs`).
+
 ## v.10.10.2026.r1.16:43 · NeoMBP16 · MacBookPro16
 
 - `POST /signage/now` guarda el estado de los players de tinta electrónica (role `eink`): `device.eink` con `type`, `model`, `firmware`, `resolution`, `palette` (lista), `imageOnly`, `slowRefresh`, `battery`, `status`, `lastSendAt`, `lastError`, `sends`, `paused` y `pin`, y `health` con `ok`, `status` y `error`. Antes se descartaban y el puente los colaba como texto en `version`/`playerVersion`. Encargo 5579 (player «eink» en admira.tv).
