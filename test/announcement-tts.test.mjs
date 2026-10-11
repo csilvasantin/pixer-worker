@@ -3,3 +3,14 @@ test('private announcement service only accepts two fixed voices and 1500 charac
 test('private service retains provider key and generates one full v4 announcement at 192kbps',async()=>{let count=0;for(const voice of ['male','female']){const res=await generateAnnouncement({ELEVENLABS_KEY:'server-secret'},{text:'Atención, por favor.',voice},async(url,opts)=>{count++;assert.match(url,/output_format=mp3_44100_192/);assert.equal(opts.headers['xi-api-key'],'server-secret');const b=JSON.parse(opts.body);assert.equal(b.model_id,'eleven_v4');assert.equal(b.language_code,'es');assert.equal(b.inputs[0].voice_id,voice==='male'?'Nh2zY9kknu6z4pZy6FhD':'KHCvMklQZZo0O30ERnVn');assert.equal(b.inputs[0].text,'Atención, por favor.');return new Response('MP3');});assert.equal(res.status,200);assert.equal(await res.text(),'MP3');assert.ok(!JSON.stringify([...res.headers]).includes('server-secret'));}assert.equal(count,2);});
 
 test('English uses native male and female voices and the provider language en',async()=>{for(const voice of ['male','female']){let sent;const res=await generateAnnouncement({ELEVENLABS_KEY:'server-secret'},{text:'Thank you for visiting.',voice,language:'en'},async(_,opts)=>{sent=JSON.parse(opts.body);return new Response('MP3');});assert.equal(res.status,200);assert.equal(sent.language_code,'en');assert.equal(sent.inputs[0].voice_id,voice==='male'?'EkK5I93UQWFDigLMpZcX':'56AoDkrOh6qfVPDXZ7Pt');}});
+
+test('optional counselor voiceId: only allowlisted ids are used; anything else falls back to male/female',async()=>{
+  const sent=[];const f=async(_,opts)=>{sent.push(JSON.parse(opts.body).inputs[0].voice_id);return new Response('MP3');};
+  const {counselorVoiceIds}=await import('../src/announcement-tts.mjs');
+  assert.ok(counselorVoiceIds.length>=8&&new Set(counselorVoiceIds).size===counselorVoiceIds.length);
+  assert.equal((await generateAnnouncement({ELEVENLABS_KEY:'k'},{text:'Hola',voice:'male',voiceId:'JBFqnCBsd6RMkjVDRZzb'},f)).status,200);
+  for(const voiceId of ['notAllowed123456','Nh2zY9kknu6z4pZy6FhD ','constructor',42,null,{toString(){return 'JBFqnCBsd6RMkjVDRZzb';}}]){assert.equal((await generateAnnouncement({ELEVENLABS_KEY:'k'},{text:'Hola',voice:'female',voiceId},f)).status,200);}
+  assert.deepEqual(sent,['JBFqnCBsd6RMkjVDRZzb',...Array(6).fill('KHCvMklQZZo0O30ERnVn')]);
+  // voice sigue siendo obligatorio: un voiceId válido no salta la validación de siempre
+  assert.equal((await generateAnnouncement({ELEVENLABS_KEY:'k'},{text:'Hola',voiceId:'JBFqnCBsd6RMkjVDRZzb'},f)).status,400);
+});
