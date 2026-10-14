@@ -4,7 +4,9 @@ compatibility_date = "2026-05-02"
 workers_dev = true
 preview_urls = true
 [vars]
-PREVIEW_ORIGIN = "https://codex-5934.admira-design-preview.pages.dev"
+# Orígenes que pueden llamar al sandbox desde el navegador (encargo #5996): previews de Pages de las cinco
+# webs de la suite (y sus gemelas), la de admira-design y local. Patrones en preview/origenes.mjs.
+PREVIEW_ORIGINS = "https://*.admira-design-preview.pages.dev https://*.admira-studio.pages.dev https://*.pixeria.pages.dev https://*.admira-store.pages.dev https://*.xpaceos.pages.dev https://*.admira-tv.pages.dev https://*.yokup.pages.dev https://*.admira-app.pages.dev https://*.clearchannel-tv.pages.dev http://localhost:* http://127.0.0.1:*"
 # Dedicated preview KV only. Fill after wrangler kv namespace create PREVIEW_KV.
 # Secrets: WHITELIST_SITE_TOKEN (read-only), PIXERIA_SIGNING_KEY (fresh sandbox key).
 [[kv_namespaces]]
