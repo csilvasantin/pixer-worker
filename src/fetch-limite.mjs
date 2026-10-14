@@ -21,6 +21,7 @@ export const LIMITES = {
   grokEdicion: 85000,    // x.ai images/edits (gemelo persistente)
   texto: 30000,          // chat / texto (Gemini, Grok)
   textoLargo: 45000,     // cápsula de un artículo entero (entrada larga, con razonamiento)
+  xpacioEstimar: 150000, // /xpacio/estimar: Gemini Pro con hasta 8 fotos y razonamiento alto (~40–110 s; cliente: 180 s)
   descarga: 30000,       // descarga de assets (imagen generada, grid, proxy, fuente)
   videoInicio: 30000,    // arranque asíncrono (x.ai video, Veo): solo encola
   videoSondeo: 20000,    // cada sondeo de estado; el cliente vuelve a sondear
