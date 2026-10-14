@@ -1,4 +1,5 @@
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
+import { presenceBeat, presenceAll } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
 import { upsertStockIndex, stockIndexCondition, STOCK_INDEX_KEY, STOCK_INDEX_HTTP } from './stock-index.mjs';
 import {validateComposition,bindComposition} from './content-composition.mjs';
@@ -3334,11 +3335,15 @@ async function signageScreensHandler(req, env) {
   let index = [];
   try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
   const now = Date.now();
+  // Último latido real por POST /signage/now (DO PresenceClock); KV sólo se refresca cada HB_REFRESH_MS.
+  const beats = await presenceAll(env);
   const screens = (await Promise.all(index.map(async s => {
     try {
       const raw = await env.SIGNAGE_KV.get(`screen:${s}`);
       if (!raw) return null; // expirado
       const data = JSON.parse(raw);
+      const beat = beats && Number(beats[s]);
+      if (beat && beat > (data.last_seen || 0)) data.last_seen = beat;
       data.online = (now - data.last_seen) < SCREEN_ONLINE_MS; // online si visto < 6 min
       data.age_seconds = Math.floor((now - data.last_seen) / 1000);
       return data;
@@ -3660,6 +3665,9 @@ async function signageNowPostHandler(req, env) {
   // general ya está agotado. Antes este paso vivía después del early-return de
   // presupuesto: el player seguía emitiendo, pero desaparecía por completo del CMS.
   const presence = await nowUpsertScreenLoc(env, screen, body, item, now, req);
+  // Cada latido con identidad de presencia (loc/machine) refresca el reloj del DO,
+  // aunque KV se haya saltado el write por change-detection/presupuesto.
+  if (presence && presence.ok !== false) await presenceBeat(env, screen, now);
   if (prev && prev.__w !== undefined && prev.__sig === sig && prev.__deviceSig === deviceSig &&
       !!prev.standby === standby && (now - prev.__w) < NOW_REFRESH_MS) {
     return json({ ok: true, screen, throttled: 'unchanged', presence: presence && presence.ok !== false });

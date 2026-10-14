@@ -61,3 +61,12 @@ class_name = "XpacioCupo"
 [[migrations]]
 tag = "xpacio-cupo-v1"
 new_sqlite_classes = ["XpacioCupo"]
+
+# Reloj de presencia de /signage/screens (last_seen en cada POST /signage/now sin gastar KV).
+[[durable_objects.bindings]]
+name = "PRESENCE_CLOCK"
+class_name = "PresenceClock"
+
+[[migrations]]
+tag = "presence-clock-v1"
+new_sqlite_classes = ["PresenceClock"]
