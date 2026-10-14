@@ -1,0 +1,24 @@
+# PREVIEW aislado del fix de presencia (/signage/screens last_seen por latido).
+# Worker aparte (pixer-eleven-signage-preview) con KV propio vacío: no toca el
+# KV de producción, sin rutas (sólo workers.dev) y sin crons (no avisa a Telegram).
+# Despliegue: npx wrangler deploy -c wrangler.preview.toml
+name = "pixer-eleven-signage-preview"
+main = "src/worker.js"
+compatibility_date = "2026-05-02"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "SIGNAGE_KV"
+id = "849f40b2fd36446db17378b635c8694f"
+
+[[durable_objects.bindings]]
+name = "PRESENCE_CLOCK"
+class_name = "PresenceClock"
+
+[[migrations]]
+tag = "presence-clock-v1"
+new_sqlite_classes = ["PresenceClock"]
+
+[vars]
+KV_DAILY_WRITE_CAP = "2000"
+KV_CRITICAL_DAILY_WRITE_CAP = "1000"
