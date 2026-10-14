@@ -35,12 +35,12 @@ bucket_name = "pixer-stock"
 binding = "OMNI"
 service = "omnipublicity-api"
 
-# Tope diario partido: 30.000 generales + 10.000 reservadas a presencia de
-# pantallas = 40.000/día (~1,2 M/mes; lo que pase del millón incluido cuesta 5 $/M).
+# Tope diario partido: 60.000 generales + 10.000 reservadas a presencia de
+# pantallas = 70.000/día (~2,1 M/mes en el peor caso; ~5,5 $/mes por encima del millón incluido).
 # La reserva evita que Agora/layout deje ciego el CMS cuando agota su pool.
 # 14-oct-2026 (Neo, OK de Carlos: «no se puede parar»): el general llegó a 22.000/22.000
 # y /signage/now dejó de guardar el estado de todos los players. Subido a 30.000 mientras
 # se lleva el estado de las pantallas a un Durable Object (KV no es para un latido).
 [vars]
-KV_DAILY_WRITE_CAP = "30000"
+KV_DAILY_WRITE_CAP = "60000"
 KV_CRITICAL_DAILY_WRITE_CAP = "10000"
