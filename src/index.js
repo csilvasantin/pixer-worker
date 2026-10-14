@@ -3462,10 +3462,23 @@ async function signageClearHandler(req, env) {
 const SIGNAGE_NOW_TTL = 300;        // 5 min sin escritura → el puntero caduca
 const NOW_REFRESH_MS = 240 * 1000;  // si el item no cambió, reescribe como mucho cada 4 min
 // Campos de telemetría que cambian a cada latido y NO deben invalidar la firma.
+// Bugito (DCL-5da4653d859552490fd5ae1d): de las medidas de superficie, a la FIRMA sólo le importa lo que
+// decide el detector — la orientación del lienzo (w ≥ h) y si el tapado o lo visible cruzan su umbral
+// (overlay ≥ 10 %, visible < 90 %) —. Un marco medido a mitad de transición o un tapado que baila sin cruzar
+// el umbral no escribe en KV; el valor medido sigue viajando en el payload guardado.
+const FIRMA_TAPADO = 10, FIRMA_VISIBLE = 90;
+function displayFirma(display) {
+  if (!display || typeof display !== 'object') return display;
+  const { canvas, overlay, visible, ...resto } = display;
+  if (canvas && typeof canvas === 'object') resto.canvas = canvas.w >= canvas.h ? 'h' : 'v';
+  if (typeof overlay === 'number') resto.overlay = overlay >= FIRMA_TAPADO ? 1 : 0;
+  if (typeof visible === 'number') resto.visible = visible < FIRMA_VISIBLE ? 1 : 0;
+  return resto;
+}
 function deviceStableSig(device) {
   if (!device || typeof device !== 'object') return 'null';
   const stable = {};
-  for (const k of Object.keys(device)) { if (k !== 'storage' && k !== 'network') stable[k] = device[k]; }
+  for (const k of Object.keys(device)) { if (k !== 'storage' && k !== 'network') stable[k] = k === 'display' ? displayFirma(device[k]) : device[k]; }
   return JSON.stringify(stable);
 }
 

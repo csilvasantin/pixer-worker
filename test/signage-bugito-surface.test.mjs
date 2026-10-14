@@ -71,3 +71,25 @@ test('un popup cambia la firma y se publica; el mismo estado no gasta escritura'
   assert.equal(now.device.display.overlay, 38);
   assert.equal(now.device.display.visible, 50);
 });
+
+test('medidas que bailan sin cruzar umbral no escriben: la firma sólo ve orientación del lienzo y umbrales', async () => {
+  const env = memoryEnv();
+  let puts = 0;
+  const put = env.SIGNAGE_KV.put.bind(env.SIGNAGE_KV);
+  env.SIGNAGE_KV.put = async (k, v) => { if (k.startsWith('now:')) puts++; return put(k, v); };
+  // Editorial: el marco medido a mitad de la transición (.35 s) y al final; tapado 0→4 %, visible 100→93 %.
+  await signageNowPostHandler(beat({ canvas: { w: 1180, h: 664 }, overlay: 0, visible: 100 }), env);
+  const baila = await (await signageNowPostHandler(beat({ canvas: { w: 1600, h: 900 }, overlay: 4, visible: 93 }), env)).json();
+  assert.equal(baila.throttled, 'unchanged', 'sin cruzar umbral: no escribe');
+  assert.equal(puts, 1, 'una sola escritura');
+  // Cruzar un umbral sí es un cambio real.
+  const cruza = await (await signageNowPostHandler(beat({ canvas: { w: 1600, h: 900 }, overlay: 12, visible: 93 }), env)).json();
+  assert.equal(cruza.throttled, undefined); assert.equal(puts, 2);
+  const media = await (await signageNowPostHandler(beat({ canvas: { w: 1600, h: 900 }, overlay: 12, visible: 50 }), env)).json();
+  assert.equal(media.throttled, undefined); assert.equal(puts, 3);
+  const vertical = await (await signageNowPostHandler(beat({ canvas: { w: 506, h: 900 }, overlay: 12, visible: 50 }), env)).json();
+  assert.equal(vertical.throttled, undefined, 'el lienzo cambia de orientación'); assert.equal(puts, 4);
+  // El valor medido se guarda tal cual (la firma es lo único cuantizado).
+  const now = await (await signageNowGetHandler(null, env, new URL('https://api.admira.store/signage/now?screen=virtual-lab-bugito'))).json();
+  assert.deepEqual(now.device.display.canvas, { w: 506, h: 900 }); assert.equal(now.device.display.overlay, 12); assert.equal(now.device.display.visible, 50);
+});

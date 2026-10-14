@@ -18,7 +18,8 @@ test('GET signage/now expone device y standby',()=>{
 test('un cambio de dispositivo rompe el dedupe sin gastar escrituras en cada latido',()=>{
   // La firma ignora storage/network: cambian a cada latido y reescribían `now:` cada 90 s.
   assert.match(source,/const deviceSig = deviceStableSig\(device\)/);
-  assert.match(source,/if \(k !== 'storage' && k !== 'network'\) stable\[k\] = device\[k\];/);
+  // Bugito: del display, la firma sólo ve la orientación del lienzo y los umbrales de tapado/visible.
+  assert.match(source,/if \(k !== 'storage' && k !== 'network'\) stable\[k\] = k === 'display' \? displayFirma\(device\[k\]\) : device\[k\];/);
   assert.match(source,/const SIGNAGE_NOW_TTL = 300;/);
   assert.match(source,/const NOW_REFRESH_MS = 240 \* 1000;/);
   assert.match(source,/const SCREEN_CACHE_REFRESH_MS = 420 \* 1000;/);
