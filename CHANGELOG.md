@@ -2,7 +2,7 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
-## Sin desplegar · NeoMBP14 · MacBookProNegro14 · `POST /xpacio/estimar` (sello al desplegar)
+## v.14.10.2026.r3.13:34 · NeoMBP14 · MacBookProNegro14 · `POST /xpacio/estimar` + tope KV general 60.000 (#19, #20) y display.painted (#18)
 
 - Nueva ruta `POST /xpacio/estimar` (▤ Creación de Xpacios · «Con foto o vídeo» de admira.biz, misión DCL-ddf3203078fe9471f3796130). Recibe `{tipo?, fotos:[dataURL JPEG/PNG/WebP, máx. 8, ≤ 1 MB], notas?, lang?}`. Devuelve medidas (`ancho`, `largo`, `alto`), `confianza` por medida y global, las `referencias` de tamaño usadas y los `huecos`, el `mobiliario` y las `pantallas` situados con el convenio de paredes F/D/P/I de `admira.xpacio-plano/1`. Módulo `src/xpacio-estimar.mjs`.
 - Modelo: **Gemini 3.1 Pro (preview)**, con visión, razonamiento alto y salida JSON (`responseJsonSchema`). Con la clave del worker, Gemini 2.5 Pro responde 404 «no longer available to new users»; queda en la lista de `XPACIO_ESTIMAR_MODELO`. La salida va acotada a 12.000 tokens, razonamiento incluido: las pruebas usaron entre 8.893 y 11.227, y el peor caso es 0,168 $ por llamada. El esquema va sin `maxItems` porque Gemini 3 lo rechaza con un 400; los topes los pone el validador.
