@@ -1,6 +1,7 @@
 // SANDBOX ENTRYPOINT ONLY. Never use this as the production Worker main.
 // Test sessions refer to fixture identities; no human browser session is used.
 import worker from '../src/index.js';
+import {aplicarCors, listaDeOrigenes} from './origenes.mjs';
 const fixtures = new Map();
 const put = (key, value) => fixtures.set(key, JSON.stringify(value));
 const screens = [
@@ -28,7 +29,9 @@ export default {
     const url=new URL(req.url);
     if(url.pathname==='/preview/session' && req.method==='GET') {
       if(!['superuser','reader'].includes(url.searchParams.get('role')))return Response.json({error:'bad-fixture-role'},{status:400});
-      return Response.json(await session(env,url.searchParams.get('role')),{headers:{'Cache-Control':'no-store','Access-Control-Allow-Origin':env.PREVIEW_ORIGIN,'Vary':'Origin'}});
+      const r=Response.json(await session(env,url.searchParams.get('role')),{headers:{'Cache-Control':'no-store'}});
+      aplicarCors(req,r.headers,listaDeOrigenes(env));
+      return r;
     }
     const paths=['/ctx','/signage/screens','/grid/screens','/stock','/stock/list','/grid/playlist','/grid/draft','/healthz'];
     if(!paths.includes(url.pathname)||(req.method!=='GET'&&req.method!=='OPTIONS'&&!(url.pathname==='/ctx'&&req.method==='POST')))return Response.json({error:'preview-route-disabled'},{status:404});
@@ -38,7 +41,8 @@ export default {
       list:async({prefix})=>({keys:[...fixtures.keys()].filter(k=>k.startsWith(prefix)).map(name=>({name})),list_complete:true})
     },STOCK_BUCKET:{list:async()=>({objects:[...stock.keys()].map(key=>({key})),truncated:false}),get:async k=>stock.has(k)?{json:async()=>stock.get(k)}:null}};
     const result=await worker.fetch(req,isolated,ctx);
-    result.headers.set('Access-Control-Allow-Origin',env.PREVIEW_ORIGIN);
+    // Solo las previews de la suite y local (PREVIEW_ORIGINS, encargo #5996): eco del Origin si casa, nunca «*».
+    aplicarCors(req,result.headers,listaDeOrigenes(env));
     result.headers.set('X-Admira-Preview','5934-isolated-fixtures');
     return result;
   }
