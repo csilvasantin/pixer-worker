@@ -3500,7 +3500,12 @@ function sanitizeDeviceTelemetry(raw) {
     // `painted` (horizontal | vertical respecto al panel). El detector de «formato girado» compara
     // `painted` con la orientación que el plano espera. Sólo cambian por orden: no rompen el dedupe.
     display: { width: 'num', height: 'num', cssWidth: 'num', cssHeight: 'num', viewportWidth: 'num', viewportHeight: 'num', devicePixelRatio: 'num', colorDepth: 'num', orientation: 'text',
-      rotation: 'quarter', fit: 'fit', paintedRotation: 'quarter', painted: 'orient' },
+      rotation: 'quarter', fit: 'fit', paintedRotation: 'quarter', painted: 'orient',
+      // Bugito (DCL-5da4653d859552490fd5ae1d): más medidas de lo que pinta el player, sin marca de prueba.
+      // `canvas` = lienzo {w,h} en px CSS (caja del marco sobre el panel) → «cambio de resolución»;
+      // `overlay` = % de la emisión tapado por capas ajenas al player → «popup encima del contenido»;
+      // `visible` = % del lienzo donde se ve el contenido → «pantalla a medio abrir». Enteros, estables.
+      canvas: 'dims', overlay: 'pct', visible: 'pct' },
     system: { os: 'text', osVersion: 'text', platform: 'text', language: 'text', timezone: 'text' },
     hardware: { cores: 'num', memoryGB: 'num', touchPoints: 'num', architecture: 'text' },
     software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
@@ -3526,6 +3531,15 @@ function sanitizeDeviceTelemetry(raw) {
         if ([0, 90, 180, 270].includes(number)) clean[field] = number;
       } else if (type === 'orient') {
         if (value === 'horizontal' || value === 'vertical') clean[field] = value;
+      } else if (type === 'dims') {
+        // Lienzo medido {w,h}: enteros positivos (px CSS), nada más. Cualquier otra forma no se guarda.
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const w = typeof value.w === 'number' ? Math.round(value.w) : NaN, h = typeof value.h === 'number' ? Math.round(value.h) : NaN;
+          if (w >= 1 && h >= 1 && w <= 100000 && h <= 100000) clean[field] = { w, h };
+        }
+      } else if (type === 'pct') {
+        // Porcentaje medido: número entre 0 y 100, redondeado a entero (no rompe el dedupe con decimales).
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100) clean[field] = Math.round(value);
       } else if (type === 'fit') {
         // Ajuste del canal (setDisplayFit): sólo sus tres modos.
         if (value === 'editorial' || value === 'fill' || value === 'cover') clean[field] = value;
