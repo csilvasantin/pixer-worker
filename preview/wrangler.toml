@@ -1,0 +1,12 @@
+name = "pixer-ctx-5934-preview"
+main = "worker.mjs"
+compatibility_date = "2026-05-02"
+workers_dev = true
+preview_urls = true
+[vars]
+PREVIEW_ORIGIN = "https://codex-5934.admira-design-preview.pages.dev"
+# Dedicated preview KV only. Fill after wrangler kv namespace create PREVIEW_KV.
+# Secrets: WHITELIST_SITE_TOKEN (read-only), PIXERIA_SIGNING_KEY (fresh sandbox key).
+[[kv_namespaces]]
+binding = "PREVIEW_KV"
+id = "a860857508204e9faa1d88d08d288bc2"

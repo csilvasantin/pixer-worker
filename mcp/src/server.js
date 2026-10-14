@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as z from 'zod/v4';
+import {readFile} from 'node:fs/promises';
 
 // dominio propio: LaLiga bloquea workers.dev en horas de fútbol, FLT-1633
 const DEFAULT_WORKER_URL = 'https://api.admira.store';
@@ -297,6 +298,34 @@ server.registerPrompt('route_platform_request', {
     },
   ],
 }));
+
+// Shared context contracts. The user session is distinct from the Agora fleet key.
+function contextHeaders() {
+  const token = process.env.ADMIRA_CONTEXT_TOKEN;
+  if (!token) throw new Error('Falta sesión / Missing ADMIRA_CONTEXT_TOKEN; no use la clave de flota / do not use a fleet key.');
+  return {'Content-Type':'application/json', Authorization:'Bearer '+token};
+}
+server.registerTool('contexto_get', {
+  title:'Contexto / Context', description:'ES: Lee marca visual y proyecto de la sesión. EN: Read session brand and project. Email derived by server; no local admin role.',
+  inputSchema:{}, annotations:{readOnlyHint:true,openWorldHint:true}
+},async()=>asText(await fetchJson('/ctx',{headers:contextHeaders()})));
+server.registerTool('contexto_set', {
+  title:'Cambiar contexto / Update context', description:'ES: Marca sólo look; proyecto requiere superusuario en whitelist, incluso off. EN: Brand is appearance only; project requires whitelist superuser, including reset.',
+  inputSchema:{marca:z.string().max(64).nullable().optional(),proyecto:z.string().max(64).nullable().optional()},
+  annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:true}
+},async(patch)=>asText(await fetchJson('/ctx',{method:'POST',headers:contextHeaders(),body:JSON.stringify(patch)})));
+server.registerTool('contexto_listar', {
+  title:'Datos de proyecto / Project data', description:'ES: Lista datos filtrados en servidor. Starbucks provisional: locationId alsea-sbux-*. EN: Server-filtered data; provisional exact Starbucks location prefix.',
+  inputSchema:{recurso:z.enum(['grid','screens','stock','playlist','draft']),proyecto:z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),screen:z.string().max(60).optional(),playlist:z.string().max(60).optional()},
+  annotations:{readOnlyHint:true,openWorldHint:true}
+},async({recurso,proyecto,screen,playlist})=>{
+  const path={grid:'/grid/screens',screens:'/signage/screens',stock:'/stock',playlist:'/grid/playlist',draft:'/grid/draft'}[recurso];
+  const q=new URLSearchParams();for(const [k,v]of Object.entries({proyecto,screen,playlist}))if(v)q.set(k,v);
+  return asText(await fetchJson(path+(q.size?'?'+q:''),{headers:contextHeaders()}));
+});
+server.registerResource('context-contract','admira://context/contract',{
+  title:'Contrato de contexto / Context contract',description:'ES/EN: API y código común en borrador; sin producción / Draft shared context; no production release.',mimeType:'application/json'
+},async()=>({contents:[{uri:'admira://context/contract',mimeType:'application/json',text:await readFile(new URL('../context-contract.json',import.meta.url),'utf8')}]}));
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
