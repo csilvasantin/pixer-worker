@@ -3494,7 +3494,13 @@ function nowItemSig(item) {
 function sanitizeDeviceTelemetry(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const schema = {
-    display: { width: 'num', height: 'num', cssWidth: 'num', cssHeight: 'num', viewportWidth: 'num', viewportHeight: 'num', devicePixelRatio: 'num', colorDepth: 'num', orientation: 'text' },
+    // Creador de incidencias (DCL-34d5bbccb9cc227bb752a419): además del panel, el giro del operador
+    // (`rotation`, el que pinta el mando) y el ajuste (`fit`) —el canal ya los enviaba y aquí se
+    // perdían— y lo que el player MIDE que pinta: `paintedRotation` (grados del transform real) y
+    // `painted` (horizontal | vertical respecto al panel). El detector de «formato girado» compara
+    // `painted` con la orientación que el plano espera. Sólo cambian por orden: no rompen el dedupe.
+    display: { width: 'num', height: 'num', cssWidth: 'num', cssHeight: 'num', viewportWidth: 'num', viewportHeight: 'num', devicePixelRatio: 'num', colorDepth: 'num', orientation: 'text',
+      rotation: 'quarter', fit: 'text', paintedRotation: 'quarter', painted: 'orient' },
     system: { os: 'text', osVersion: 'text', platform: 'text', language: 'text', timezone: 'text' },
     hardware: { cores: 'num', memoryGB: 'num', touchPoints: 'num', architecture: 'text' },
     software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
@@ -3514,6 +3520,12 @@ function sanitizeDeviceTelemetry(raw) {
       const value = source[field];
       if (type === 'bool') {
         if (typeof value === 'boolean') clean[field] = value;
+      } else if (type === 'quarter') {
+        // Giro en cuartos de vuelta: 0, 90, 180 o 270. Cualquier otro valor no se guarda.
+        const number = typeof value === 'number' ? value : (typeof value === 'string' && value.trim() ? Number(value) : NaN);
+        if ([0, 90, 180, 270].includes(number)) clean[field] = number;
+      } else if (type === 'orient') {
+        if (value === 'horizontal' || value === 'vertical') clean[field] = value;
       } else if (type === 'list') {
         if (Array.isArray(value)) {
           const list = value.map(v => String(v == null ? '' : v).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
