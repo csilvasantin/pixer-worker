@@ -45,8 +45,19 @@ service = "omnipublicity-api"
 KV_DAILY_WRITE_CAP = "60000"
 KV_CRITICAL_DAILY_WRITE_CAP = "10000"
 # POST /xpacio/estimar (▤ Creación de Xpacios · «Con foto o vídeo», DCL-ddf3203078fe9471f3796130):
-# cupo de estimaciones con Gemini 3.1 Pro (~0,13 $ cada una). Por IP y día (memoria del isolate) y
-# global por día (KV). XPACIO_ESTIMAR_OFF = "1" corta la ruta; XPACIO_ESTIMAR_MODELO elige otro
-# modelo de la lista de src/xpacio-estimar.mjs.
-XPACIO_ESTIMAR_TOPE_IP = "12"
-XPACIO_ESTIMAR_TOPE_DIA = "100"
+# cupo de estimaciones con Gemini 3.1 Pro (~0,13 $ cada una, peor caso 0,168 $), atómico en el
+# Durable Object XpacioCupo. Topes por día UTC (Carlos, 14-oct-2026): 30 en total, 5 por IP (IPv6
+# por /64) y 5 $ de coste. XPACIO_ESTIMAR_OFF = "1" corta la ruta (403); XPACIO_ESTIMAR_MODELO
+# elige otro modelo de la lista de src/xpacio-estimar.mjs.
+XPACIO_ESTIMAR_TOPE_DIA = "30"
+XPACIO_ESTIMAR_TOPE_IP = "5"
+XPACIO_ESTIMAR_TOPE_USD = "5"
+
+# Cupo atómico de /xpacio/estimar: un Durable Object propio (SQLite), una sola instancia global.
+[[durable_objects.bindings]]
+name = "XPACIO_CUPO"
+class_name = "XpacioCupo"
+
+[[migrations]]
+tag = "xpacio-cupo-v1"
+new_sqlite_classes = ["XpacioCupo"]

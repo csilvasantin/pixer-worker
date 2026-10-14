@@ -8,18 +8,26 @@
 // (admira.xpacio-plano/1 de clearchannel-tv: paredes F, D, P e I en el sentido de las agujas del
 // reloj). El generador del front (plano-generador.mjs) completa el plano con eso.
 //
-// Protección de la clave de Gemini:
-//   · CORS y Origin: solo www.admira.biz / admira.biz / www.admira.store / admira.store y
-//     localhost (pruebas). Un Origin que no esté en la lista recibe 403 sin llamar a Gemini.
-//   · Tope por IP y día (memoria del isolate) y tope global por día (KV, compartido entre
-//     isolates, más una copia en memoria por si KV no responde). Vars: XPACIO_ESTIMAR_TOPE_IP
-//     (12 por defecto), XPACIO_ESTIMAR_TOPE_DIA (100: unos 13–15 $ al día como mucho, a ~0,13 $
-//     por estimación), XPACIO_ESTIMAR_MODELO y XPACIO_ESTIMAR_OFF=1 (corta la ruta).
-//   · Cuerpo acotado (8 fotos de ≤ 1,5 MB, solo JPEG/PNG/WebP en dataURL) y límite de espera.
-//   · Privacidad: las fotos no se guardan en ningún sitio (ni KV, ni R2, ni logs); solo viajan
-//     a Gemini en esta petición.
-// `?simula=1` devuelve una estimación fija (sin Gemini y sin gastar cupo) para probar la UI.
+// Protección de la clave de Gemini (revisión de pixer-worker#23; topes decididos por Carlos):
+//   · Orden: origen → interruptor → reserva de cupo → leer el cuerpo → validar → Gemini. Nadie sin
+//     cupo consigue que el worker lea un cuerpo grande.
+//   · Origen y CORS: solo www.admira.biz / admira.biz / www.admira.store / admira.store. localhost
+//     solo cuando el worker corre en `wrangler dev` (la URL de la petición es localhost); en
+//     producción, 403 sin llamar a Gemini.
+//   · Cupo ATÓMICO en el Durable Object XpacioCupo (xpacio-cupo.mjs): 30 estimaciones al día en
+//     total, 5 por IP (IPv6 por /64) y 5 $ de coste al día. Cada reserva aparta el peor caso de una
+//     llamada (≈ 0,17 $) y luego se liquida con el coste real. Si el DO falla o no responde: 429
+//     `cupo-no-disponible` (falla cerrado).
+//   · Coste por llamada acotado: maxOutputTokens 12.000 (razonamiento incluido).
+//   · Memoria: fotos ≤ 1 MB, cuerpo ≤ 9 MB; la petición a Gemini se manda por piezas (stream de
+//     longitud fija), sin volver a serializar las fotos.
+//   · XPACIO_ESTIMAR_OFF=1 corta la ruta con 403 (los 4xx de /xpacio no avisan por Telegram; los
+//     5xx se agrupan en notify-policy).
+//   · Privacidad: las fotos no se guardan en ningún sitio (ni KV, ni R2, ni el DO, ni logs).
+// `?simula=1` (solo desde localhost, es decir, en desarrollo) responde una estimación fija sin
+// Gemini y sin gastar cupo.
 import { LIMITES, pedirConLimite, esErrorLimite } from './fetch-limite.mjs';
+import { topesCupo, claveIp, MICRO } from './xpacio-cupo.mjs';
 
 // Modelos permitidos. Gemini 2.5 Pro ya no se ofrece a proyectos nuevos de la Gemini API (404:
 // «no longer available to new users», comprobado el 14-oct-2026 con la clave del worker), así que
@@ -33,22 +41,34 @@ export const XPACIO_MODELOS = Object.freeze({
 export const XPACIO_MODELO = 'gemini-3.1-pro-preview';
 export const modeloXpacio = (env = {}) => Object.hasOwn(XPACIO_MODELOS, env.XPACIO_ESTIMAR_MODELO || '') ? env.XPACIO_ESTIMAR_MODELO : XPACIO_MODELO;
 export const XPACIO_MAX_FOTOS = 8;
-export const XPACIO_MAX_BYTES_FOTO = 1.5 * 1024 * 1024; // binario, tras reescalar en el navegador
-// 8 fotos de 1,5 MB en base64 (×4/3) más el JSON: ~16 MB. Gemini admite hasta 20 MB por petición.
-export const XPACIO_MAX_CUERPO = 17 * 1024 * 1024;
-export const XPACIO_TOPE_IP = 12;
-export const XPACIO_TOPE_DIA = 100;
+// El worker es compartido (signage, stock…): fotos de 1 MB como mucho y cuerpo de 9 MB. El
+// navegador manda fotos de ≤ 800 KB (plano-foto.mjs), así que 8 caben siempre (8 × 0,8 MB × 4/3).
+export const XPACIO_MAX_BYTES_FOTO = 1024 * 1024;
+export const XPACIO_MAX_CUERPO = 9 * 1024 * 1024;
+// Salida máxima (el razonamiento cuenta dentro). Las tres pruebas con razonamiento alto usaron
+// 8.893, 9.680 y 11.227 tokens. Peor caso de una llamada: 12.000 de entrada × 2 $/M + 12.000 de
+// salida × 12 $/M = 0,168 $.
+export const XPACIO_MAX_SALIDA = 12000;
+export const XPACIO_MAX_ENTRADA = 12000; // 8 fotos ≈ 9.000 tokens + prompt; medido: 9.701–9.806
+// Cupo: tiempo máximo para que el DO conteste antes de fallar cerrado.
+export const XPACIO_ESPERA_CUPO = 4000;
 
 export const XPACIO_ORIGENES = Object.freeze([
   'https://www.admira.biz', 'https://admira.biz', 'https://www.admira.store', 'https://admira.store'
 ]);
 const ORIGEN_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?$/;
-export const origenPermitido = origin => typeof origin === 'string' && (XPACIO_ORIGENES.includes(origin) || ORIGEN_LOCAL.test(origin));
+export const origenLocal = origin => typeof origin === 'string' && ORIGEN_LOCAL.test(origin);
+// ¿Corre en `wrangler dev`? En producción la URL de la petición es api.admira.store (o el
+// workers.dev): Cloudflare nunca enruta un Host localhost a este worker.
+export function enDesarrollo(req) {
+  try { return /^(localhost|127\.0\.0\.1)$/.test(new URL(req.url).hostname); } catch { return false; }
+}
+export const origenPermitido = (origin, dev = false) => typeof origin === 'string' && (XPACIO_ORIGENES.includes(origin) || (dev && origenLocal(origin)));
 
 // CORS propio de esta ruta (más estrecho que el general del worker).
-export function corsXpacio(origin) {
+export function corsXpacio(origin, dev = false) {
   return {
-    'Access-Control-Allow-Origin': origenPermitido(origin) ? origin : XPACIO_ORIGENES[0],
+    'Access-Control-Allow-Origin': origenPermitido(origin, dev) ? origin : XPACIO_ORIGENES[0],
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
@@ -219,40 +239,28 @@ export function validarEstimacion(d) {
   return { ancho: W, largo: F, alto: H, confianza, referencias, huecos, mobiliario, pantallas, notas: limpio(d.notas, 800), descartes };
 }
 
-// ── Tope de uso ──────────────────────────────────────────────────────────────
-const diaUtc = ms => new Date(ms).toISOString().slice(0, 10);
-const entero = (v, def) => { const n = parseInt(v, 10); return Number.isInteger(n) && n >= 0 ? n : def; };
-// Memoria del isolate: por IP y día, y el total del día como respaldo de KV. No guarda IPs en
-// ningún almacenamiento persistente.
-export function crearLimitador() {
-  let dia = '', porIp = new Map(), total = 0;
-  const alDia = ahora => { const d = diaUtc(ahora); if (d !== dia) { dia = d; porIp = new Map(); total = 0; } };
-  return {
-    usoIp(ip, ahora) { alDia(ahora); return porIp.get(ip) || 0; },
-    total(ahora) { alDia(ahora); return total; },
-    contar(ip, ahora) { alDia(ahora); porIp.set(ip, (porIp.get(ip) || 0) + 1); total++; if (porIp.size > 5000) porIp.delete(porIp.keys().next().value); }
-  };
+// ── Cupo: Durable Object XpacioCupo (comprobar-y-reservar atómico, falla cerrado) ─
+// cupo = { reservar(args) → {ok, …}, liquidar(args) } — el stub del DO o un doble en los tests.
+export function cupoDesdeEnv(env) {
+  const ns = env && env.XPACIO_CUPO;
+  if (!ns || typeof ns.idFromName !== 'function') return null;
+  const stub = ns.get(ns.idFromName('xpacio-estimar'));
+  return { reservar: a => stub.reservar(a), liquidar: a => stub.liquidar(a) };
 }
-const limitadorGlobal = crearLimitador();
-export const claveDia = ahora => 'xpacio-estimar:' + diaUtc(ahora);
-
-// Comprueba y apunta una estimación. KV es eventualmente consistente: el tope global puede
-// pasarse por unas pocas peticiones simultáneas, nunca por órdenes de magnitud.
-export async function reservarEstimacion({ env, ip, ahora, limitador = limitadorGlobal, reservarKv }) {
-  const topeIp = entero(env.XPACIO_ESTIMAR_TOPE_IP, XPACIO_TOPE_IP), topeDia = entero(env.XPACIO_ESTIMAR_TOPE_DIA, XPACIO_TOPE_DIA);
-  if (limitador.usoIp(ip, ahora) >= topeIp) return { ok: false, motivo: 'ip', tope: topeIp };
-  if (limitador.total(ahora) >= topeDia) return { ok: false, motivo: 'dia', tope: topeDia };
-  let usadas = null;
-  const kv = env.SIGNAGE_KV, clave = claveDia(ahora);
-  if (kv) { try { usadas = parseInt(await kv.get(clave), 10) || 0; } catch { usadas = null; } }
-  if (usadas != null && usadas >= topeDia) return { ok: false, motivo: 'dia', tope: topeDia };
-  limitador.contar(ip, ahora);
-  // Una escritura lógica por estimación, por el cortacircuitos de KV del worker. Si el
-  // presupuesto de KV está agotado, queda el tope en memoria.
-  if (kv && usadas != null && (!reservarKv || await reservarKv())) {
-    try { await kv.put(clave, String(usadas + 1), { expirationTtl: 60 * 60 * 48 }); } catch {}
-  }
-  return { ok: true, usadasIp: limitador.usoIp(ip, ahora), topeIp };
+const conPlazo = (promesa, ms) => new Promise((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error('cupo-sin-respuesta')), ms);
+  Promise.resolve(promesa).then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+});
+// Peor caso de una llamada, en micro-dólares (lo que se aparta al reservar).
+export const reservaMicro = (modelo = XPACIO_MODELO) => {
+  const precio = (XPACIO_MODELOS[modelo] || XPACIO_MODELOS[XPACIO_MODELO]).precio;
+  return Math.round(XPACIO_MAX_ENTRADA * precio.entrada + XPACIO_MAX_SALIDA * precio.salida);
+};
+// Coste real de la llamada, en micro-dólares (los precios van en $ por millón de tokens).
+export function costeMicro(uso, modelo = XPACIO_MODELO) {
+  if (!uso) return null;
+  const precio = (XPACIO_MODELOS[modelo] || XPACIO_MODELOS[XPACIO_MODELO]).precio;
+  return Math.round((uso.promptTokenCount || 0) * precio.entrada + ((uso.candidatesTokenCount || 0) + (uso.thoughtsTokenCount || 0)) * precio.salida);
 }
 
 // ── Respuesta fija para ?simula=1 (sin Gemini): la sala del laboratorio con errores típicos ─
@@ -284,86 +292,131 @@ export const XPACIO_SIMULADA = Object.freeze({
 });
 
 export function costeUsd(uso, modelo = XPACIO_MODELO) {
-  if (!uso) return null;
-  const precio = (XPACIO_MODELOS[modelo] || XPACIO_MODELOS[XPACIO_MODELO]).precio;
-  const entrada = uso.promptTokenCount || 0, salida = (uso.candidatesTokenCount || 0) + (uso.thoughtsTokenCount || 0);
-  return Math.round((entrada * precio.entrada + salida * precio.salida) / 1e6 * 10000) / 10000;
+  const micro = costeMicro(uso, modelo);
+  return micro == null ? null : Math.round(micro / MICRO * 10000) / 10000;
 }
 
+// Lee el cuerpo con tope de bytes en trozos y lo decodifica UNA vez (sin ir encadenando cadenas).
 async function cuerpoAcotado(req, limite) {
   if (!req.body) return '';
-  const lector = req.body.getReader(), dec = new TextDecoder('utf-8', { fatal: true });
-  let bytes = 0, texto = '';
+  const lector = req.body.getReader(), trozos = [];
+  let bytes = 0;
   try {
     for (;;) {
       const { done, value } = await lector.read();
       if (done) break;
       bytes += value.byteLength;
       if (bytes > limite) throw new Error('cuerpo-demasiado-grande');
-      texto += dec.decode(value, { stream: true });
+      trozos.push(value);
     }
-    return texto + dec.decode();
   } catch (e) { await lector.cancel().catch(() => {}); throw e; }
   finally { lector.releaseLock(); }
+  const todo = new Uint8Array(bytes);
+  let at = 0;
+  for (const t of trozos) { todo.set(t, at); at += t.byteLength; }
+  trozos.length = 0;
+  return new TextDecoder('utf-8', { fatal: true }).decode(todo);
+}
+
+// Cuerpo de la petición a Gemini por piezas, sin volver a serializar las fotos: el base64 ya
+// validado (solo ASCII, sin escapes JSON) se codifica foto a foto cuando el stream lo pide. En
+// Workers va por un FixedLengthStream: Gemini recibe Content-Length, no un cuerpo «chunked».
+export function cuerpoGemini({ prompt, fotos, generationConfig }) {
+  const enc = new TextEncoder(), piezas = [], ascii = new Set();
+  piezas.push(`{"contents":[{"role":"user","parts":[${JSON.stringify({ text: prompt })}`);
+  fotos.forEach((f, i) => {
+    piezas.push(`,{"text":"Foto ${i + 1}"},{"inlineData":{"mimeType":"${f.mimeType}","data":"`);
+    ascii.add(piezas.length); piezas.push(f.data);
+    piezas.push('"}}');
+  });
+  piezas.push(`]}],"generationConfig":${JSON.stringify(generationConfig)}}`);
+  const largo = piezas.reduce((t, p, i) => t + (ascii.has(i) ? p.length : enc.encode(p).byteLength), 0);
+  let i = 0;
+  const stream = new ReadableStream({
+    pull(c) { if (i >= piezas.length) { piezas.length = 0; c.close(); return; } const p = enc.encode(piezas[i]); piezas[i++] = ''; c.enqueue(p); }
+  });
+  /* global FixedLengthStream */
+  const body = typeof FixedLengthStream === 'function' ? stream.pipeThrough(new FixedLengthStream(largo)) : stream;
+  return { body, largo };
 }
 
 // ── Handler ──────────────────────────────────────────────────────────────────
-// deps: { fetchImpl, limitador, reservarKv, ahora } — inyectables para los tests.
-export async function xpacioEstimarHandler(req, env = {}, { fetchImpl, limitador, reservarKv, ahora = Date.now() } = {}) {
-  const origin = req.headers.get('Origin') || '';
-  if (!origenPermitido(origin)) return respuesta({ ok: false, error: 'origen-no-permitido' }, 403);
-  if (String(env.XPACIO_ESTIMAR_OFF || '') === '1') return respuesta({ ok: false, error: 'desactivado' }, 503);
+// deps: { fetchImpl, cupo, waitUntil, esperaCupo } — inyectables para los tests. `cupo` por defecto es el DO.
+export async function xpacioEstimarHandler(req, env = {}, { fetchImpl, cupo = cupoDesdeEnv(env), waitUntil, esperaCupo = XPACIO_ESPERA_CUPO } = {}) {
+  const dev = enDesarrollo(req), origin = req.headers.get('Origin') || '';
+  // 1. Origen.
+  if (!origenPermitido(origin, dev)) return respuesta({ ok: false, error: 'origen-no-permitido' }, 403);
+  // 2. Interruptor: 403, no 503 (no es una avería y no debe avisar por Telegram).
+  if (String(env.XPACIO_ESTIMAR_OFF || '') === '1') return respuesta({ ok: false, error: 'desactivado' }, 403);
   if (Number(req.headers.get('Content-Length')) > XPACIO_MAX_CUERPO) return respuesta({ ok: false, error: 'cuerpo-demasiado-grande' }, 413);
+  const simula = new URL(req.url).searchParams.get('simula') === '1';
+  if (simula && !origenLocal(origin)) return respuesta({ ok: false, error: 'simula-solo-local' }, 403);
+  const modelo = modeloXpacio(env), { nombre: modeloNombre, config } = XPACIO_MODELOS[modelo];
+  if (!simula && !env.GEMINI_API_KEY) return respuesta({ ok: false, error: 'server-missing-key' }, 503);
+
+  // 3. Reserva de cupo, antes de leer el cuerpo. Falla cerrado.
+  let reserva = null;
+  if (!simula) {
+    try {
+      if (!cupo) throw new Error('sin-cupo');
+      const topes = topesCupo(env);
+      reserva = await conPlazo(cupo.reservar({ clave: await claveIp(req.headers.get('CF-Connecting-IP')), ...topes, reservaMicro: reservaMicro(modelo) }), esperaCupo);
+    } catch { return respuesta({ ok: false, error: 'cupo-no-disponible' }, 429); }
+    if (!reserva || !reserva.ok) return respuesta({ ok: false, error: 'limite', motivo: (reserva && reserva.motivo) || 'dia', tope: reserva && reserva.tope }, 429);
+  }
+  // Cambia lo apartado por el coste real; si falla, se queda el peor caso (más prudente).
+  const liquidar = micro => {
+    if (!reserva) return;
+    const p = Promise.resolve().then(() => cupo.liquidar({ dia: reserva.dia, reservaMicro: reserva.reservaMicro, costeMicro: micro })).catch(() => {});
+    if (waitUntil) waitUntil(p);
+  };
+
+  // 4. Cuerpo y 5. validación. Sin llegar a Gemini no hay gasto, pero el turno queda contado.
   let body;
   try { body = JSON.parse(await cuerpoAcotado(req, XPACIO_MAX_CUERPO)); }
-  catch (e) { const grande = e.message === 'cuerpo-demasiado-grande'; return respuesta({ ok: false, error: grande ? e.message : 'json-no-valido' }, grande ? 413 : 400); }
-  if (!body || typeof body !== 'object') return respuesta({ ok: false, error: 'json-no-valido' }, 400);
+  catch (e) { liquidar(0); const grande = e.message === 'cuerpo-demasiado-grande'; return respuesta({ ok: false, error: grande ? e.message : 'json-no-valido' }, grande ? 413 : 400); }
+  if (!body || typeof body !== 'object') { liquidar(0); return respuesta({ ok: false, error: 'json-no-valido' }, 400); }
   const fotos = leerFotos(body.fotos);
-  if (fotos.error) return respuesta({ ok: false, error: fotos.error, ...(fotos.foto ? { foto: fotos.foto } : {}), ...(fotos.max ? { max: fotos.max } : {}) }, 400);
+  body.fotos = null;
+  if (fotos.error) { liquidar(0); return respuesta({ ok: false, error: fotos.error, ...(fotos.foto ? { foto: fotos.foto } : {}), ...(fotos.max ? { max: fotos.max } : {}) }, 400); }
   const tipo = XPACIO_TIPOS[body.tipo] ? body.tipo : null;
   const lang = body.lang === 'en' ? 'en' : 'es';
   const n = fotos.partes.length;
-  const modelo = modeloXpacio(env), { nombre: modeloNombre, config } = XPACIO_MODELOS[modelo];
+  if (simula) return respuesta({ ok: true, simulada: true, modelo, modeloNombre, fotos: n, estimacion: validarEstimacion(XPACIO_SIMULADA), uso: null });
 
-  if (new URL(req.url).searchParams.get('simula') === '1') {
-    return respuesta({ ok: true, simulada: true, modelo, modeloNombre, fotos: n, estimacion: validarEstimacion(XPACIO_SIMULADA), uso: null });
-  }
-  if (!env.GEMINI_API_KEY) return respuesta({ ok: false, error: 'server-missing-key' }, 503);
-
-  const ip = (req.headers.get('CF-Connecting-IP') || 'sin-ip').slice(0, 64);
-  const cupo = await reservarEstimacion({ env, ip, ahora, limitador, reservarKv });
-  if (!cupo.ok) return respuesta({ ok: false, error: 'limite', motivo: cupo.motivo, tope: cupo.tope }, 429);
-
-  const partes = [{ text: construirPrompt({ tipo, notas: body.notas, lang, n }) }];
-  fotos.partes.forEach((f, i) => partes.push({ text: `Foto ${i + 1}` }, { inlineData: { mimeType: f.mimeType, data: f.data } }));
-  const peticion = {
-    contents: [{ role: 'user', parts: partes }],
-    // El razonamiento cuenta dentro de maxOutputTokens: margen para que el JSON no se corte.
-    generationConfig: { ...config, maxOutputTokens: 24576, responseMimeType: 'application/json', responseJsonSchema: XPACIO_ESQUEMA }
-  };
+  // 6. Gemini.
+  const { body: cuerpo } = cuerpoGemini({
+    prompt: construirPrompt({ tipo, notas: body.notas, lang, n }), fotos: fotos.partes,
+    generationConfig: { ...config, maxOutputTokens: XPACIO_MAX_SALIDA, responseMimeType: 'application/json', responseJsonSchema: XPACIO_ESQUEMA }
+  });
+  fotos.partes = null;
   let r, datos;
   try {
     ({ r, datos } = await pedirConLimite(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-      method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(peticion)
+      method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' }, body: cuerpo
     }, { ms: LIMITES.xpacioEstimar, proveedor: 'gemini', etapa: 'xpacio-estimar', fetchImpl }));
   } catch (e) {
+    // Sin respuesta no se sabe lo que ha cobrado Google: se queda apartado el peor caso.
     if (esErrorLimite(e)) return respuesta({ ok: false, error: e.tipo === 'timeout' ? 'gemini-sin-respuesta' : 'gemini-inaccesible' }, e.tipo === 'timeout' ? 504 : 502);
     throw e;
   }
+  const uso = datos && datos.usageMetadata || null;
   if (!r.ok) {
-    // Nada del cuerpo de Gemini va al navegador: solo el estado.
+    // Una respuesta de error de Gemini no gasta tokens. Nada de su cuerpo va al navegador.
+    liquidar(costeMicro(uso, modelo) || 0);
     if (r.status === 400 || r.status === 404) console.warn('[xpacio-estimar]', r.status, limpio(datos?.error?.message, 300));
     return respuesta({ ok: false, error: r.status === 429 ? 'gemini-saturado' : `gemini-${r.status}` }, r.status === 429 ? 503 : 502);
   }
+  // Con respuesta, el coste real; si no trae uso, se queda el peor caso.
+  if (uso) liquidar(costeMicro(uso, modelo));
   const cand = datos?.candidates?.[0];
   const texto = (cand?.content?.parts || []).filter(p => p && p.text && !p.thought).map(p => p.text).join('');
   let estimacion;
   try { estimacion = validarEstimacion(JSON.parse(texto)); }
   catch (e) { return respuesta({ ok: false, error: 'estimacion-no-valida', detalle: limpio(e.message, 60), fin: limpio(cand?.finishReason, 30) }, 502); }
-  const uso = datos.usageMetadata || null;
   return respuesta({
     ok: true, modelo, modeloNombre, fotos: n, estimacion,
     uso: uso ? { entrada: uso.promptTokenCount || 0, salida: uso.candidatesTokenCount || 0, razonamiento: uso.thoughtsTokenCount || 0, costeUsd: costeUsd(uso, modelo) } : null,
-    cupo: { usadasIp: cupo.usadasIp, topeIp: cupo.topeIp }
+    cupo: { usadasIp: reserva.usadasIp, topeIp: reserva.topeIp, usadasDia: reserva.usadasDia, topeDia: reserva.topeDia }
   });
 }

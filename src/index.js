@@ -59,7 +59,7 @@ import {
 } from './stock-poster.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
-import { xpacioEstimarHandler, corsXpacio } from './xpacio-estimar.mjs';
+import { xpacioEstimarHandler, corsXpacio, enDesarrollo } from './xpacio-estimar.mjs';
 import { siguienteNum, renumerarDuplicados, etiquetasHonestas, contentDimensions, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
@@ -7913,7 +7913,7 @@ export default {
       }
       // /xpacio/estimar llama a Gemini con la clave del worker: CORS propio, más estrecho.
       if (new URL(req.url).pathname === '/xpacio/estimar') {
-        return new Response(null, { status: 204, headers: corsXpacio(req.headers.get('Origin') || '') });
+        return new Response(null, { status: 204, headers: corsXpacio(req.headers.get('Origin') || '', enDesarrollo(req)) });
       }
       return new Response(null, { status: 204, headers: corsHeaders(req) });
     }
@@ -7963,8 +7963,9 @@ export default {
         res = json({ ok: true, cleared: key });
       } else if (path === '/xpacio/estimar' && req.method === 'POST') {
         // ▤ Creación de Xpacios · «Con foto o vídeo»: medidas, huecos, muebles y pantallas
-        // estimados con Gemini 2.5 Pro. Origen, cupo y tamaño acotados; las fotos no se guardan.
-        res = await xpacioEstimarHandler(req, env, { reservarKv: () => reserveKvWrite(env, Date.now()) });
+        // estimados con Gemini 3.1 Pro. Origen, cupo atómico (DO XpacioCupo) y tamaño acotados;
+        // las fotos no se guardan.
+        res = await xpacioEstimarHandler(req, env, { waitUntil: p => ctx.waitUntil(p) });
       } else if (path === '/segmentado/generate' && req.method === 'POST') {
         res = await segmentadoGenerateHandler(req, env, ctx);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
@@ -8288,7 +8289,7 @@ export default {
     }
     const ms = Date.now() - t0;
     await handleAutomaticHttpNotification(ctx, env, req, path, res, ms);
-    const cors = path === '/xpacio/estimar' ? corsXpacio(req.headers.get('Origin') || '') : corsHeaders(req);
+    const cors = path === '/xpacio/estimar' ? corsXpacio(req.headers.get('Origin') || '', enDesarrollo(req)) : corsHeaders(req);
     Object.entries(cors).forEach(([k, v]) => {
       // No pisar un Access-Control-Allow-Origin:* que el handler ponga a propósito
       // (p.ej. /image/proxy: imagen pública sin credenciales, legible desde cualquier origen).
@@ -8303,4 +8304,4 @@ export function shouldFlushNotificationAggregates(event) {
   return !!event && event.cron === '*/2 * * * *';
 }
 
-export { AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, sanitizeDeviceTelemetry, sanitizeHealth, signageClaimOwner, signageNowGetHandler, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
+export { notificationRouteIsSkipped, AGORA_AWAKE_MS, AGORA_PRESENCE_REFRESH_MS, agoraPresenceUpdate, signageHealthMonitor, SCREENS_INDEX, signagePushMerecetAviso, capsuleDimensionTag, reserveCriticalKvWrite, reserveKvWrite, sanitizeDeviceTelemetry, sanitizeHealth, signageClaimOwner, signageNowGetHandler, signageNowPostHandler, signageOwnerDecision, signageProducerPriority, siteCapsuleCompact, siteCapsuleText, siteCapsuleUrl };
