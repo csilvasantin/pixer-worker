@@ -2,6 +2,26 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.14.10.2026.r3.13:34 · NeoMBP14 · MacBookProNegro14 · `POST /xpacio/estimar` + tope KV general 60.000 (#19, #20) y display.painted (#18)
+
+- Nueva ruta `POST /xpacio/estimar` (▤ Creación de Xpacios · «Con foto o vídeo» de admira.biz, misión DCL-ddf3203078fe9471f3796130). Recibe `{tipo?, fotos:[dataURL JPEG/PNG/WebP, máx. 8, ≤ 1 MB], notas?, lang?}`. Devuelve medidas (`ancho`, `largo`, `alto`), `confianza` por medida y global, las `referencias` de tamaño usadas y los `huecos`, el `mobiliario` y las `pantallas` situados con el convenio de paredes F/D/P/I de `admira.xpacio-plano/1`. Módulo `src/xpacio-estimar.mjs`.
+- Modelo: **Gemini 3.1 Pro (preview)**, con visión, razonamiento alto y salida JSON (`responseJsonSchema`). Con la clave del worker, Gemini 2.5 Pro responde 404 «no longer available to new users»; queda en la lista de `XPACIO_ESTIMAR_MODELO`. La salida va acotada a 12.000 tokens, razonamiento incluido: las pruebas usaron entre 8.893 y 11.227, y el peor caso es 0,168 $ por llamada. El esquema va sin `maxItems` porque Gemini 3 lo rechaza con un 400; los topes los pone el validador.
+- **Cupo atómico** en un Durable Object propio, `XpacioCupo` (`src/xpacio-cupo-do.mjs`, SQLite, migración `xpacio-cupo-v1`, binding `XPACIO_CUPO`). Su núcleo puro está en `src/xpacio-cupo.mjs`.
+  - Comprueba y reserva en una sola llamada síncrona.
+  - Topes por día UTC: 30 estimaciones (`XPACIO_ESTIMAR_TOPE_DIA`), 5 por IP con las IPv6 agrupadas por /64 (`XPACIO_ESTIMAR_TOPE_IP`) y 5 $ de coste (`XPACIO_ESTIMAR_TOPE_USD`).
+  - Cada reserva aparta el peor caso y luego se liquida con el coste real de `usageMetadata`.
+  - Si el DO falla o no responde: 429 `cupo-no-disponible`.
+  - No guarda IPs, solo un hash del grupo, y purga las filas a los dos días.
+- **Orden:** origen → interruptor → reserva de cupo → leer el cuerpo → validar → Gemini.
+- **Origen:** CORS y `Origin` solo de www.admira.biz, admira.biz, www.admira.store y admira.store. localhost solo cuando la petición llega en `wrangler dev`. `?simula=1` solo con origen localhost.
+- **Memoria:** cuerpo ≤ 9 MB, leído en trozos y decodificado una vez. La petición a Gemini va por piezas en un `FixedLengthStream` (con Content-Length), sin volver a serializar las fotos.
+- **Interruptor:** `XPACIO_ESTIMAR_OFF=1` responde 403 `desactivado`.
+- **Avisos:** los 5xx de la ruta se agrupan en `notify-policy` (`xpacio_5xx`, ventana de 30 min) en vez de mandar un Telegram por petición. Las fotos no se guardan.
+- **Verificación:**
+  - 316/316 pruebas, 26 en `test/xpacio-estimar.test.mjs`, con Gemini simulado. Cubren la concurrencia, el DO caído, el tope de coste, el orden y los avisos.
+  - El DO real en workerd (Miniflare, con el bundle del `--dry-run` y Gemini interceptado): de 60 peticiones simultáneas del mismo /64 pasan 5, y de 80 de 80 IPs pasan 25 más (30 en total).
+  - Validación previa con `wrangler dev --remote` y las fotos del laboratorio: entre 0,13 y 0,15 $ y entre 73 y 106 s por estimación.
+
 ## v.11.10.2026.r1.11:55 · GrokBotBox
 
 - `AnnouncementTts.generate` (entrypoint privado, solo por Service Binding) acepta un `voiceId` **opcional** restringido a una allowlist corta de 13 voces premade de ElevenLabs (`counselorVoiceIds`), una por consejero de la mesa de debate de admira.live (`/debatir mejor audio`). Aprobado por Carlos el 11-10-2026 a las 11:48.

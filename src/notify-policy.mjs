@@ -16,6 +16,9 @@ export const INCIDENT_POLICY = Object.freeze({
 export const AGGREGATE_POLICY = Object.freeze({
   probe_404: Object.freeze({ windowMs: 10 * 60 * 1000, threshold: 20 }),
   bad_key_403: Object.freeze({ windowMs: 5 * 60 * 1000, threshold: 3 }),
+  // POST /xpacio/estimar: los 5xx (Gemini caído, saturado o sin clave) los provoca cada visitante;
+  // un resumen por ventana, no un Telegram por petición. El cupo diario ya los acota.
+  xpacio_5xx: Object.freeze({ windowMs: 30 * 60 * 1000, threshold: 5 }),
 });
 
 const localLocks = new Map();
@@ -43,6 +46,7 @@ export function classifyHttpNotification({ path, method, status, errorCode, skip
   if (skip && (route === '/agora' || route.startsWith('/agora/'))) {
     return { action: 'skip', kind: 'routine' };
   }
+  if (code >= 500 && route === '/xpacio/estimar') return { action: 'aggregate', kind: 'xpacio_5xx' };
   if (code >= 500) return { action: 'immediate', kind: 'server_error' };
   if (verb === 'POST' && code === 404 && classifyProbe404Path(path)) {
     return { action: 'aggregate', kind: 'probe_404' };
@@ -199,7 +203,7 @@ async function withLocalLock(key, fn) {
 }
 
 export function formatAggregateSummary(record, reason = 'threshold') {
-  const label = record.kind === 'bad_key_403' ? 'BAD-KEY 403 AGRUPADO' : 'PROBES 404 AGRUPADOS';
+  const label = record.kind === 'bad_key_403' ? 'BAD-KEY 403 AGRUPADO' : record.kind === 'xpacio_5xx' ? 'XPACIO/ESTIMAR 5xx AGRUPADOS' : 'PROBES 404 AGRUPADOS';
   const why = reason === 'window' ? 'ventana cerrada' : 'umbral alcanzado';
   return `🛡️ <b>${label}</b>\n` +
     `· <code>${String(record.path)}</code> · ${record.count} intento(s)\n` +

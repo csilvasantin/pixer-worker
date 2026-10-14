@@ -3,6 +3,8 @@ import {generateAnnouncement} from './announcement-tts.mjs';
 import {generateAdvertisingImage} from './advertising-image.mjs';
 import {startMedia,getMedia,storedAnnouncement} from './xpace-media.mjs';
 export {default} from './index.js';
+// Cupo atómico de POST /xpacio/estimar (DCL-ddf3203078fe9471f3796130).
+export {XpacioCupo} from './xpacio-cupo-do.mjs';
 // No public route. Pages binds this entrypoint, never the full Worker.
 export class AnnouncementTts extends WorkerEntrypoint {
   async generate(input) { const work=input?.archive ? storedAnnouncement(this.env,input,this.ctx) : generateAnnouncement(this.env,input);this.ctx.waitUntil(work);return work; }
