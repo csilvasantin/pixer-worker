@@ -365,3 +365,7 @@ Esto elimina el refresco manual del índice al importar. La aparición en la pan
 sujeta a sus consultas periódicas, la caché del índice (60 s) y la descarga del archivo. No significa
 reproducción instantánea. Pruebas de concurrencia, errores y ciclo HTTP: `test/stock-index-auto.test.mjs`.
 Referencia R2: https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#conditional-operations
+
+### Etiquetas semánticas de importación
+
+Los motores `yt-dlp` y `local` pueden enviar `searchContext:{version:1,description?:string}` y hasta3 `analysisFrames` JPEG/WebP. La clasificación usa notas, título, descripción disponible y fotogramas; no analiza la pista sonora. Se conservan manuales y años explícitos incluso sin Gemini. `tagging` declara fuentes, modelo, número de fotogramas y propuestas; los fotogramas no se guardan en el índice. `routingSource` conserva solo las etiquetas y notas deliberadas del operador; Admira TV no crea una dirección por hashtag desde etiquetas inferidas; las reglas de contenido configuradas explícitamente conservan su selección temática. En duplicados comprobados se enriquece la búsqueda preservando la dirección heredada mediante `routingSource`, identidad y comentario originales. Las pistas de hash no enriquecen metadatos. El índice principal se persiste antes de confirmar, como en cualquier publicación.

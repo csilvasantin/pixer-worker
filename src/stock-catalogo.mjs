@@ -165,28 +165,31 @@ export function composeTags(base = [], required = [], max = STOCK_TAGS_MAX) {
 
 // Etiquetas finales de una pieza: las del cliente + hashtags del catálogo + calidad.
 // `previous` (catálogo anterior) sirve para retirar sus hashtags al cambiar de catálogo.
-export function applyCatalogoTags(tags, catalogo, { quality = null, previous = null } = {}) {
+export function applyCatalogoTags(tags, catalogo, { quality = null, previous = null, maxTags = STOCK_TAGS_MAX } = {}) {
   const required = [...catalogoHashtags(catalogo)];
   if (quality) required.push(quality);
   // Se retiran los hashtags del catálogo anterior que el nuevo no vuelva a pedir;
   // los que coinciden se quedan en su sitio para no reordenar sin motivo.
   const drop = new Set((previous ? catalogoHashtags(previous) : []).filter(t => !required.includes(t)));
   const base = (Array.isArray(tags) ? tags : []).map(cleanTag).filter(t => t && !drop.has(t));
-  return composeTags(base, required);
+  return composeTags(base, required, maxTags);
 }
 
 // Búsqueda libre `q=`: todas las palabras tienen que aparecer en título, prompt,
 // comentario, etiquetas, id, num o campos del catálogo.
 export function itemMatchesQuery(item, q) {
-  const words = String(q || '').toLowerCase().split(/\s+/).map(w => w.replace(/^#/, '')).filter(Boolean);
+  const normalize = text => String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+    .replace(/#/g,'').replace(/[^\p{L}\p{N}_:/.-]+/gu,' ').trim().split(/\s+/)
+    .map(w=>({song:'cancion',songs:'cancion',canciones:'cancion'}[w] || canonTag(w).normalize('NFD').replace(/[\u0300-\u036f]/g,''))).join(' ');
+  const words = normalize(q).split(/\s+/).filter(Boolean);
   if (!words.length) return true;
   if (!item || typeof item !== 'object') return false;
   const cat = item.catalogo && typeof item.catalogo === 'object' ? item.catalogo : {};
-  const hay = [
+  const hay = normalize([
     item.id, item.num, item.title, item.prompt, item.comment, item.type, item.motor,
     ...(Array.isArray(item.tags) ? item.tags : []),
     cat.id, cat.cliente, cat.nombre, cat.producto, cat.proyecto, cat.desde, cat.hasta,
-  ].filter(v => v != null && v !== '').join('\n').toLowerCase();
+  ].filter(v => v != null && v !== '').join('\n'));
   return words.every(w => hay.includes(w));
 }
 
@@ -255,8 +258,10 @@ export function applyMetaPatch(meta, patch) {
   const add = (Array.isArray(patch.tags_add) ? patch.tags_add : []).map(cleanTag).filter(Boolean);
   const before = (Array.isArray(meta.tags) ? meta.tags : []).map(cleanTag).filter(Boolean);
   const base = before.filter(t => !remove.has(t)).concat(add);
-  const tags = applyCatalogoTags(base, catalogo, { quality: meta.quality || null, previous });
+  const tags = applyCatalogoTags(base, catalogo, { quality: meta.quality || null, previous, maxTags:meta.searchContext?.version===1 ? 24 : STOCK_TAGS_MAX });
   const next = { ...meta, tags, catalogo };
+  if (Array.isArray(meta.routingTags)) next.routingTags = [...new Set([...meta.routingTags.filter(t=>!remove.has(cleanTag(t))),...add].map(canonTag))];
+  if (meta.routingSource && Array.isArray(meta.routingSource.tags)) next.routingSource = {...meta.routingSource,tags:meta.routingSource.tags.filter(t=>!remove.has(cleanTag(t))).concat(add)};
   if (!catalogo) delete next.catalogo;
   // Yokup #3199: `oculto` (true/false) saca la pieza de listados, índice y
   // catálogos sin borrarla; `validacion` guarda el veredicto {ok, negros,
@@ -278,6 +283,7 @@ export function applyMetaPatch(meta, patch) {
       extra = true;
     }
   }
-  const changed = extra || JSON.stringify(before) !== JSON.stringify(tags) || JSON.stringify(previous) !== JSON.stringify(catalogo);
+  const changed = extra || JSON.stringify(before) !== JSON.stringify(tags) || JSON.stringify(previous) !== JSON.stringify(catalogo)
+    || JSON.stringify(meta.routingTags)!==JSON.stringify(next.routingTags) || JSON.stringify(meta.routingSource)!==JSON.stringify(next.routingSource);
   return { meta: next, changed, error: null };
 }
