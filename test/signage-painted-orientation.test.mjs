@@ -37,12 +37,14 @@ test('display conserva el giro del operador, el ajuste y lo que el player mide q
   assert.equal('fault' in device.display, false, 'nada fuera de la allowlist');
 });
 
-test('giro en cuartos de vuelta y orientación sólo horizontal | vertical', () => {
+test('giro en cuartos de vuelta, orientación sólo horizontal | vertical y ajuste sólo editorial | fill | cover', () => {
   const d = (display) => (sanitizeDeviceTelemetry({ display }) || {}).display || {};
   assert.equal(d({ rotation: 270 }).rotation, 270);
   assert.equal(d({ rotation: '90' }).rotation, 90);
   for (const bad of [45, -90, 360, null, '', true, 'noventa']) assert.equal('rotation' in d({ rotation: bad }), false, String(bad));
   assert.equal(d({ painted: 'horizontal' }).painted, 'horizontal');
+  for (const fit of ['editorial', 'fill', 'cover']) assert.equal(d({ fit }).fit, fit);
+  for (const bad of ['Fill', 'stretch', '<b>x</b>', 1, null]) assert.equal('fit' in d({ fit: bad }), false, String(bad));
   for (const bad of ['Horizontal', 'landscape', 'diagonal', 1, null]) assert.equal('painted' in d({ painted: bad }), false, String(bad));
 });
 

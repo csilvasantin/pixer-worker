@@ -3500,7 +3500,7 @@ function sanitizeDeviceTelemetry(raw) {
     // `painted` (horizontal | vertical respecto al panel). El detector de «formato girado» compara
     // `painted` con la orientación que el plano espera. Sólo cambian por orden: no rompen el dedupe.
     display: { width: 'num', height: 'num', cssWidth: 'num', cssHeight: 'num', viewportWidth: 'num', viewportHeight: 'num', devicePixelRatio: 'num', colorDepth: 'num', orientation: 'text',
-      rotation: 'quarter', fit: 'text', paintedRotation: 'quarter', painted: 'orient' },
+      rotation: 'quarter', fit: 'fit', paintedRotation: 'quarter', painted: 'orient' },
     system: { os: 'text', osVersion: 'text', platform: 'text', language: 'text', timezone: 'text' },
     hardware: { cores: 'num', memoryGB: 'num', touchPoints: 'num', architecture: 'text' },
     software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
@@ -3526,6 +3526,9 @@ function sanitizeDeviceTelemetry(raw) {
         if ([0, 90, 180, 270].includes(number)) clean[field] = number;
       } else if (type === 'orient') {
         if (value === 'horizontal' || value === 'vertical') clean[field] = value;
+      } else if (type === 'fit') {
+        // Ajuste del canal (setDisplayFit): sólo sus tres modos.
+        if (value === 'editorial' || value === 'fill' || value === 'cover') clean[field] = value;
       } else if (type === 'list') {
         if (Array.isArray(value)) {
           const list = value.map(v => String(v == null ? '' : v).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
