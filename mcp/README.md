@@ -78,3 +78,7 @@ Ejemplo generico de cliente MCP:
 ## Siguiente fase
 
 Cuando el set de herramientas sea estable, publicar una version remota en `https://www.admira.live/mcp` con transporte HTTP Streamable, auth dedicada, rate limits y auditoria.
+
+## Contexto compartido / Shared context (draft)
+
+Nuevas tools / New tools: `contexto_get`, `contexto_set`, `contexto_listar`; recurso / resource `admira://context/contract`. Usa / use `ADMIRA_CONTEXT_TOKEN` de una sesión y / from a session and `ADMIRA_WORKER_URL` para API o preview / for API or preview. Las claves de flota no conceden roles / Fleet keys do not grant user roles. Marca cambia sólo apariencia; proyecto, incluso reset, exige superusuario verificado / Brand only changes appearance; project and reset require server-verified superuser. [Ayuda y tutorial ES/EN](../docs/contexto.md). Código en PR borrador; no actualización del servicio MCP de producción / Draft source only; production MCP service unchanged.
