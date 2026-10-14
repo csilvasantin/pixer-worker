@@ -44,3 +44,9 @@ service = "omnipublicity-api"
 [vars]
 KV_DAILY_WRITE_CAP = "60000"
 KV_CRITICAL_DAILY_WRITE_CAP = "10000"
+# POST /xpacio/estimar (▤ Creación de Xpacios · «Con foto o vídeo», DCL-ddf3203078fe9471f3796130):
+# cupo de estimaciones con Gemini 3.1 Pro (~0,13 $ cada una). Por IP y día (memoria del isolate) y
+# global por día (KV). XPACIO_ESTIMAR_OFF = "1" corta la ruta; XPACIO_ESTIMAR_MODELO elige otro
+# modelo de la lista de src/xpacio-estimar.mjs.
+XPACIO_ESTIMAR_TOPE_IP = "12"
+XPACIO_ESTIMAR_TOPE_DIA = "100"

@@ -58,6 +58,8 @@ import {
   sanitizeValidacion,
 } from './stock-poster.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
+// ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
+import { xpacioEstimarHandler, corsXpacio } from './xpacio-estimar.mjs';
 import { siguienteNum, renumerarDuplicados, etiquetasHonestas, contentDimensions, objetivosDeReparto, motivoDeReparto, claveObjetivo, construirTraza, NUM_KV_KEY } from './stock-via1.mjs';
 
 // Pixer-Eleven proxy — Cloudflare Worker
@@ -7909,6 +7911,10 @@ export default {
           'Access-Control-Max-Age': '86400',
         } });
       }
+      // /xpacio/estimar llama a Gemini con la clave del worker: CORS propio, más estrecho.
+      if (new URL(req.url).pathname === '/xpacio/estimar') {
+        return new Response(null, { status: 204, headers: corsXpacio(req.headers.get('Origin') || '') });
+      }
       return new Response(null, { status: 204, headers: corsHeaders(req) });
     }
     const url = new URL(req.url);
@@ -7955,6 +7961,10 @@ export default {
         const key = (path === '/megafonia/next' ? 'megafonia:q:' : 'hilomusical:q:') + st;
         if (env.SIGNAGE_KV) await env.SIGNAGE_KV.delete(key);
         res = json({ ok: true, cleared: key });
+      } else if (path === '/xpacio/estimar' && req.method === 'POST') {
+        // ▤ Creación de Xpacios · «Con foto o vídeo»: medidas, huecos, muebles y pantallas
+        // estimados con Gemini 2.5 Pro. Origen, cupo y tamaño acotados; las fotos no se guardan.
+        res = await xpacioEstimarHandler(req, env, { reservarKv: () => reserveKvWrite(env, Date.now()) });
       } else if (path === '/segmentado/generate' && req.method === 'POST') {
         res = await segmentadoGenerateHandler(req, env, ctx);
       } else if (path.startsWith('/da/') && (req.method === 'POST' || req.method === 'GET')) {
@@ -8278,7 +8288,7 @@ export default {
     }
     const ms = Date.now() - t0;
     await handleAutomaticHttpNotification(ctx, env, req, path, res, ms);
-    const cors = corsHeaders(req);
+    const cors = path === '/xpacio/estimar' ? corsXpacio(req.headers.get('Origin') || '') : corsHeaders(req);
     Object.entries(cors).forEach(([k, v]) => {
       // No pisar un Access-Control-Allow-Origin:* que el handler ponga a propósito
       // (p.ej. /image/proxy: imagen pública sin credenciales, legible desde cualquier origen).

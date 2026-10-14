@@ -2,6 +2,14 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## Sin desplegar · NeoMBP14 · MacBookProNegro14 · `POST /xpacio/estimar` (sello al desplegar)
+
+- Nueva ruta `POST /xpacio/estimar` (▤ Creación de Xpacios · «Con foto o vídeo» de admira.biz, misión DCL-ddf3203078fe9471f3796130): recibe `{tipo?, fotos:[dataURL JPEG/PNG/WebP, máx. 8, ≤ 1,5 MB], notas?, lang?}` y devuelve medidas (`ancho`, `largo`, `alto`), `confianza` por medida y global, `referencias` de tamaño usadas y `huecos`, `mobiliario` y `pantallas` situados con el convenio de paredes F/D/P/I de `admira.xpacio-plano/1`. Módulo `src/xpacio-estimar.mjs`.
+- Modelo: **Gemini 3.1 Pro (preview)** con visión, razonamiento alto y salida JSON (`responseJsonSchema`). Gemini 2.5 Pro responde 404 «no longer available to new users» con la clave del worker; queda en la lista para `XPACIO_ESTIMAR_MODELO`. El esquema va sin `maxItems` porque Gemini 3 lo rechaza con 400; los topes (12 huecos, 30 muebles, 30 pantallas, 12 referencias) los pone el validador.
+- Validador puro: rangos físicos (lados 1–80 m, alto 2–8 m, 10–110″), número de elementos, tipos y paredes; ajusta lo que asoma ≤ 15 cm y descarta lo incoherente con su motivo (`descartes`).
+- Protección de la clave: CORS y `Origin` solo de www.admira.biz, admira.biz, www.admira.store, admira.store y localhost (403 sin llamar a Gemini); cupo por IP y día (memoria) y global por día (KV, una escritura lógica por estimación por el cortacircuitos), vars `XPACIO_ESTIMAR_TOPE_IP` (12) y `XPACIO_ESTIMAR_TOPE_DIA` (100); `XPACIO_ESTIMAR_OFF=1` la corta. Cuerpo acotado a 17 MB y límite de 150 s (`LIMITES.xpacioEstimar`). Las fotos no se guardan. `?simula=1` responde una estimación fija sin Gemini ni cupo.
+- Verificación: 308/308 pruebas (18 nuevas en `test/xpacio-estimar.test.mjs`). Validación con `wrangler dev --remote` y las fotos del laboratorio: ~0,13 $ y 70–110 s por estimación; tabla de error en el PR.
+
 ## v.11.10.2026.r1.11:55 · GrokBotBox
 
 - `AnnouncementTts.generate` (entrypoint privado, solo por Service Binding) acepta un `voiceId` **opcional** restringido a una allowlist corta de 13 voces premade de ElevenLabs (`counselorVoiceIds`), una por consejero de la mesa de debate de admira.live (`/debatir mejor audio`). Aprobado por Carlos el 11-10-2026 a las 11:48.
