@@ -2,6 +2,11 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.14.10.2026.r4.13:40 · NeoMBP14 · MacBookProNegro14 · /signage/now: display.canvas, overlay y visible (Bugito)
+
+- `/signage/now` guarda `display.canvas {w,h}`, `overlay` y `visible` (0–100) con tipos estrictos para el ▤ Creador de incidencias y Bugito (misión DCL-5da4653d859552490fd5ae1d).
+- La firma de deduplicado solo ve la orientación del lienzo y si `overlay`/`visible` cruzan sus umbrales (≥ 10 % / < 90 %): valores que bailan no generan escrituras KV.
+
 ## v.14.10.2026.r3.13:34 · NeoMBP14 · MacBookProNegro14 · `POST /xpacio/estimar` + tope KV general 60.000 (#19, #20) y display.painted (#18)
 
 - Nueva ruta `POST /xpacio/estimar` (▤ Creación de Xpacios · «Con foto o vídeo» de admira.biz, misión DCL-ddf3203078fe9471f3796130). Recibe `{tipo?, fotos:[dataURL JPEG/PNG/WebP, máx. 8, ≤ 1 MB], notas?, lang?}`. Devuelve medidas (`ancho`, `largo`, `alto`), `confianza` por medida y global, las `referencias` de tamaño usadas y los `huecos`, el `mobiliario` y las `pantallas` situados con el convenio de paredes F/D/P/I de `admira.xpacio-plano/1`. Módulo `src/xpacio-estimar.mjs`.
