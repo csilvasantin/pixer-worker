@@ -345,3 +345,23 @@ Stock descarta los sellos y hashes del cliente, calcula el SHA-256 del binario y
 Errores antes de publicar: `400 invalid-composition`, `401 composition-session-required` y `503 composition-hash-unavailable` si el recorrido por streaming carece de SHA-256. Una deduplicación sólo añade el contrato a una pieza sin capas cuando comprueba el mismo binario y las mismas dimensiones; reemplazar el archivo elimina las capas anteriores y actualiza el hash. La asociación del hash antiguo se retira sólo si aún pertenece a esa pieza. Las importaciones sin contrato conservan su recorrido previo. No se deduce copia del prompt, motor o nombre del archivo ni se atribuye a contenidos históricos. La revisión visual y la aprobación final se mantienen.
 
 EN: authenticated Studio compositors can attach literal rendered layers through optional `admira.composition.v1` metadata. Stock validates its bounded schema and declared media dimensions, hashes the actual asset, and returns a server-bound contract. This is an authenticated compositor declaration, not AI transcription or pixel-level semantic verification. Consumers must match the asset hash, type and decoded dimensions and require `complete:true` before replacing OCR. Unknown copy in imported product/logo artwork requires `complete:false`; imports and historical assets retain OCR/review. Replacing a binary clears previous layers. Free prompts and model names never supply trusted copy. Final visual review and approval remain required.
+
+### Índice automático al importar (14-oct-2026)
+
+`POST /stock/publish` confirma `ok:true` con `index:{status:"ready",mode:"incremental",builtAt}`
+solo después de guardar la pieza en `stock/index.json`. Se actualiza esa entrada mediante escritura
+condicional R2 con ETag y reintentos, sin recorrer todas las fichas. Un reintento por deduplicación
+también repara la entrada del índice. La metadata actual se relee antes de cada intento para que
+una publicación antigua no reponga una versión sustituida.
+
+La reconstrucción completa del cron y `/stock/reindex` se conserva como reconciliación: toma el
+ETag antes de escanear y no sobrescribe un índice que cambió durante el recorrido. Catálogos y
+reparto legado son derivados en segundo plano; no condicionan la confirmación del índice principal.
+Si no se consigue persistir el índice, responde 503 con `assetPublished:true`, `retryable:true` e
+`id`: el archivo queda recuperable y no se presenta una publicación incompleta como confirmada.
+Un índice corrupto o ausente en un bucket con otras piezas no se reemplaza por un catálogo parcial.
+
+Esto elimina el refresco manual del índice al importar. La aparición en la pantalla continúa
+sujeta a sus consultas periódicas, la caché del índice (60 s) y la descarga del archivo. No significa
+reproducción instantánea. Pruebas de concurrencia, errores y ciclo HTTP: `test/stock-index-auto.test.mjs`.
+Referencia R2: https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#conditional-operations

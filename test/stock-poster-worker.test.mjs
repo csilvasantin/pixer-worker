@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -23,7 +24,7 @@ const worker = (await import('../src/index.js')).default;
 
 function bucketFalso(objetos) {
   const store = new Map(Object.entries(objetos));
-  return {
+  return r2Conditions({
     puts: [],
     async get(k) {
       const v = store.get(k);
@@ -39,7 +40,7 @@ function bucketFalso(objetos) {
     async delete(k) { store.delete(k); },
     async list() { return { objects: [...store.keys()].map((key) => ({ key })), truncated: false }; },
     store,
-  };
+  });
 }
 const jpegBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(600, 1)]);
 const jpegDataUrl = `data:image/jpeg;base64,${jpegBytes.toString('base64')}`;

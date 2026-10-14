@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -128,7 +129,7 @@ function bucketFalso() {
       };
     },
   };
-  return b;
+  return r2Conditions(b);
 }
 
 function entorno() {
