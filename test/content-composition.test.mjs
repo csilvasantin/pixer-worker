@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -15,7 +16,7 @@ const pending=[];const ctx={waitUntil(p){pending.push(Promise.resolve(p).catch((
 const declared=()=>({schema:COMPOSITION_SCHEMA,producer:'admira.studio',renderer:'campaign-canvas.v1',mediaType:'image',width:1280,height:720,complete:true,copy:[{role:'headline',text:'CAFÉ CON HIELO · 1,99 €',box:[50,50,250,900]}]});
 const payload=(extra={})=>({type:'image',motor:'adaptador',mime:'image/png',base64:btoa('composition-binary'),dimensions:{width:1280,height:720},...extra});
 const req=(body,authenticated=true)=>new Request('https://api.admira.store/stock/publish',{method:'POST',headers:{'Content-Type':'application/json',...(authenticated?{'X-Fleet-Key':'test-fleet'}:{})},body:JSON.stringify(body)});
-const env=()=>({STOCK_BUCKET:new Bucket(),FLEET_KEY:'test-fleet'});
+const env=()=>({STOCK_BUCKET:r2Conditions(new Bucket()),FLEET_KEY:'test-fleet'});
 test('optional exact-copy declaration requires existing authenticated generation identity; legacy imports keep working',async()=>{
  const e=env();let r=await stockPublishHandler(req(payload({composition:declared()}),false),e,ctx);assert.equal(r.status,401);assert.equal(e.STOCK_BUCKET.map.size,0);
  r=await stockPublishHandler(req(payload(),false),e,ctx);assert.equal(r.status,200);const p=await r.json();assert.equal(p.composition,null);

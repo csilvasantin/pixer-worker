@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {contentDimensions, etiquetasHonestas} from '../src/stock-via1.mjs';
@@ -18,7 +19,7 @@ test('orientation pairs correct conflicting ES/EN tags and preserve all other ta
  for(const value of [null,{}, {width:'1080',height:1920},{width:0,height:1},{width:100,height:Infinity}])assert.equal(contentDimensions(value),null);
 });
 test('real publish stores measured dimensions and bilingual tags without fabricating quality validation; dedup enriches history safely',async()=>{
- const env={STOCK_BUCKET:new Bucket()};const ctx={waitUntil(p){Promise.resolve(p).catch(()=>{});}};
+ const env={STOCK_BUCKET:r2Conditions(new Bucket())};const ctx={waitUntil(p){Promise.resolve(p).catch(()=>{});}};
  const first=await(await stockPublishHandler(request({type:'image',motor:'local',mime:'image/png',base64:btoa('orientation-image'),tags:['café','cliente'],dimensions:{width:864,height:1152}}),env,ctx)).json();
  assert.equal(first.ok,true);assert.ok(first.tags.includes('vertical')&&first.tags.includes('portrait'));
  const key=`stock/${first.id}/meta.json`;const saved=JSON.parse(env.STOCK_BUCKET.map.get(key));assert.equal(saved.ancho,864);assert.equal(saved.alto,1152);assert.equal(saved.validacion,undefined);

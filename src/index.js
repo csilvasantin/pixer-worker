@@ -1,4 +1,5 @@
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
+import { upsertStockIndex, stockIndexCondition, STOCK_INDEX_KEY, STOCK_INDEX_HTTP } from './stock-index.mjs';
 import {validateComposition,bindComposition} from './content-composition.mjs';
 import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
@@ -121,7 +122,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.11.10.2026.r1.11:55';
+const WORKER_VERSION = 'v.14.10.2026.r1.10:30';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5380,17 +5381,20 @@ export async function stockPublishHandler(req, env, ctx) {
       if (dims && (JSON.stringify(orientation.tags) !== JSON.stringify(ownerMeta.tags) || ownerMeta.orientacion !== orientation.orientacion)) {
         ownerMeta = {...ownerMeta, tags:orientation.tags, orientacion:orientation.orientacion, ancho:dims.ancho, alto:dims.alto};
         await env.STOCK_BUCKET.put(`stock/${ownerId}/meta.json`, JSON.stringify(ownerMeta), {httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=300'}});
-        ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+        // Publication below persists the current metadata into the primary index.
       }
     }
     // Enrich only an identical, server-hashed binary, never a client hash hint or soft recent match.
     if(ownerMeta&&compositionIn&&verifiedContent&&!ownerMeta.composition&&ownerMeta.contentHash&&ownerMeta.type===compositionIn.mediaType&&ownerMeta.ancho===compositionIn.width&&ownerMeta.alto===compositionIn.height){
       ownerMeta={...ownerMeta,composition:bindComposition(compositionIn,ownerMeta.contentHash,{type:ownerMeta.type,width:ownerMeta.ancho,height:ownerMeta.alto})};
       await env.STOCK_BUCKET.put(`stock/${ownerId}/meta.json`,JSON.stringify(ownerMeta),{httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=300'}});
-      ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+      // Publication below persists the current metadata into the primary index.
     }
+    const indexed = await persistPublishedStockIndex(env, ownerMeta || await stockMetaById(env, ownerId), ctx);
+    if (!indexed.ok) return json({ ok: false, error: 'stock_index_update_failed', assetPublished: true, retryable: true, id: ownerId }, { status: 503 });
     return json({
     ok: true, reused: true, reason, id: ownerId, num: ownerMeta?.num || null,
+    index: indexed.receipt,
     url: `${new URL(req.url).origin}/stock/asset/${ownerId}`,
     createdAt: (ownerMeta && ownerMeta.createdAt) || null,
     contentHash: (ownerMeta && ownerMeta.contentHash) || null,
@@ -5665,8 +5669,10 @@ export async function stockPublishHandler(req, env, ctx) {
     stockRememberRecent(env, recentInput, id),
   ]);
 
-  // Regenera el índice estático sin retrasar la respuesta del publish
-  ctx.waitUntil(rebuildAndSyncTaggedStock(env));
+  // Confirmar el archivo no basta: el player descubre las piezas en este índice. La escritura
+  // incremental se espera y no recorre el bucket (un rebuild completo supera el waitUntil).
+  const indexed = await persistPublishedStockIndex(env, meta, ctx);
+  if (!indexed.ok) return json({ ok: false, error: 'stock_index_update_failed', assetPublished: true, retryable: true, id, num: meta.num || null }, { status: 503 });
 
   // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
   const mbStr = (assetSize / 1024 / 1024).toFixed(2);
@@ -5732,7 +5738,7 @@ export async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, num: meta.num || null, orientacion: meta.orientacion || null, tags: meta.tags || [], url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -5959,8 +5965,32 @@ function posterProyectado(m, origin) {
 const STOCK_PUBLIC_R2 = 'https://stock.admira.store';
 const STOCK_PUBLIC_R2_ANTIGUO = 'https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev';
 
+function stockIndexItem(meta) {
+  return { ...meta, poster: posterProyectado(meta, WORKER_PUBLIC_BASE),
+    url: meta.assetKey ? `${STOCK_PUBLIC_R2}/${meta.assetKey}?v=${meta.size || 0}` : meta.url,
+    thumbnail: (typeof meta.thumbnail === 'string' && meta.thumbnail.startsWith(STOCK_PUBLIC_R2_ANTIGUO)) ? STOCK_PUBLIC_R2 + meta.thumbnail.slice(STOCK_PUBLIC_R2_ANTIGUO.length) : meta.thumbnail };
+}
+async function persistPublishedStockIndex(env, meta, ctx) {
+  try {
+    const indexed = await upsertStockIndex(env.STOCK_BUCKET, meta, stockIndexItem, { loadMeta: () => stockMetaById(env, meta.id) });
+    // Derived catalogues and legacy grid distribution don't hold up the primary publication.
+    const derived = (async () => {
+      const items = await gridReadStockIndex(env);
+      const catalogos = buildCatalogos(items);
+      await env.STOCK_BUCKET.put(STOCK_CATALOGOS_KEY, JSON.stringify({ catalogos, total: catalogos.length, builtAt: indexed.builtAt }), { httpMetadata: STOCK_INDEX_HTTP });
+      await gridSyncTaggedStock(env, items);
+    })().catch(error => console.warn(JSON.stringify({ message: 'stock derived index update failed', id: meta.id, error: String(error) })));
+    if (ctx && ctx.waitUntil) ctx.waitUntil(derived); else await derived;
+    return { ok: true, receipt: { status: 'ready', mode: 'incremental', builtAt: indexed.builtAt } };
+  } catch (error) {
+    console.warn(JSON.stringify({ message: 'stock primary index update failed', id: meta?.id, error: String(error) }));
+    return { ok: false };
+  }
+}
 async function rebuildStockIndex(env) {
   if (!env.STOCK_BUCKET) return;
+  // Snapshot BEFORE scanning: an import that commits during this scan must survive reconciliation.
+  const baseIndex = await env.STOCK_BUCKET.head(STOCK_INDEX_KEY);
   let keys = [];
   let cursor;
   do {
@@ -6007,18 +6037,14 @@ async function rebuildStockIndex(env) {
   metas.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   // Las piezas ocultas (máster inválido, Yokup #3199) no entran en el índice
   // público ni, por tanto, en /stock/catalogos ni en la galería de pixeria.
-  const items = metas.filter(m => !m.oculto).map(m => ({
-    ...m,
-    poster: posterProyectado(m, WORKER_PUBLIC_BASE),
-    url: m.assetKey ? `${STOCK_PUBLIC_R2}/${m.assetKey}?v=${m.size || 0}` : m.url,
-    // thumbnail se deja tal cual (data-URIs o URLs externas), salvo los pósters que
-    // se guardaron con la URL r2.dev antes del dominio propio: se reescriben al vuelo.
-    thumbnail: (typeof m.thumbnail === 'string' && m.thumbnail.startsWith(STOCK_PUBLIC_R2_ANTIGUO)) ? STOCK_PUBLIC_R2 + m.thumbnail.slice(STOCK_PUBLIC_R2_ANTIGUO.length) : m.thumbnail,
-  }));
-
-  await env.STOCK_BUCKET.put('stock/index.json', JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
-    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=60' },
+  const items = metas.filter(m => !m.oculto).map(stockIndexItem);
+  const written = await env.STOCK_BUCKET.put(STOCK_INDEX_KEY, JSON.stringify({ items, total: items.length, builtAt: new Date().toISOString() }), {
+    onlyIf: stockIndexCondition(baseIndex), httpMetadata: STOCK_INDEX_HTTP,
   });
+  if (!written) {
+    console.log(JSON.stringify({ message: 'stock full rebuild skipped concurrent mutation' }));
+    return gridReadStockIndex(env);
+  }
   // Agrupación por catálogo, derivada del mismo índice: así GET /stock/catalogos
   // lee UN objeto y no recorre R2. `vigente` se recalcula al servirlo (depende del día).
   try {

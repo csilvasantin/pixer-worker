@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -24,7 +25,7 @@ test('el upload HTML tiene límites y exige documento',()=>{
   assert.match(source,/\^\\s\*<!doctype html>/i);
 });
 test('POST guarda bytes reales y el asset servido es HTML',async()=>{
-  const bucket=new Bucket(); const env={STOCK_BUCKET:bucket,NOTIFY_KEY:'test'};
+  const bucket=r2Conditions(new Bucket()); const env={STOCK_BUCKET:bucket,NOTIFY_KEY:'test'};
   const html='<!doctype html><html><body><button>Pago seguro</button>'+('x'.repeat(220))+'</body></html>';
   const posted=await worker.fetch(new Request('https://api.pixeria.com/stock/interactive',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({secret:'test',slug:'kiosko-demo',title:'Kiosko demo',html,tags:['payment']})}),env,ctx);
   assert.equal(posted.status,200); const meta=await posted.json(); assert.equal(meta.ok,true);

@@ -1,3 +1,4 @@
+import { r2Conditions } from './helpers/r2-conditions.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -7,14 +8,14 @@ const worker = (await import("../src/index.js")).default;
 
 function bucketFalso(objetos) {
   const store = new Map(Object.entries(objetos));
-  return {
+  return r2Conditions({
     puts: [],
     async get(k) { const v = store.get(k); return v == null ? null : { json: async () => JSON.parse(v), text: async () => v }; },
     async put(k, v, opts) { this.puts.push({ k, opts }); store.set(k, typeof v === 'string' ? v : `<bin ${v.length}>`); },
     async delete(k) { store.delete(k); },
     async list() { return { objects: [...store.keys()].map((key) => ({ key })), truncated: false }; },
     store,
-  };
+  });
 }
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(600, 1)]).toString('base64');
 const post = (body) => new Request('https://api.admira.store/stock/poster', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
