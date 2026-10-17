@@ -93,3 +93,5 @@ test('medidas que bailan sin cruzar umbral no escriben: la firma sólo ve orient
   const now = await (await signageNowGetHandler(null, env, new URL('https://api.admira.store/signage/now?screen=virtual-lab-bugito'))).json();
   assert.deepEqual(now.device.display.canvas, { w: 506, h: 900 }); assert.equal(now.device.display.overlay, 12); assert.equal(now.device.display.visible, 50);
 });
+
+test('title-band and pause measurements survive transport with strict types and bounded pixels',()=>{assert.deepEqual(d({chromeTop:38.2,playbackPaused:true}),{chromeTop:38,playbackPaused:true});assert.deepEqual(d({chromeTop:0,playbackPaused:false}),{chromeTop:0,playbackPaused:false});for(const chromeTop of [null,'38',true,-1,121,NaN])assert.deepEqual(d({chromeTop}),{});assert.deepEqual(d({playbackPaused:'false'}),{});assert.deepEqual(d({popup:true,fault:'title'}),{});});

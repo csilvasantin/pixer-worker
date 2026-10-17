@@ -3525,7 +3525,7 @@ function sanitizeDeviceTelemetry(raw) {
       // `canvas` = lienzo {w,h} en px CSS (caja del marco sobre el panel) → «cambio de resolución»;
       // `overlay` = % de la emisión tapado por capas ajenas al player → «popup encima del contenido»;
       // `visible` = % del lienzo donde se ve el contenido → «pantalla a medio abrir». Enteros, estables.
-      canvas: 'dims', overlay: 'pct', visible: 'pct' },
+      canvas: 'dims', overlay: 'pct', visible: 'pct', chromeTop: 'pixels', playbackPaused: 'bool' },
     system: { os: 'text', osVersion: 'text', platform: 'text', language: 'text', timezone: 'text' },
     hardware: { cores: 'num', memoryGB: 'num', touchPoints: 'num', architecture: 'text' },
     software: { player: 'text', playerVersion: 'text', webRelease: 'text', engine: 'text', userAgent: 'long' },
@@ -3557,6 +3557,8 @@ function sanitizeDeviceTelemetry(raw) {
           const w = typeof value.w === 'number' ? Math.round(value.w) : NaN, h = typeof value.h === 'number' ? Math.round(value.h) : NaN;
           if (w >= 1 && h >= 1 && w <= 100000 && h <= 100000) clean[field] = { w, h };
         }
+      } else if (type === 'pixels') {
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 120) clean[field] = Math.round(value);
       } else if (type === 'pct') {
         // Porcentaje medido: número entre 0 y 100, redondeado a entero (no rompe el dedupe con decimales).
         if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100) clean[field] = Math.round(value);
