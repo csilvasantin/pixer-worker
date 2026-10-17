@@ -13,6 +13,7 @@ const MAX_SCREENS = 500;
 export class PresenceClock {
   constructor(ctx, env) {
     this.ctx = ctx; this.env = env;
+    this.observations = new Map();
     this.seen = new Map();      // screen -> last_seen (ms)
     this.persisted = new Map(); // screen -> último ms escrito en storage
     ctx.blockConcurrencyWhile(async () => {
@@ -42,8 +43,12 @@ export class PresenceClock {
   async fetch(req) {
     if (req.method === 'POST') {
       const b = await req.json().catch(() => ({}));
-      return Response.json({ ok: await this.beat(b.screen, b.ts) });
+      const ok = await this.beat(b.screen, b.ts);
+      if(ok && b.screen==='virtual-lab-admirito-fold' && typeof b.fingerprint==='string' && b.fingerprint.length<=20000) this.observations.set(b.screen,{ts:Number(b.ts),fingerprint:b.fingerprint});
+      return Response.json({ ok });
     }
+    const url=new URL(req.url);
+    if(url.pathname==='/observation')return Response.json(this.observations.get(url.searchParams.get('screen'))||null);
     return Response.json(await this.all());
   }
 }
@@ -51,14 +56,20 @@ export class PresenceClock {
 function stub(env) {
   return env.PRESENCE_CLOCK ? env.PRESENCE_CLOCK.get(env.PRESENCE_CLOCK.idFromName('signage')) : null;
 }
-export async function presenceBeat(env, screen, ts) {
+export async function presenceBeat(env, screen, ts, fingerprint) {
   const s = stub(env); if (!s) return false;
   try {
-    const r = await s.fetch('https://presence/beat', { method: 'POST', body: JSON.stringify({ screen, ts }) });
+    const r = await s.fetch('https://presence/beat', { method: 'POST', body: JSON.stringify({ screen, ts, fingerprint }) });
     return !!(await r.json()).ok;
   } catch { return false; }
 }
 export async function presenceAll(env) {
   const s = stub(env); if (!s) return null;
   try { return await (await s.fetch('https://presence/all')).json(); } catch { return null; }
+}
+
+// Ephemeral proof of an actual matching heartbeat; never relabel an older different measurement.
+export async function presenceObservation(env,screen){
+ const s=stub(env);if(!s||screen!=='virtual-lab-admirito-fold')return null;
+ try{return await(await s.fetch('https://presence/observation?screen='+encodeURIComponent(screen))).json();}catch{return null;}
 }

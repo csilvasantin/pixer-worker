@@ -1,5 +1,5 @@
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
-import { presenceBeat, presenceAll } from './presence-clock.mjs';
+import { presenceBeat, presenceAll, presenceObservation } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
 import { upsertStockIndex, stockIndexCondition, STOCK_INDEX_KEY, STOCK_INDEX_HTTP } from './stock-index.mjs';
 import {validateComposition,bindComposition} from './content-composition.mjs';
@@ -3610,10 +3610,13 @@ async function signageNowGetHandler(req, env, url) {
   try { stored = JSON.parse(await env.SIGNAGE_KV.get(`now:${screen}`)); } catch {}
   // Formato nuevo: { item, __w, __sig }. Compat: valor antiguo = el item directo.
   const item = stored ? (stored.__w !== undefined ? (stored.item || null) : stored) : null;
+  const observed=screen==='virtual-lab-admirito-fold'?await presenceObservation(env,screen):null;
+  const fingerprint=stored?JSON.stringify([stored.__sig,stored.__deviceSig,!!stored.standby,stored.__producer]):null;
+  const seen=observed&&observed.fingerprint===fingerprint&&Number.isFinite(observed.ts)?Math.max(stored.__w||0,observed.ts):stored&&stored.__w;
   return json({ ok: true, screen, item: item || null, device: (stored && stored.device) || null,
     health: (stored && stored.health) || null,
     standby: !!(stored && stored.standby), ip: (stored && stored.__ip) || null,
-    lastSeen: (stored && stored.__w) || null, producer: (stored && stored.__producer) || null });
+    lastSeen: seen || null, producer: (stored && stored.__producer) || null });
 }
 
 // EMISIÓN VISIBLE — cuando /signage/now trae loc/locName (el player de canal.html
@@ -3696,7 +3699,7 @@ async function signageNowPostHandler(req, env) {
   const presence = await nowUpsertScreenLoc(env, screen, body, item, now, req);
   // Cada latido con identidad de presencia (loc/machine) refresca el reloj del DO,
   // aunque KV se haya saltado el write por change-detection/presupuesto.
-  if (presence && presence.ok !== false) await presenceBeat(env, screen, now);
+  if (presence && presence.ok !== false) await presenceBeat(env, screen, now, screen==='virtual-lab-admirito-fold'?JSON.stringify([sig,deviceSig,standby,ownership.producer]):undefined);
   if (prev && prev.__w !== undefined && prev.__sig === sig && prev.__deviceSig === deviceSig &&
       !!prev.standby === standby && (now - prev.__w) < NOW_REFRESH_MS) {
     return json({ ok: true, screen, throttled: 'unchanged', presence: presence && presence.ok !== false });
