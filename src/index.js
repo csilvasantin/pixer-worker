@@ -86,6 +86,10 @@ const ALLOWED_ORIGINS = [
   'https://www.pixeria.com',
   'https://xpaceos.com',
   'https://www.xpaceos.com',
+  // admira.store es el gemelo de xpaceos.com: sin él, el gemelo y la portada de
+  // www.admira.store no podían leer ni mandar nada a esta API (18-oct-2026).
+  'https://admira.store',
+  'https://www.admira.store',
   'http://clearchannel.tv',
   'https://clearchannel.tv',
   'http://www.clearchannel.tv',
