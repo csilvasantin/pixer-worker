@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0-preview",
+  "assignment": "5934 · API y código común",
+  "status": "draft-preview-only",
+  "api": "https://api.admira.store",
+  "tools": [
+    {"name": "contexto_get", "description_es": "Lee marca y proyecto de la sesión autenticada.", "description_en": "Read the authenticated session brand and project."},
+    {"name": "contexto_set", "description_es": "Modifica marca visual; proyecto sólo con superusuario verificado en servidor.", "description_en": "Update appearance; project requires a server-verified superuser."},
+    {"name": "contexto_listar", "description_es": "Lista pantallas, Stock o playlist filtrados por proyecto autorizado.", "description_en": "List screens, Stock or playlist scoped to an authorized project."}
+  ],
+  "resources": ["admira://context/contract"],
+  "starbucks_rule": {"field": "locationId", "prefix": "alsea-sbux-", "status": "provisional"},
+  "auth": "Bearer session; server whitelist; no local admin flags",
+  "pending": ["Five-platform integration", "Inventory location metadata backfill", "Carlos production authorization", "Live XpaceOS MCP integration"]
+}

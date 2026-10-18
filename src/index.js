@@ -1,3 +1,4 @@
+import {contextHandler, projectScope, projectItem, projectIds, belongsToProject, locationId} from './contexto.mjs';
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
 import { presenceBeat, presenceAll, presenceObservation } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
@@ -269,6 +270,8 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/grid/tag-sync', // sincronización automática Pixeria→slots municipales/publicitarios
   '/audience', // cámara del gemelo → audiencia: POST cada ~20s — no spamear Telegram
   '/audience/range', // lectura del informe (GET) — no notificar
+  '/ctx',
+  '/stock',
   '/stock/list',
   '/stock/catalogos', // agrupación por catálogo (GET) — lectura, no notificar
   '/stock/exists', // consulta previa de los clientes antes de subir (GET) — no notificar
@@ -1498,6 +1501,8 @@ async function gridConfigHandler(req, env, url) {
   const next = await gridGetConfig(env, screen);
   if (b.name != null) next.name = String(b.name).slice(0, 80);
   if (b.circuit != null) next.circuit = gridCircuit(b.circuit);
+  if (b.locationId != null) next.locationId = String(b.locationId).slice(0, 120);
+  if (Array.isArray(b.projects)) next.projects = projectIds(b.projects);
   if (b.policy != null && ['inherit', 'manual', 'auto'].includes(b.policy)) next.policy = b.policy;
   if (b.slotSeconds != null) next.slotSeconds = Math.max(1, Math.min(120, +b.slotSeconds || 10));
   if (Array.isArray(b.pixerScreens)) next.pixerScreens = b.pixerScreens.map(s => String(s).slice(0, 60)).slice(0, 20);
@@ -1517,12 +1522,12 @@ async function gridControlHandler(req, env, url) {
   await env.SIGNAGE_KV.put('grid:ctrl:' + circuit, JSON.stringify(cur).slice(0, 16000));
   return json({ ok: true, circuit, control: cur });
 }
-async function gridScreensHandler(req, env) {
+async function gridScreensHandler(req, env, scope = {}) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const prefix = 'grid:cfg:', screens = []; let cursor, n = 0;
-  try { do { const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 }); for (const k of list.keys) { const screen = k.name.slice(prefix.length); let c = null; try { c = JSON.parse(await env.SIGNAGE_KV.get(k.name) || 'null'); } catch (e) {} screens.push({ screen, name: (c && c.name) || screen, circuit: (c && c.circuit) || screen.split('-')[0], bands: (c && c.bands ? c.bands.length : 0), pixerScreens: (c && c.pixerScreens) || [] }); if (++n > 500) break; } cursor = list.list_complete ? null : list.cursor; } while (cursor && n <= 500); }
+  try { do { const list = await env.SIGNAGE_KV.list({ prefix, cursor, limit: 1000 }); for (const k of list.keys) { const screen = k.name.slice(prefix.length); let c = null; try { c = JSON.parse(await env.SIGNAGE_KV.get(k.name) || 'null'); } catch (e) {} screens.push(projectItem({ screen, locationId: locationId(c) || locationId({screen}), projects: projectIds(c && c.projects), name: (c && c.name) || screen, circuit: (c && c.circuit) || screen.split('-')[0], bands: (c && c.bands ? c.bands.length : 0), pixerScreens: (c && c.pixerScreens) || [] })); if (++n > 500) break; } cursor = list.list_complete ? null : list.cursor; } while (cursor && n <= 500); }
   catch (e) { return json({ error: 'kv-list-failed' }, { status: 502 }); }
-  return json({ ok: true, screens });
+  return json({ ok: true, screens: screens.filter(item => belongsToProject(item, scope.proyecto)) });
 }
 // ── Canales/proyectos: agrupan circuitos (CanalKiosk, CanalMetro, Canal AdmiraNeXT…) ──
 const GRID_PROJECTS_DEFAULT = [
@@ -1561,13 +1566,15 @@ async function gridProjectsHandler(req, env) {
 // por detrás del guardado devolvemos 409 con el draft vigente, para que el
 // front recargue en vez de pisar a ciegas (misma lección que /grid/book).
 function gridPlaylistId(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 60); }
-async function gridDraftHandler(req, env, url) {
+async function gridDraftHandler(req, env, url, scope = {}) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   if (req.method === 'GET') {
     const screen = gridScreen(url.searchParams.get('screen')), playlist = gridPlaylistId(url.searchParams.get('playlist'));
     if (!screen || !playlist) return json({ error: 'missing-screen-or-playlist' }, { status: 400 });
+    const cfg = projectItem({...await gridGetConfig(env, screen), screen});
+    if (!belongsToProject(cfg, scope.proyecto)) return json({error:'project-screen-not-found'}, {status:404});
     let d = null; try { d = JSON.parse(await env.SIGNAGE_KV.get('grid:draft:' + screen + ':' + playlist) || 'null'); } catch (e) {}
-    return json({ ok: true, draft: (d && typeof d === 'object') ? d : null });
+    return json({ ok: true, projects: cfg.projects, locationId: cfg.locationId, draft: (d && typeof d === 'object') ? {...d, projects: cfg.projects, locationId: cfg.locationId} : null });
   }
   let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!gridKeyOk(env, b)) return json({ error: env.GRID_KEY ? 'bad-key' : 'grid-key-not-configured' }, { status: env.GRID_KEY ? 403 : 503 });
@@ -1581,7 +1588,8 @@ async function gridDraftHandler(req, env, url) {
   const sentRev = Number.isFinite(+b.rev) ? +b.rev : 0;
   if (sentRev < storedRev) return json({ error: 'stale-rev', draft: stored }, { status: 409 });
   const rev = storedRev + 1, updatedAt = Date.now(), by = String(b.by || '').slice(0, 60) || null;
-  const payload = JSON.stringify({ items: b.items, titles, rev, updatedAt, by });
+  const cfg = projectItem({...await gridGetConfig(env, screen), screen});
+  const payload = JSON.stringify({ items: b.items, titles, rev, updatedAt, by, projects: cfg.projects, locationId: cfg.locationId });
   if (payload.length > 120000) return json({ error: 'too-large' }, { status: 413 });
   await env.SIGNAGE_KV.put(kvKey, payload);
   return json({ ok: true, rev, updatedAt });
@@ -3278,6 +3286,8 @@ async function signageHeartbeatHandler(req, env) {
   const now = Date.now();
   const data = {
     screen,
+    locationId: String(body.locationId || body.loc || '').slice(0, 120),
+    projects: projectIds(body.projects),
     last_seen: now,
     user_agent: (req.headers.get('User-Agent') || '').slice(0, 200),
     feed_count: parseInt(body.feed_count, 10) || 0,
@@ -3304,10 +3314,12 @@ async function signageHeartbeatHandler(req, env) {
     // Retrocompatible: players viejos (role xtore-game) que no mandan loc dejan
     // de deshacer las asignaciones en su siguiente latido.
     if (!data.loc && prev && prev.loc) data.loc = prev.loc;
+    if (!data.locationId && prev) data.locationId = locationId(prev);
+    if (!Array.isArray(body.projects) && prev) data.projects = projectIds(prev.projects);
     if (!data.locName && prev && prev.locName) data.locName = prev.locName;
     const changed = !prev || prev.showing_id !== data.showing_id ||
                     prev.role !== data.role || prev.version !== data.version ||
-                    prev.loc !== data.loc;
+                    prev.loc !== data.loc || prev.locationId !== data.locationId || JSON.stringify(prev.projects || []) !== JSON.stringify(data.projects);
     const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
     if (!changed && !stale) {
       return json({ ok: true, last_seen: prev.last_seen, throttled: 'unchanged' });
@@ -3330,7 +3342,7 @@ async function signageHeartbeatHandler(req, env) {
   }
 }
 
-async function signageScreensHandler(req, env) {
+async function signageScreensHandler(req, env, scope = {}) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   let index = [];
   try { index = JSON.parse(await env.SIGNAGE_KV.get(SCREENS_INDEX)) || []; } catch {}
@@ -3346,9 +3358,9 @@ async function signageScreensHandler(req, env) {
       if (beat && beat > (data.last_seen || 0)) data.last_seen = beat;
       data.online = (now - data.last_seen) < SCREEN_ONLINE_MS; // online si visto < 6 min
       data.age_seconds = Math.floor((now - data.last_seen) / 1000);
-      return data;
+      return projectItem(data);
     } catch { return null; }
-  }))).filter(Boolean);
+  }))).filter(Boolean).filter(item => belongsToProject(item, scope.proyecto));
   return json({
     screens,
     online_count: screens.filter(s => s.online).length,
@@ -3637,6 +3649,8 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
   const health = sanitizeHealth(body && body.health) || (prev && prev.health) || null;
   const data = Object.assign({}, prev || {}, {
     screen,
+    locationId: String(body.locationId || body.loc || locationId(prev) || '').slice(0, 120),
+    projects: Array.isArray(body.projects) ? projectIds(body.projects) : projectIds(prev && prev.projects),
     last_seen: now,
     user_agent: ((req && req.headers.get('User-Agent')) || (prev && prev.user_agent) || '').slice(0, 200),
     showing_id: (item && item.id) || (prev && prev.showing_id) || null,
@@ -3654,7 +3668,7 @@ async function nowUpsertScreenLoc(env, screen, body, item, now, req) {
   // /signage/now ya conserva el item actual y /signage/screens sólo necesita
   // saber que el player sigue vivo y dónde está cableado.
   const changed = !prev || prev.loc !== loc || prev.locName !== locName || prev.machine !== data.machine ||
-    prev.role !== data.role || prev.version !== data.version ||
+    prev.role !== data.role || prev.version !== data.version || prev.locationId !== data.locationId || JSON.stringify(prev.projects || []) !== JSON.stringify(data.projects) ||
     einkStateSig(prev.device, prev.health) !== einkStateSig(device, health);
   const stale = !prev || (now - (prev.last_seen || 0)) >= HB_REFRESH_MS;
   if (!changed && !stale) return { ok: true, updated: false }; // igual y reciente → no gastamos KV
@@ -5674,6 +5688,8 @@ export async function stockPublishHandler(req, env, ctx) {
 
   let meta = {
     id,
+    locationId: String(body.locationId || '').slice(0, 120) || null,
+    projects: projectIds(body.projects),
     type,
     motor: String(motor).slice(0, 80),
     prompt: String(prompt || '').slice(0, 1000),
@@ -5820,7 +5836,7 @@ export async function stockPublishHandler(req, env, ctx) {
   return json({ ok: true, id, num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
-async function stockListHandler(req, env, url) {
+async function stockListHandler(req, env, url, scope = {}) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const typeFilter = url.searchParams.get('type') || '';
   const motorFilter = url.searchParams.get('motor') || '';
@@ -5832,7 +5848,7 @@ async function stockListHandler(req, env, url) {
   // Yokup #3199: una pieza con `oculto:true` (máster inválido) no sale en ningún
   // listado salvo que se pida ?ocultos=1 (backoffice / backfill).
   const conOcultos = url.searchParams.get('ocultos') === '1';
-  const hasFilter = !!(typeFilter || motorFilter || catalogoFilter || clienteFilter || tagFilter || qFilter);
+  const hasFilter = !!(scope.proyecto || typeFilter || motorFilter || catalogoFilter || clienteFilter || tagFilter || qFilter);
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
 
   // List todos los meta.json bajo stock/. R2 devuelve hasta 1000/request.
@@ -5875,6 +5891,7 @@ async function stockListHandler(req, env, url) {
     if (tagFilter)      filtered = filtered.filter(m => itemHasTag(m, tagFilter));
     if (qFilter)        filtered = filtered.filter(m => itemMatchesQuery(m, qFilter));
   }
+  if (scope.proyecto) filtered = filtered.filter(m => belongsToProject(m, scope.proyecto));
   if (!conOcultos) filtered = filtered.filter(m => !m.oculto);
   // Se sigue ordenando por createdAt: si algún id antiguo no llevara el
   // timestamp delante, el orden final no depende de la forma de la clave.
@@ -5885,7 +5902,7 @@ async function stockListHandler(req, env, url) {
   // mismo dominio por el que entró el listado (p.ej. pixer-api.pages.dev).
   const origin = new URL(req.url).origin;
   const items = filtered.slice(0, limit).map(m => ({
-    ...m,
+    ...projectItem(m),
     // ?v=size: el asset es immutable; si se reprocesa (p.ej. recorte a
     // transparente) cambia el tamaño → nueva URL → el navegador no sirve el viejo.
     url: m.assetKey ? `${origin}/stock/asset/${m.id}?v=${m.size || 0}` : m.url,
@@ -7794,10 +7811,12 @@ async function gridFetchSeg(target, env) {
   try { if (env && env.SIGNAGE_KV) return JSON.parse(await env.SIGNAGE_KV.get(segKey(target)) || 'null'); } catch (e) {}
   return null;
 }
-async function gridPlaylistHandler(req, env, url) {
+async function gridPlaylistHandler(req, env, url, scope = {}) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
   const screen = gridScreen(url.searchParams.get('screen')); if (!screen) return json({ error: 'missing-screen' }, { status: 400 });
   const date = gridDate(url.searchParams.get('date')) || gridNow().ymd;
+  const projectConfig = projectItem({ ...await gridGetConfig(env, screen), screen });
+  if (!belongsToProject(projectConfig, scope.proyecto)) return json({ error: 'project-screen-not-found' }, {status: 404});
   const seg = String(url.searchParams.get('seg') || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 60);
   const items = [], seenUrl = new Set();
   const add = (it) => { if (it && it.url && !seenUrl.has(it.url)) { seenUrl.add(it.url); items.push(it); } };
@@ -7822,7 +7841,7 @@ async function gridPlaylistHandler(req, env, url) {
       for (const id of ids) { const s = idx.get(id); if (s && s.url) add({ id, url: s.url, type: s.type || 'image', title: s.title || '', source: 'seg' }); }
     }
   }
-  return json({ ok: true, screen, date: gridFmtDate(date), total: items.length, items, generatedAt: Date.now() });
+  return json({ ok: true, screen, locationId: projectConfig.locationId, projects: projectConfig.projects, date: gridFmtDate(date), total: items.length, items, generatedAt: Date.now() });
 }
 // Firma de inventario con progreso por tramos del 5 %. Contar sólo cuántas
 // descargas había hacía que 3 %, 48 % y 97 % fueran el mismo estado y el mando
@@ -7960,15 +7979,21 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
     const t0 = Date.now();
-    let res;
+    let res, scope = {};
     try {
-      if (isPaidGeneration(req.method, path)) {
+      if (req.method === 'GET' && ['/grid/screens', '/signage/screens', '/stock', '/stock/list', '/grid/playlist', '/grid/draft'].includes(path)) {
+        scope = await projectScope(req, env);
+        if (scope.error) res = json({error: scope.error}, {status: scope.status, headers: {'Cache-Control': 'private, no-store'}});
+      }
+      if (!res && isPaidGeneration(req.method, path)) {
         const auth = await authorizePaidGeneration(req, env);
         if (!auth.ok) res = json({ error: 'unauthorized' }, { status: 401 });
         else if (req.headers.get('X-Auth-Probe') === '1') res = json({ ok: true, via: auth.via });
       }
       if (res) {
         // La puerta de generación de pago ya contestó.
+      } else if (path === '/ctx') {
+        res = await contextHandler(req, env);
       } else if (path === '/healthz') {
         res = json({ ok: true, version: WORKER_VERSION, hasPosterKey: !!env.STOCK_POSTER_KEY, hasElevenKey: !!env.ELEVENLABS_KEY, hasXaiKey: !!env.XAI_KEY, hasGcpKey: !!env.GCP_SA_KEY, hasGeminiKey: !!env.GEMINI_API_KEY, hasOpenRouterKey: !!env.OPENROUTER_KEY, hasStockBucket: !!env.STOCK_BUCKET, hasSignageKv: !!env.SIGNAGE_KV, notificationAggregatorAvailable: !!env.SIGNAGE_KV });
       } else if ((path === '/grok/latest.json' || path === '/grok/latest') && req.method === 'GET') {
@@ -8067,15 +8092,15 @@ export default {
       } else if (path === '/grid/upload' && req.method === 'POST') {
         res = await gridUploadHandler(req, env, url);
       } else if (path === '/grid/screens' && req.method === 'GET') {
-        res = await gridScreensHandler(req, env);
+        res = await gridScreensHandler(req, env, scope);
       } else if (path === '/grid/projects') {
         res = await gridProjectsHandler(req, env);
       } else if (path === '/grid/circuits') {
         res = await gridCircuitsHandler(req, env, { json, projectsDefault: GRID_PROJECTS_DEFAULT });
       } else if (path === '/grid/draft') {
-        res = await gridDraftHandler(req, env, url);
+        res = await gridDraftHandler(req, env, url, scope);
       } else if (path === '/grid/playlist' && req.method === 'GET') {
-        res = await gridPlaylistHandler(req, env, url);
+        res = await gridPlaylistHandler(req, env, url, scope);
       } else if (path === '/screen/cache' && (req.method === 'GET' || req.method === 'POST')) {
         res = await screenCacheHandler(req, env, url);
       } else if (path === '/segcpm' && req.method === 'GET') {
@@ -8210,7 +8235,7 @@ export default {
       } else if (path === '/signage/heartbeat' && req.method === 'POST') {
         res = await signageHeartbeatHandler(req, env);
       } else if (path === '/signage/screens' && req.method === 'GET') {
-        res = await signageScreensHandler(req, env);
+        res = await signageScreensHandler(req, env, scope);
       } else if (path === '/signage/now' && req.method === 'GET') {
         res = await signageNowGetHandler(req, env, url);
       } else if (path === '/signage/now' && req.method === 'POST') {
@@ -8250,8 +8275,8 @@ export default {
         let _b = {}; try { _b = await req.json(); } catch {}
         if (!env.NOTIFY_KEY || _b.secret !== env.NOTIFY_KEY) { res = json({ error: 'unauthorized' }, { status: 401 }); }
         else { await rebuildStockIndex(env); res = json({ ok: true, reindexed: true }); }
-      } else if (path === '/stock/list' && req.method === 'GET') {
-        res = await stockListHandler(req, env, url);
+      } else if ((path === '/stock/list' || path === '/stock') && req.method === 'GET') {
+        res = await stockListHandler(req, env, url, scope);
       } else if (path === '/stock/catalogos' && req.method === 'GET') {
         res = await stockCatalogosHandler(req, env, url);
       } else if (path.match(/^\/stock\/[^/]+\/meta$/) && req.method === 'PATCH') {
@@ -8327,6 +8352,7 @@ export default {
       // Límite de espera agotado o proveedor inaccesible: 504/502 con motivo claro.
       res = respuestaLimite(e) || json({ error: 'worker-exception', message: String(e) }, { status: 500 });
     }
+    if (scope.personalized || scope.error || path === '/ctx') res.headers.set('Cache-Control', 'private, no-store');
     const ms = Date.now() - t0;
     await handleAutomaticHttpNotification(ctx, env, req, path, res, ms);
     const cors = path === '/xpacio/estimar' ? corsXpacio(req.headers.get('Origin') || '', enDesarrollo(req)) : corsHeaders(req);
