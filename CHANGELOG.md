@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.18.10.2026.r1.14:43 · NeoMacStudio · MacStudio · CORS: admira.store y www.admira.store (#26)
+
+- `ALLOWED_ORIGINS` suma `https://admira.store` y `https://www.admira.store`. Hasta hoy el worker les devolvía `Access-Control-Allow-Origin: https://csilvasantin.github.io` y el navegador cortaba todas las llamadas de www.admira.store (gemelo y portada: `/signage/feed`, `/signage/now`, `/signage/screens`, `/locations/cmd`, `/layout/current`, `/twin/*`, `/stock/list`, `/megafonia/next`). www.xpaceos.com ya estaba en la lista.
+- Prueba nueva `test/cors-origenes.test.mjs`: preflight de admira.store, www.admira.store y www.xpaceos.com; un origen fuera de la lista no se refleja. 326/326.
+- Lleva también lo que OraculoMacMini publicó el 17-oct sin sello (versiones `e0756589` y `dadcab92`: banda de título medida, pausa y reloj de observación de Fold); no cambia nada de eso.
+
 ## v.14.10.2026.r4.13:40 · NeoMBP14 · MacBookProNegro14 · /signage/now: display.canvas, overlay y visible (Bugito)
 
 - `/signage/now` guarda `display.canvas {w,h}`, `overlay` y `visible` (0–100) con tipos estrictos para el ▤ Creador de incidencias y Bugito (misión DCL-5da4653d859552490fd5ae1d).

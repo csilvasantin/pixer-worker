@@ -86,6 +86,10 @@ const ALLOWED_ORIGINS = [
   'https://www.pixeria.com',
   'https://xpaceos.com',
   'https://www.xpaceos.com',
+  // admira.store es el gemelo de xpaceos.com: sin él, el gemelo y la portada de
+  // www.admira.store no podían leer ni mandar nada a esta API (18-oct-2026).
+  'https://admira.store',
+  'https://www.admira.store',
   'http://clearchannel.tv',
   'https://clearchannel.tv',
   'http://www.clearchannel.tv',
@@ -126,7 +130,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.14.10.2026.r4.13:40';
+const WORKER_VERSION = 'v.18.10.2026.r1.14:43';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {

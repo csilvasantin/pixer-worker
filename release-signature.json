@@ -1,8 +1,7 @@
 {
-  "version": "v.14.10.2026.r2.11:13",
-  "agent": "TrinityMBP14",
-  "machine": "MacBookProNegro14",
-  "signature": "TrinityMBP14 · MacBookProNegro14",
-  "mission": "DCL-1a24edfe10d9a6c8aacc08ff",
-  "deployer": "TrinityMBP14"
+  "version": "v.18.10.2026.r1.14:43",
+  "agent": "NeoMacStudio",
+  "machine": "MacStudio",
+  "signature": "NeoMacStudio · MacStudio",
+  "deployer": "NeoMacStudio"
 }
