@@ -131,7 +131,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.18.10.2026.r2.20:40';
+const WORKER_VERSION = 'v.18.10.2026.r2.20:45';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
