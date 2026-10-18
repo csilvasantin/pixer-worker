@@ -2,6 +2,13 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.18.10.2026.r2.20:45 · GrokBot · Box · Telegram: importador Mac Studio primero, sin doble importación
+
+- Importación de URL por Telegram (`/tube/import-to-stock`): lista de bases con **Mac Studio primero** y Mac Mini de respaldo (`src/tube-failover.mjs`). `ADMIRA_TUBE_BASE` admite una lista separada por comas (van primero; las de por defecto detrás).
+- Se sondea `GET {base}/tube/health` (4,5 s, como el panel web) y el POST va solo a la primera base sana. try/catch por base: un fallo de DNS/TLS/timeout en el health pasa a la siguiente.
+- Anti-duplicado: solo se pasa a la siguiente base tras un «no aceptado» explícito (HTTP 5xx/404/408/429); un 2xx nunca se reintenta; un 4xx definitivo tampoco. Si el POST se queda sin respuesta (ambiguo) no se reintenta en otra base: se guarda en Enlaces (`proxy-ambiguous`) y se avisa en Telegram.
+- Pruebas: `test/tube-failover.test.mjs` (11).
+
 ## v.18.10.2026.r1.14:43 · NeoMacStudio · MacStudio · CORS: admira.store y www.admira.store (#26)
 
 - `ALLOWED_ORIGINS` suma `https://admira.store` y `https://www.admira.store`. Hasta hoy el worker les devolvía `Access-Control-Allow-Origin: https://csilvasantin.github.io` y el navegador cortaba todas las llamadas de www.admira.store (gemelo y portada: `/signage/feed`, `/signage/now`, `/signage/screens`, `/locations/cmd`, `/layout/current`, `/twin/*`, `/stock/list`, `/megafonia/next`). www.xpaceos.com ya estaba en la lista.

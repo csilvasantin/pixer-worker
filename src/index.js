@@ -7,6 +7,7 @@ import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
 import { gridCircuitsHandler } from './grid-circuits.mjs';
 import { authorizePaidGeneration, isPaidGeneration } from './paid-auth.mjs';
+import { admiraTubeBaseCandidates, importToStockWithFailover } from './tube-failover.mjs';
 import {
   CLIP_SECONDS,
   archiveBody,
@@ -130,7 +131,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.18.10.2026.r1.14:43';
+const WORKER_VERSION = 'v.18.10.2026.r2.20:45';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -3802,21 +3803,9 @@ async function notifyHandler(req, env, ctx) {
 // El proxy
 // descarga con yt-dlp y publica en /stock/publish, que ya notifica el resultado.
 // El token del bot nunca sale del worker.
-// Se puede sobreescribir con el secret ADMIRA_TUBE_BASE (sin redesplegar código).
-const ADMIRA_TUBE_BASE_DEFAULT = 'https://macmini.tail48b61c.ts.net/admira';
-function admiraTubeBaseCandidates(env) {
-  const candidates = [];
-  const seen = new Set();
-  const push = (value) => {
-    const v = String(value || '').trim().replace(/\/+$/, '');
-    if (!v || seen.has(v)) return;
-    seen.add(v);
-    candidates.push(v);
-  };
-  push(env.ADMIRA_TUBE_BASE);
-  push(ADMIRA_TUBE_BASE_DEFAULT);
-  return candidates;
-}
+// Se puede sobreescribir con el secret ADMIRA_TUBE_BASE (lista separada por comas; sin redesplegar código).
+// Por defecto: Mac Studio primero, Mac Mini de respaldo.
+// Lista de bases por defecto, elección por health y failover sin doble importación: src/tube-failover.mjs.
 async function tgSend(env, chatId, html) {
   if (!env.TELEGRAM_BOT_TOKEN) return null;
   try {
@@ -4323,26 +4312,27 @@ async function telegramWebhookHandler(req, env, ctx) {
     const progresoMsgId = await tgSend(env, chatId, `📥 Importando ${fmt === 'audio' ? 'audio 🎵' : 'vídeo 🎬'} de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
     try {
       const bases = admiraTubeBaseCandidates(env);
-      let lastStatus = 0;
-      let lastBody = '';
-      let lastBase = '';
-      let acceptedJobId = '';
-      let accepted = false;
-      for (const base of bases) {
-        lastBase = base;
-        const r = await fetch(base + '/tube/import-to-stock', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: link, format: fmt, comment }),
-        });
-        if (r.ok) {
-          const payload = await r.json().catch(() => null);
-          acceptedJobId = payload && typeof payload.jobId === 'string' ? payload.jobId : '';
-          accepted = true;
-          break;
-        }
-        lastStatus = r.status;
-        lastBody = await r.text().catch(() => '');
+      // Health previo (4,5 s) → POST solo a la primera base sana; failover únicamente tras un «no aceptado»
+      // explícito (5xx/404/408/429). Si el POST se queda sin respuesta NO se reintenta en otra base (ver tube-failover.mjs).
+      const imp = await importToStockWithFailover(bases, { url: link, format: fmt, comment });
+      const lastStatus = imp.status;
+      const lastBody = imp.body;
+      const lastBase = imp.base;
+      const acceptedJobId = imp.jobId;
+      const accepted = imp.accepted;
+      console.log(`[tube] import-to-stock accepted=${accepted} base=${lastBase || '-'} ambiguous=${imp.ambiguous} noHealthy=${imp.noHealthy} attempts=${JSON.stringify(imp.attempts).slice(0, 400)}`);
+      if (!accepted && imp.ambiguous) {
+        const detail = `sin respuesta de ${lastBase} tras enviar el POST (${imp.error || 'timeout'}); puede haberse aceptado`;
+        const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-ambiguous', detail }).catch(() => null);
+        const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
+        await tgSend(env, chatId, `⚠️ No recibí respuesta del importador <code>${escHtml(lastBase)}</code> tras enviarle el enlace: puede que lo haya aceptado. No lo reenvío a otro importador para no duplicarlo. Si no aparece en Stock en unos minutos, vuelve a enviar el enlace.${savedLine}`);
+        return;
+      }
+      if (!accepted && imp.noHealthy) {
+        const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-unavailable', detail: 'ningún importador sano (health available:false / error)' }).catch(() => null);
+        const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
+        await tgSend(env, chatId, `⚠️ Ningún importador (Mac Studio / Mac Mini) está disponible ahora mismo. Reintenta en unos minutos.${savedLine}`);
+        return;
       }
       if (!accepted) {
         const baseNote = lastBase ? ` · base <code>${escHtml(lastBase)}</code>` : '';
@@ -4397,7 +4387,7 @@ async function telegramWebhookHandler(req, env, ctx) {
     } catch (e) {
       const saved = await saveTelegramImportFailure(env, { chatId, link, format: fmt, comment, host, phase: 'proxy-contact', detail: String(e) }).catch(() => null);
       const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
-      await tgSend(env, chatId, `🚨 No pude contactar el proxy del Mac Mini (¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
+      await tgSend(env, chatId, `🚨 No pude contactar el importador (Mac Studio / Mac Mini, ¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
     }
   })());
   return json({ ok: true });
