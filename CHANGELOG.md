@@ -11,7 +11,7 @@ Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
 ## v.20.10.2026.r1.23:05 · NeoMacStudio · MacStudio · CORS: digitalavatar.ai (voz de Admirito en Comercial)
 
-- `ALLOWED_ORIGINS` suma `https://digitalavatar.ai` y `https://www.digitalavatar.ai`: la nube de Admirito (piel Comercial de admira.biz) pide su voz ElevenLabs a `POST /tts` desde ese origen. Prueba en `test/cors-origenes.test.mjs`.
+- `ALLOWED_ORIGINS` suma `https://digitalavatar.ai` y `https://www.digitalavatar.ai`: la nube de Admirito puede hablar con esta API desde su propio origen. `POST /tts` sigue siendo puerta de pago (401 sin sesión de Pixeria o clave de flota): la voz de Comercial sale del cerebro, `brain.digitalavatar.ai/tts`. Prueba en `test/cors-origenes.test.mjs`. Este despliegue arrastra también #27 (tube-studio-failover, Carlos, 18-oct), que estaba en main sin publicar.
 
 ## v.18.10.2026.r1.14:43 · NeoMacStudio · MacStudio · CORS: admira.store y www.admira.store (#26)
 
