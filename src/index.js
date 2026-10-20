@@ -92,7 +92,8 @@ const ALLOWED_ORIGINS = [
   'https://admira.store',
   'https://www.admira.store',
   // digitalavatar.ai aloja la nube de Admirito (la cara y la voz) que admira.biz, xpaceos y
-  // admira.store incrustan; la piel Comercial pide su voz a POST /tts desde allí (20-oct-2026).
+  // admira.store incrustan (20-oct-2026). Ojo: POST /tts es puerta de pago; la voz de Comercial
+  // sale del cerebro (brain.digitalavatar.ai/tts). Este origen queda para lo que no es de pago.
   'https://digitalavatar.ai',
   'https://www.digitalavatar.ai',
   'http://clearchannel.tv',
