@@ -9,7 +9,7 @@ const preflight = origin => worker.fetch(new Request('https://api.admira.store/s
 }), {}, { waitUntil() {} });
 
 test('admira.store y www.admira.store pasan el preflight igual que xpaceos.com', async () => {
-  for (const origin of ['https://www.admira.store', 'https://admira.store', 'https://www.xpaceos.com']) {
+  for (const origin of ['https://www.admira.store', 'https://admira.store', 'https://www.xpaceos.com', 'https://digitalavatar.ai', 'https://www.digitalavatar.ai']) {
     const r = await preflight(origin);
     assert.equal(r.status, 204);
     assert.equal(r.headers.get('Access-Control-Allow-Origin'), origin);

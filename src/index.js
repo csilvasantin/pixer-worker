@@ -91,6 +91,10 @@ const ALLOWED_ORIGINS = [
   // www.admira.store no podían leer ni mandar nada a esta API (18-oct-2026).
   'https://admira.store',
   'https://www.admira.store',
+  // digitalavatar.ai aloja la nube de Admirito (la cara y la voz) que admira.biz, xpaceos y
+  // admira.store incrustan; la piel Comercial pide su voz a POST /tts desde allí (20-oct-2026).
+  'https://digitalavatar.ai',
+  'https://www.digitalavatar.ai',
   'http://clearchannel.tv',
   'https://clearchannel.tv',
   'http://www.clearchannel.tv',
@@ -131,7 +135,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.18.10.2026.r2.20:45';
+const WORKER_VERSION = 'v.20.10.2026.r1.23:05';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {

@@ -9,6 +9,10 @@ Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 - Anti-duplicado: solo se pasa a la siguiente base tras un «no aceptado» explícito (HTTP 5xx/404/408/429); un 2xx nunca se reintenta; un 4xx definitivo tampoco. Si el POST se queda sin respuesta (ambiguo) no se reintenta en otra base: se guarda en Enlaces (`proxy-ambiguous`) y se avisa en Telegram.
 - Pruebas: `test/tube-failover.test.mjs` (11).
 
+## v.20.10.2026.r1.23:05 · NeoMacStudio · MacStudio · CORS: digitalavatar.ai (voz de Admirito en Comercial)
+
+- `ALLOWED_ORIGINS` suma `https://digitalavatar.ai` y `https://www.digitalavatar.ai`: la nube de Admirito (piel Comercial de admira.biz) pide su voz ElevenLabs a `POST /tts` desde ese origen. Prueba en `test/cors-origenes.test.mjs`.
+
 ## v.18.10.2026.r1.14:43 · NeoMacStudio · MacStudio · CORS: admira.store y www.admira.store (#26)
 
 - `ALLOWED_ORIGINS` suma `https://admira.store` y `https://www.admira.store`. Hasta hoy el worker les devolvía `Access-Control-Allow-Origin: https://csilvasantin.github.io` y el navegador cortaba todas las llamadas de www.admira.store (gemelo y portada: `/signage/feed`, `/signage/now`, `/signage/screens`, `/locations/cmd`, `/layout/current`, `/twin/*`, `/stock/list`, `/megafonia/next`). www.xpaceos.com ya estaba en la lista.
