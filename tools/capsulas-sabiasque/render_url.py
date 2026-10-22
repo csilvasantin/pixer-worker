@@ -2,7 +2,7 @@
 Es render_v2.py (Taalas) generalizado: cifra opcional (si no hay, titular grande), unidad del guion,
 b-roll opcional (vídeo de la fuente o su miniatura) y crédito del guion. Misma plantilla_v5.
 Uso: cd <carpeta con guion.json, logo.png y broll/> && python3 render_url.py"""
-import json, math, subprocess, os, sys
+import json, math, subprocess, os, sys, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plantilla_v5 import PRE, CIERRE_S, T_TOTAL_V51, barra_progreso, secuencia, fit_line, linea_fuente
 import numpy as np
@@ -87,6 +87,11 @@ def brand_card(t0,t,W,H,V,u,out=False):
         f=F(INTER,int((58 if V else 56)*u),600)
         for i,s in enumerate(wrap(d,C['postroll']['claim'],f,W*0.86)):
             txt(L,((W-d.textlength(s,font=f))/2,y0+i*72*u),s,f,INK,1)
+        # v5.4: única mención de la fuente en toda la cápsula, pequeña y gris, al pie del cierre.
+        src=(C['remate'].get('fuente') or {}).get('texto') or ''
+        if src:
+            fs_=F(INTER,int(28*u),500); src='Vídeo original: '+re.sub(r'^(Fuente|Source)\s*:\s*','',src)
+            txt(L,((W-d.textlength(src,font=fs_))/2,H-int(150*u)),src,fs_,(150,150,155),1)
         im.alpha_composite(L); return im
     # v5.1: «¿Sabías que?» ENCIMA del logo; la tipología (categoría de la cápsula) DEBAJO.
     # v5.2: con foto de la fuente, fondo = foto difuminada y oscurecida (zoom lento), logo y textos claros.
@@ -102,6 +107,7 @@ def brand_card(t0,t,W,H,V,u,out=False):
     fk=F(OSW,int((84 if V else 76)*u),700); tip=C['preroll'].get('tipologia') or ''
     if tip: txt(L,((W-d.textlength(tip,font=fk))/2,y0),tip,fk,(255,255,255) if dark else INK,a2)
     f2=F(INTER,int(42*u),600); s2=C['preroll'].get('subtitulo') or ''; a3=eo((lt-0.6)/0.5)
+    s2=''  # v5.4: sin subtítulo en la cartela inicial (repetía el titular del cuerpo)
     if s2: txt(L,((W-d.textlength(s2,font=f2))/2,y0+(110 if tip else 0)*u+(1-a3)*30*u),s2,f2,(220,220,225) if dark else GREY,a3)
     im.alpha_composite(L)
     return im
@@ -154,13 +160,16 @@ def cover(fr,W,H):
 def grad(W,H,y0,y1,a0,a1):
     g=np.linspace(a0,a1,max(1,y1-y0),dtype=np.float32)[:,None].repeat(W,1)
     m=Image.new('L',(W,H),0); m.paste(Image.fromarray(np.clip(g,0,255).astype(np.uint8)),(0,y0)); return m
-def hint_badge(L,d,br,x1,y1,u,a):
-    hint=br.get('indicacion') or 'Toca para ver el original'
-    fh_=F(INTER,int(30*u),600); hw=d.textlength(hint,font=fh_); tri=int(22*u)
-    hx=x1-int(hw)-int(16*u); hy=y1-int(46*u)
-    ImageDraw.Draw(L).rounded_rectangle([hx-tri-int(22*u),hy-int(10*u),hx+int(hw)+int(16*u),hy+int(46*u)],radius=int(26*u),fill=(20,20,24,int(200*a)))
-    ImageDraw.Draw(L).polygon([(hx-tri-int(6*u),hy+int(6*u)),(hx-tri-int(6*u),hy+int(30*u)),(hx-int(8*u),hy+int(18*u))],fill=(255,255,255,int(255*a)))
-    txt(L,(hx,hy),hint,fh_,(255,255,255),a)
+# v5.4: sin pastilla ni texto. Pista sutil dentro del vídeo: icono pequeño de reproducir con un leve
+# resplandor que respira, en la esquina superior derecha del vídeo. La interactividad la da el modal del Stock.
+def play_hint(im,x1,y1,u,a,t):
+    if a<=0: return
+    from PIL import ImageFilter
+    r=int(26*u); g=int(r*2.6); cx,cy=x1-g//2,y1+g//2; pulse=0.55+0.25*(0.5+0.5*math.sin(t*2.4))
+    G_=Image.new('RGBA',(g,g)); ImageDraw.Draw(G_).ellipse([g/2-r*1.05,g/2-r*1.05,g/2+r*1.05,g/2+r*1.05],fill=(255,255,255,int(150*a*pulse)))
+    G_=G_.filter(ImageFilter.GaussianBlur(r*0.45)); im.alpha_composite(G_,(cx-g//2,cy-g//2))
+    D=ImageDraw.Draw(im); D.ellipse([cx-r,cy-r,cx+r,cy+r],fill=(15,15,20,int(110*a)),outline=(255,255,255,int(220*a)),width=max(2,int(2.5*u)))
+    k=r*0.42; D.polygon([(cx-k*0.75,cy-k),(cx-k*0.75,cy+k),(cx+k*1.05,cy)],fill=(255,255,255,int(235*a)))
 def headline(L,d,t,x,y,tw,V,u,col,maxl):
     cf=C['gancho'].get('cifra') or {}
     if cf.get('hasta'):
@@ -187,10 +196,9 @@ def explain(t,W,H):
         m=Image.fromarray(np.maximum(np.array(grad(W,H,0,int(H*0.20),220,0)),np.maximum(np.array(grad(W,H,int(H*0.46),int(H*0.60),0,225)),np.array(grad(W,H,int(H*0.60),H,225,235))))); im.alpha_composite(Image.composite(sh,Image.new('RGBA',(W,H)),m))
         d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
         txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)
-        txt(L,(mx,int(H*0.52)),br.get('credito',''),F(INTER,int(34*u),700),(255,255,255),a); hint_badge(L,d,br,W-mx,int(H*0.52)+int(46*u),u,a)
+        play_hint(im,W-mx,int(H*0.20),u,a,t)
         y=headline(L,d,t,mx,int(H*0.60),W-2*mx,V,u,(255,255,255),2)
         lines(L,d,t,mx,max(y+int(30*u),int(H*0.75)),W-2*mx,u,((255,255,255),(140,190,255),(255,255,255)),60)
-        linea_fuente(L,fsrc['texto'],F(INTER,int(32*u),500),mx,H-int(90*u),(210,210,215),eo((t-fsrc['t'][0])/0.5))
         im.alpha_composite(L); return im
     im=background(t,W,H,'explain'); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
     txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),RED,1)
@@ -209,11 +217,7 @@ def explain(t,W,H):
         by+=int((1-a)*40*u) if rad else 0
         fr=fr.resize((bw,bh),Image.LANCZOS); m=Image.new('L',(bw,bh),0)
         ImageDraw.Draw(m).rounded_rectangle([0,0,bw-1,bh-1],radius=rad,fill=int(255*a)); fr.putalpha(m); im.alpha_composite(fr,(bx,by))
-        if not V and vs:
-            sh=Image.new('RGBA',(bw,int(H*0.2)),(8,8,12,255)); sh.putalpha(grad(bw,int(H*0.2),0,int(H*0.2),0,200)); im.alpha_composite(sh,(bx,H-int(H*0.2)))
-            txt(L,(bx+int(28*u),H-int(150*u)),br.get('credito',''),F(INTER,int(30*u),700),(255,255,255),a); hint_badge(L,d,br,W-int(28*u),H-int(40*u),u,a)
-        else:
-            txt(L,(bx,by+bh+int(12*u)),br.get('credito',''),F(INTER,int(34*u),700),INK,a); hint_badge(L,d,br,bx+bw-int(12*u),by+bh-int(20*u),u,a)
+        play_hint(im,bx+bw-int(24*u),by+int(24*u),u,a,t)
         right=bx if not V else W
     else: right=W
     if not V: logo_at(im,min(right,W)-mx-int(110*u)+(0 if right==W else int(30*u)),int(95*u),int(220*u),1)
@@ -223,7 +227,6 @@ def explain(t,W,H):
     else:
         tw=(right-2*mx) if right<W else int(W*0.44)
         y=headline(L,d,t,mx,int(H*0.20),tw,V,u,INK,3); lines(L,d,t,mx,max(y+int(30*u),int(H*(0.60 if right<W else 0.74))),tw if right<W else W-2*mx,u,(INK,RED,INK),56 if right<W else 60)
-    linea_fuente(L,fsrc['texto'],F(INTER,int(32*u),500),mx,H-int(90*u),GREY,eo((t-fsrc['t'][0])/0.5))
     im.alpha_composite(L); return im
 def frame(t,W,H):
     u=min(W,H)/1080; V=H>W

@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## tools/capsulas-sabiasque v5.4 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Menos es más
+
+- Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy).
+- `render_url.py`: fuera la pastilla «Toca para ver el original»; icono de reproducir pequeño con resplandor en la esquina del vídeo. Fuera el crédito y la línea de fuente del cuerpo (estaba dos veces); una sola mención discreta «Vídeo original: …» al pie del cierre. Sin subtítulo en la cartela inicial ni degradado de pie en 16x9.
+- Rollback: revertir este PR (vuelve a v5.3).
+
 ## tools/capsulas-sabiasque v5.3 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Vídeo de la fuente durante toda la explicación
 
 - Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas básicas en tools/capsulas-sabiasque/README.md.

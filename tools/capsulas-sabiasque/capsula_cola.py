@@ -29,7 +29,7 @@ def guion_v5(job):
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
         "idea_clave": g.get('idea', ''),
-        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.3", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
+        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.4", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
             "preroll": {"t": [0, 2], "logo": "admira_oficial", "titulo": "¿Sabías que?", "tipologia": tema.capitalize(), "texto": f"¿Sabías que? {tema.capitalize()}", "subtitulo": g.get('subtitulo') or ''},
             "gancho": {"t": [2, 5.05], "linea_t": [2.65, 4.95], "linea": g['gancho'],
                        "cifra": ({"desde": 0, "hasta": cifra['hasta'], "unidad": cifra.get('unidad', ''), "easing": "easeOutExpo"} if cifra.get('hasta') else None)},
