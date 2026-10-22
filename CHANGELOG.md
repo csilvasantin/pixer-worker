@@ -7,7 +7,7 @@ Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 - Nuevo `POST /capsula/url/borrador` {url, texto?}: resuelve acortadores y normaliza con `resolveImportUrl` + `importSourceKey` (#31), extrae título, autor, descripción, texto y miniatura (oEmbed para YouTube/TikTok/X, HTML para LinkedIn y artículos, mismas defensas SSRF que `/stock/site-capsule`) y pide a Gemini (`GEMINI_API_KEY` existente) un guion v5: objeto, subtítulo, cifra opcional, gancho, giro, remate, fuente e idea clave. No escribe nada.
 - `POST /capsula/url/encargar` {url, guion}: valida el guion editado y lo encola en R2 `capsula-url/jobs/<hash>.json` con reserva atómica (`etagDoesNotMatch: '*'`): el mismo origen solo se encarga una vez. `ref = capsula-url:<sha256(origen)[:16]>` es el `externalRef` de los dos vídeos.
 - `GET /capsula/url/estado?ref=` y `GET /capsula/url/cola`: el estado se deduce del Stock (publicada = vertical + horizontal con ese externalRef). GrokBotBox lee la cola y renderiza con el pipeline actual (Python + ffmpeg, plantilla v5, publicar_sabias_v5).
-- POST solo desde admira.studio / pixeria.com (Origin). Pruebas: `test/capsula-url.test.mjs` (5). 351/351.
+- POST solo desde admira.studio / pixeria.com (Origin). Pruebas: `test/capsula-url.test.mjs` (5). 346/346.
 - Rollback: `npx wrangler rollback` a la versión anterior (v.22.10.2026.r1.15:45, commit 4ea03a5).
 
 ## v.22.10.2026.r1.15:45 · GrokBot · Box · Stock: dedup idempotente de importaciones (Telegram/yt-dlp)
