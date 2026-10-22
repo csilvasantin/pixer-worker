@@ -29,7 +29,7 @@ def guion_v5(job):
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
         "idea_clave": g.get('idea', ''),
-        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.1", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
+        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.2", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
             "preroll": {"t": [0, 2], "logo": "admira_oficial", "titulo": "¿Sabías que?", "tipologia": tema.capitalize(), "texto": f"¿Sabías que? {tema.capitalize()}", "subtitulo": g.get('subtitulo') or ''},
             "gancho": {"t": [2, 5.05], "linea_t": [2.65, 4.95], "linea": g['gancho'],
                        "cifra": ({"desde": 0, "hasta": cifra['hasta'], "unidad": cifra.get('unidad', ''), "easing": "easeOutExpo"} if cifra.get('hasta') else None)},
@@ -38,25 +38,58 @@ def guion_v5(job):
             "barra_progreso": {"t": [0, 18], "posicion": "arriba y abajo (espejo)", "lectura": None},
             "audio": {"tipo": "silencio", "t": [0, 15]}, "postroll": {"t": [14, 18], "logo": "admira_oficial", "claim": "Connecting things to Internet", "fijo": True},
             "tags": job.get('tags') or ['capsula', 'sabiasque']}]}
+# v5.2 (22-oct-2026): los Shorts de YouTube devolvían 429 + «Sign in to confirm you're not a bot» con el cliente
+# web por defecto y la cápsula caía en la miniatura sin avisar. Ahora se prueban varios clientes de yt-dlp
+# (android_vr funciona sin cookies para Shorts), cada intento queda en el log y, si todo falla, se anota
+# «FALLBACK miniatura» y broll/origen.json lo dice. Sin cookies ni credenciales.
+YTDLP_CLIENTES = (None, 'android_vr', 'tv', 'ios', 'web_safari', 'mweb', 'web_embedded')
+def bajar_video(url, mp4):
+    for cli in YTDLP_CLIENTES:
+        cmd = ['yt-dlp', '-q', '--no-warnings', '--no-playlist', '-f', 'bv*[ext=mp4][height<=1080]+ba/b[ext=mp4]/bv*+ba/b', '--merge-output-format', 'mp4', '-o', mp4]
+        if cli: cmd += ['--extractor-args', f'youtube:player_client={cli}']
+        r = subprocess.run(cmd + [url], capture_output=True, text=True, timeout=600)
+        if r.returncode == 0 and os.path.exists(mp4) and os.path.getsize(mp4) > 50000:
+            print(f'  b-roll: vídeo descargado con yt-dlp (cliente {cli or "por defecto"})'); return cli or 'por defecto'
+        err = (r.stderr or r.stdout or '').strip().splitlines()
+        print(f'  b-roll: yt-dlp cliente {cli or "por defecto"} falló: {(err[-1] if err else "sin salida")[:200]}')
+        if os.path.exists(mp4): os.remove(mp4)
+    return None
+def miniatura(job, out):
+    """Foto de la fuente para la cartela inicial (v5.2) y como b-roll de reserva."""
+    img = os.path.join(out, 'fuente.jpg'); s = job['source']
+    if os.path.exists(img) and os.path.getsize(img) > 1000: return img
+    try:
+        if s.get('image'): urllib.request.urlretrieve(s['image'], img); return img
+    except Exception as e: print('  miniatura (og:image) no disponible:', e)
+    if s.get('kind') in ('youtube', 'tiktok', 'x', 'vimeo', 'instagram', 'linkedin'):
+        r = subprocess.run(['yt-dlp', '-q', '--no-warnings', '--skip-download', '--write-thumbnail', '--convert-thumbnails', 'jpg', '--extractor-args', 'youtube:player_client=android_vr', '-o', os.path.join(out, 'fuente'), s['url']], capture_output=True, text=True, timeout=120)
+        if os.path.exists(img): return img
+        print('  miniatura (yt-dlp) no disponible:', (r.stderr or '').strip()[-200:])
+    return None
 def broll(job, out):
     d = os.path.join(out, 'broll'); os.makedirs(d, exist_ok=True)
+    img = miniatura(job, out)
     if any(f.startswith('f') for f in os.listdir(d)): return
-    s = job['source']
+    s = job['source']; origen = {'tipo': 'ninguno'}
     if s.get('kind') in ('linkedin', 'youtube', 'tiktok', 'x', 'vimeo', 'instagram'):
         mp4 = os.path.join(out, 'fuente.mp4')
         try:
-            if not os.path.exists(mp4):
-                subprocess.run(['yt-dlp', '-q', '-f', 'bv*[ext=mp4][height<=1080]+ba/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', mp4, s['url']], check=True, timeout=600)
-            dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp4], text=True).strip() or 8)
-            t0 = max(0, dur / 2 - 2)
-            subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{t0:.2f}', '-t', '4', '-i', mp4, '-vf', 'scale=1080:-2,fps=25', os.path.join(d, 'f%03d.png')], check=True)
-            return
+            cli = 'previo' if os.path.exists(mp4) else bajar_video(s['url'], mp4)
+            if cli:
+                dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp4], text=True).strip() or 8)
+                t0 = max(0, min(dur / 2 - 2, dur - 4.2))
+                subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{t0:.2f}', '-t', '4', '-i', mp4, '-vf', 'scale=1080:-2,fps=25', os.path.join(d, 'f%03d.png')], check=True)
+                n = len([f for f in os.listdir(d) if f.startswith('f')])
+                origen = {'tipo': 'video', 'cliente': cli, 'desde_s': round(t0, 2), 'duracion_fuente_s': round(dur, 2), 'fotogramas': n}
+                print(f'  b-roll: VÍDEO de la fuente, {n} fotogramas desde {t0:.2f}s (de {dur:.1f}s)')
+                json.dump(origen, open(os.path.join(d, 'origen.json'), 'w'), ensure_ascii=False); return
         except Exception as e: print('  b-roll vídeo no disponible:', e)
-    if s.get('image'):
+    if img:
         try:
-            img = os.path.join(out, 'fuente.jpg'); urllib.request.urlretrieve(s['image'], img)
             subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', img, '-vf', 'scale=1080:-2', os.path.join(d, 'f001.png')], check=True)
+            origen = {'tipo': 'miniatura'}; print('  b-roll: FALLBACK miniatura con zoom lento (no se pudo obtener el vídeo)')
         except Exception as e: print('  miniatura no disponible:', e)
+    json.dump(origen, open(os.path.join(d, 'origen.json'), 'w'), ensure_ascii=False)
 def poster(png):
     import base64, io
     from PIL import Image
