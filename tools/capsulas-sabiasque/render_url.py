@@ -135,54 +135,95 @@ def kenburns(im,p):
     p=max(0,min(1,p)); z=1.0+0.08*p; w,h=im.size; cw,ch=int(w/z),int(h/z); x0=int((w-cw)*p*0.6); y0=int((h-ch)/2)
     return im.crop((x0,y0,x0+cw,y0+ch)).resize((w,h),Image.LANCZOS)
 def fmt(n): return f"{n:,}".replace(',','.')
-def explain(t,W,H):
-    V=H>W; u=min(W,H)/1080
-    im=background(t,W,H,'explain'); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
-    mx=int(80*u); fl_=lambda ph,amp=6: amp*u*math.sin(t*1.8+ph)
-    txt(L,(mx,int(50*u)+fl_(0,3)),C['titulo'],F(OSW,int(72*u),700),RED,1)
-    logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1)
+# v5.3 (22-oct-2026, reglas de Carlos para todas las tipologías):
+#  · el vídeo de la fuente está presente durante TODA la explicación (2 s → cierre), en bucle si es más corto;
+#  · fuente vertical en 16x9: vídeo a la DERECHA a toda la altura, textos a la IZQUIERDA;
+#  · fuente vertical en 9x16: vídeo a pantalla completa (protagonista) con franjas oscuras degradadas arriba
+#    (título y logo) y abajo (titular + gancho/giro/remate + fuente), crédito y «Toca para ver el original» en medio;
+#  · fuente horizontal: la composición de siempre (caja del vídeo a la derecha en 16x9, en medio en 9x16), pero fija.
+E0=2.0
+def bfr(t):
+    n=broll_n()
+    if n<=1: return kenburns(broll(0),((t-E0)/(T-POST-E0)))
+    return broll(int((t-E0)*FPS)%n)
+def vertical_src():
+    return broll_n()>0 and broll(0).height>broll(0).width
+def cover(fr,W,H):
+    s=max(W/fr.width,H/fr.height); fr=fr.resize((int(fr.width*s)+1,int(fr.height*s)+1),Image.LANCZOS)
+    x0=(fr.width-W)//2; y0=(fr.height-H)//2; return fr.crop((x0,y0,x0+W,y0+H))
+def grad(W,H,y0,y1,a0,a1):
+    g=np.linspace(a0,a1,max(1,y1-y0),dtype=np.float32)[:,None].repeat(W,1)
+    m=Image.new('L',(W,H),0); m.paste(Image.fromarray(np.clip(g,0,255).astype(np.uint8)),(0,y0)); return m
+def hint_badge(L,d,br,x1,y1,u,a):
+    hint=br.get('indicacion') or 'Toca para ver el original'
+    fh_=F(INTER,int(30*u),600); hw=d.textlength(hint,font=fh_); tri=int(22*u)
+    hx=x1-int(hw)-int(16*u); hy=y1-int(46*u)
+    ImageDraw.Draw(L).rounded_rectangle([hx-tri-int(22*u),hy-int(10*u),hx+int(hw)+int(16*u),hy+int(46*u)],radius=int(26*u),fill=(20,20,24,int(200*a)))
+    ImageDraw.Draw(L).polygon([(hx-tri-int(6*u),hy+int(6*u)),(hx-tri-int(6*u),hy+int(30*u)),(hx-int(8*u),hy+int(18*u))],fill=(255,255,255,int(255*a)))
+    txt(L,(hx,hy),hint,fh_,(255,255,255),a)
+def headline(L,d,t,x,y,tw,V,u,col,maxl):
     cf=C['gancho'].get('cifra') or {}
-    cy=int(H*(0.12 if V else 0.20))+fl_(1)
     if cf.get('hasta'):
         p=eo((t-2)/2.4); val=cf.get('desde',0)+(cf['hasta']-cf.get('desde',0))*p
         n=int(round(val/10))*10 if cf['hasta']>=1000 else (round(val,1) if cf['hasta']!=int(cf['hasta']) else int(round(val)))
-        fc=F(ANTON,int((300 if V else 280)*u*(1+0.02*math.sin(t*2.2))),700)
-        txt(L,(mx,cy),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,INK,eo((t-2)/0.3))
-        if cf.get('unidad'):
-            fu=F(OSW,int((84 if V else 72)*u),700); txt(L,(mx+int(8*u),cy+int((345 if V else 330)*u)),cf['unidad'],fu,RED,eo((t-2.3)/0.5))
-    else:
-        tw0=(W-2*mx) if V else int(W*0.44); fh=F(OSW,int((112 if V else 96)*u),700)
-        for i,s in enumerate(wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw0)[:3 if V else 4]):
-            txt(L,(mx,cy+int(20*u)+i*int((128 if V else 110)*u)),s,fh,INK,eo((t-2-i*0.12)/0.4))
-    br=C['giro'].get('broll') or {}; b0,b1=br.get('t_capsula',[5.05,9.05])
-    if broll_n() and b0-0.4<=t<b1+0.4:
-        a=min(eo((t-b0+0.4)/0.4),1-max(0,min(1,(t-b1)/0.4)))
-        fr=broll(int((t-b0)*FPS)) if broll_n()>1 else kenburns(broll(0),(t-b0)/(b1-b0))
-        bw=W-2*mx if V else int(W*0.42); bh=int(bw*fr.height/fr.width)
-        mh=int(H*(0.30 if V else 0.50))
-        if bh>mh: bw=int(bw*mh/bh); bh=mh
-        bx=mx if V else int(W*0.52); by=int(H*0.375) if V else int(H*0.17)
-        by+=int((1-a)*40*u)
-        fr=fr.resize((bw,bh),Image.LANCZOS); m=Image.new('L',(bw,bh),0)
-        ImageDraw.Draw(m).rounded_rectangle([0,0,bw-1,bh-1],radius=int(20*u),fill=int(255*a)); fr.putalpha(m)
-        im.alpha_composite(fr,(bx,by))
-        # v5.1: crédito visible + llamada a tocar (en el Stock el tramo del b-roll abre la fuente).
-        txt(L,(bx,by+bh+int(12*u)),br.get('credito',''),F(INTER,int(34*u),700),INK,a)
-        hint=br.get('indicacion') or 'Toca para ver el original'
-        fh_=F(INTER,int(30*u),600); hw=d.textlength(hint,font=fh_); hx,hy=bx+bw-int(hw)-int(28*u),by+bh-int(66*u)
-        tri=int(22*u); hx+=tri+int(6*u)
-        ImageDraw.Draw(L).rounded_rectangle([hx-tri-int(22*u),hy-int(10*u),hx+int(hw)+int(16*u),hy+int(46*u)],radius=int(26*u),fill=(20,20,24,int(200*a)))
-        ImageDraw.Draw(L).polygon([(hx-tri-int(6*u),hy+int(6*u)),(hx-tri-int(6*u),hy+int(30*u)),(hx-int(8*u),hy+int(18*u))],fill=(255,255,255,int(255*a)))
-        txt(L,(hx,hy),hint,fh_,(255,255,255),a)
+        fc=F(ANTON,int((220 if V else 220)*u),700)
+        txt(L,(x,y),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,col,eo((t-2)/0.3))
+        if cf.get('unidad'): txt(L,(x+int(8*u),y+int(260*u)),cf['unidad'],F(OSW,int(64*u),700),RED if col==INK else (120,175,255),eo((t-2.3)/0.5))
+        return y+int(350*u)
+    fh=F(OSW,int((84 if V else 80)*u),700); ls=wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw)[:maxl]
+    for i,s_ in enumerate(ls): txt(L,(x,y+i*int(96*u)),s_,fh,col,eo((t-2-i*0.12)/0.4))
+    return y+len(ls)*int(96*u)
+def lines(L,d,t,x,y,tw,u,cols3,size):
     items=[(C[k]['linea'],*C[k]['linea_t']) for k in ('gancho','giro','remate')]
-    cols={items[0][0]:INK,items[1][0]:RED,items[2][0]:INK}
-    fl=F(INTER,int((64 if V else 60)*u),700); tw=W-2*mx
-    y0=int(H*(0.72 if V else 0.74))
-    for s,al,dx in secuencia(t,items):
-        for i,l in enumerate(wrap(d,s,fl,tw)):
-            txt(L,(mx-dx*u,y0+i*int(80*u)+fl_(2,4)),l,fl,cols[s],al)
-    fs=F(INTER,int(32*u),500); fsrc=C['remate']['fuente']
-    linea_fuente(L,fsrc['texto'],fs,mx,H-int(90*u),GREY,eo((t-fsrc['t'][0])/0.5))
+    cols={items[0][0]:cols3[0],items[1][0]:cols3[1],items[2][0]:cols3[2]}; fl=F(INTER,int(size*u),700)
+    for s_,al,dx in secuencia(t,items):
+        for i,l in enumerate(wrap(d,s_,fl,tw)): txt(L,(x-dx*u,y+i*int(size*1.28*u)),l,fl,cols[s_],al)
+def explain(t,W,H):
+    V=H>W; u=min(W,H)/1080; mx=int(80*u); br=C['giro'].get('broll') or {}; fsrc=C['remate']['fuente']
+    a=eo((t-E0)/0.4); vs=vertical_src() if broll_n() else False
+    if V and vs:
+        # 9x16 + fuente vertical: vídeo a pantalla completa, franjas legibles.
+        im=cover(bfr(t),W,H).convert('RGBA'); sh=Image.new('RGBA',(W,H),(8,8,12,255))
+        m=Image.fromarray(np.maximum(np.array(grad(W,H,0,int(H*0.20),220,0)),np.maximum(np.array(grad(W,H,int(H*0.46),int(H*0.60),0,225)),np.array(grad(W,H,int(H*0.60),H,225,235))))); im.alpha_composite(Image.composite(sh,Image.new('RGBA',(W,H)),m))
+        d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
+        txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)
+        txt(L,(mx,int(H*0.52)),br.get('credito',''),F(INTER,int(34*u),700),(255,255,255),a); hint_badge(L,d,br,W-mx,int(H*0.52)+int(46*u),u,a)
+        y=headline(L,d,t,mx,int(H*0.60),W-2*mx,V,u,(255,255,255),2)
+        lines(L,d,t,mx,max(y+int(30*u),int(H*0.75)),W-2*mx,u,((255,255,255),(140,190,255),(255,255,255)),60)
+        linea_fuente(L,fsrc['texto'],F(INTER,int(32*u),500),mx,H-int(90*u),(210,210,215),eo((t-fsrc['t'][0])/0.5))
+        im.alpha_composite(L); return im
+    im=background(t,W,H,'explain'); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
+    txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),RED,1)
+    if broll_n():
+        fr=bfr(t)
+        if not V and vs:   # 16x9 + fuente vertical: vídeo a la derecha, a toda la altura.
+            bh=H; bw=int(bh*fr.width/fr.height); bx=W-bw; by=0; rad=0
+        elif not V:        # 16x9 + fuente horizontal: caja a la derecha (como v5.1), toda la explicación.
+            bw=int(W*0.42); bh=int(bw*fr.height/fr.width); mh=int(H*0.56)
+            if bh>mh: bw=int(bw*mh/bh); bh=mh
+            bx=int(W*0.52); by=int(H*0.17); rad=int(20*u)
+        else:              # 9x16 + fuente horizontal: caja ancha en medio.
+            bw=W-2*mx; bh=int(bw*fr.height/fr.width); mh=int(H*0.30)
+            if bh>mh: bw=int(bw*mh/bh); bh=mh
+            bx=mx; by=int(H*0.375); rad=int(20*u)
+        by+=int((1-a)*40*u) if rad else 0
+        fr=fr.resize((bw,bh),Image.LANCZOS); m=Image.new('L',(bw,bh),0)
+        ImageDraw.Draw(m).rounded_rectangle([0,0,bw-1,bh-1],radius=rad,fill=int(255*a)); fr.putalpha(m); im.alpha_composite(fr,(bx,by))
+        if not V and vs:
+            sh=Image.new('RGBA',(bw,int(H*0.2)),(8,8,12,255)); sh.putalpha(grad(bw,int(H*0.2),0,int(H*0.2),0,200)); im.alpha_composite(sh,(bx,H-int(H*0.2)))
+            txt(L,(bx+int(28*u),H-int(150*u)),br.get('credito',''),F(INTER,int(30*u),700),(255,255,255),a); hint_badge(L,d,br,W-int(28*u),H-int(40*u),u,a)
+        else:
+            txt(L,(bx,by+bh+int(12*u)),br.get('credito',''),F(INTER,int(34*u),700),INK,a); hint_badge(L,d,br,bx+bw-int(12*u),by+bh-int(20*u),u,a)
+        right=bx if not V else W
+    else: right=W
+    if not V: logo_at(im,min(right,W)-mx-int(110*u)+(0 if right==W else int(30*u)),int(95*u),int(220*u),1)
+    else: logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1)
+    if V:
+        y=headline(L,d,t,mx,int(H*0.13),W-2*mx,V,u,INK,3); lines(L,d,t,mx,int(H*0.72),W-2*mx,u,(INK,RED,INK),64)
+    else:
+        tw=(right-2*mx) if right<W else int(W*0.44)
+        y=headline(L,d,t,mx,int(H*0.20),tw,V,u,INK,3); lines(L,d,t,mx,max(y+int(30*u),int(H*(0.60 if right<W else 0.74))),tw if right<W else W-2*mx,u,(INK,RED,INK),56 if right<W else 60)
+    linea_fuente(L,fsrc['texto'],F(INTER,int(32*u),500),mx,H-int(90*u),GREY,eo((t-fsrc['t'][0])/0.5))
     im.alpha_composite(L); return im
 def frame(t,W,H):
     u=min(W,H)/1080; V=H>W

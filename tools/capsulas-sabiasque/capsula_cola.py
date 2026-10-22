@@ -29,11 +29,11 @@ def guion_v5(job):
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
         "idea_clave": g.get('idea', ''),
-        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.2", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
+        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.3", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
             "preroll": {"t": [0, 2], "logo": "admira_oficial", "titulo": "¿Sabías que?", "tipologia": tema.capitalize(), "texto": f"¿Sabías que? {tema.capitalize()}", "subtitulo": g.get('subtitulo') or ''},
             "gancho": {"t": [2, 5.05], "linea_t": [2.65, 4.95], "linea": g['gancho'],
                        "cifra": ({"desde": 0, "hasta": cifra['hasta'], "unidad": cifra.get('unidad', ''), "easing": "easeOutExpo"} if cifra.get('hasta') else None)},
-            "giro": {"t": [5.05, 10.73], "linea_t": [5.05, 10.73], "linea": g['giro'], "broll": {"fichero": "broll/", "t_capsula": [5.05, 9.05], "credito": credito}},
+            "giro": {"t": [5.05, 10.73], "linea_t": [5.05, 10.73], "linea": g['giro'], "broll": {"fichero": "broll/", "t_capsula": [2, 14], "credito": credito}},
             "remate": {"t": [10.73, 14], "linea_t": [10.95, 14], "linea": g['remate'], "fuente": {"texto": g['fuente'], "url": s['url'], "t": [2.65, 14]}},
             "barra_progreso": {"t": [0, 18], "posicion": "arriba y abajo (espejo)", "lectura": None},
             "audio": {"tipo": "silencio", "t": [0, 15]}, "postroll": {"t": [14, 18], "logo": "admira_oficial", "claim": "Connecting things to Internet", "fijo": True},
@@ -77,10 +77,17 @@ def broll(job, out):
             cli = 'previo' if os.path.exists(mp4) else bajar_video(s['url'], mp4)
             if cli:
                 dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp4], text=True).strip() or 8)
-                t0 = max(0, min(dur / 2 - 2, dur - 4.2))
-                subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{t0:.2f}', '-t', '4', '-i', mp4, '-vf', 'scale=1080:-2,fps=25', os.path.join(d, 'f%03d.png')], check=True)
+                LARGO = 12.0  # v5.3: toda la explicación (2 s → 14 s); si la fuente es más corta, render_url.py la repite en bucle
+                t0 = 0.0 if dur <= LARGO + 1 else max(0, min(dur / 2 - LARGO / 2, dur - LARGO))
+                # Bandas negras incrustadas (Shorts que son vídeo horizontal con barras): se recortan con cropdetect.
+                cd = subprocess.run(['ffmpeg', '-v', 'info', '-ss', f'{t0:.2f}', '-t', f'{min(LARGO, dur):g}', '-i', mp4, '-vf', 'cropdetect=24:2:0', '-f', 'null', '-'], capture_output=True, text=True).stderr
+                crops = [l.split('crop=')[-1].strip() for l in cd.splitlines() if 'crop=' in l]
+                crop = max(set(crops), key=crops.count) if crops else ''
+                vf = (f'crop={crop},' if crop else '') + 'scale=1080:-2,fps=25'
+                if crop: print(f'  b-roll: recorte de bandas {crop}')
+                subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{t0:.2f}', '-t', f'{LARGO:g}', '-i', mp4, '-vf', vf, os.path.join(d, 'f%03d.png')], check=True)
                 n = len([f for f in os.listdir(d) if f.startswith('f')])
-                origen = {'tipo': 'video', 'cliente': cli, 'desde_s': round(t0, 2), 'duracion_fuente_s': round(dur, 2), 'fotogramas': n}
+                origen = {'tipo': 'video', 'cliente': cli, 'desde_s': round(t0, 2), 'duracion_fuente_s': round(dur, 2), 'fotogramas': n, 'recorte': crop, 'bucle': dur < LARGO}
                 print(f'  b-roll: VÍDEO de la fuente, {n} fotogramas desde {t0:.2f}s (de {dur:.1f}s)')
                 json.dump(origen, open(os.path.join(d, 'origen.json'), 'w'), ensure_ascii=False); return
         except Exception as e: print('  b-roll vídeo no disponible:', e)
