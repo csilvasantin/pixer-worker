@@ -64,7 +64,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
-import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded } from './capsula-url.mjs';
+import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded, campanaUrlPrompt, normalizeCampanaBorrador } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
 import { xpacioEstimarHandler, corsXpacio, enDesarrollo } from './xpacio-estimar.mjs';
@@ -142,7 +142,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.22.10.2026.r3.18:12';
+const WORKER_VERSION = 'v.22.10.2026.r4.18:24';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5032,6 +5032,21 @@ async function capsulaUrlBorradorHandler(req, env) {
   if (manual) src.text = manual;
   const source = { url: src.url, resolvedUrl: src.resolvedUrl, sourceKey: src.sourceKey, kind: src.kind, title: src.title, author: src.author, image: src.image, description: src.description.slice(0, 600), textLength: src.text.length };
   if (!src.title && !src.description && src.text.length < 80) return json({ ok: false, error: 'source-has-no-readable-content', ref, source, ...state }, { status: 422 });
+  if (body?.modo === 'campana') {
+    // Campaña para pantallas: misma fuente, copia distinta; la imagen viaja por /image/proxy (CORS) para el lienzo.
+    let campana;
+    try {
+      if (!env.GEMINI_API_KEY) throw new Error('server-missing-key');
+      const { r, datos } = await pedirConLimite('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+        method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: campanaUrlPrompt(src) }] }], generationConfig: { temperature: 0.4, responseMimeType: 'application/json' } }),
+      }, { ms: LIMITES.textoLargo, proveedor: 'gemini', etapa: 'campana-url' });
+      if (!r.ok) throw new Error(`gemini-${r.status}`);
+      campana = normalizeCampanaBorrador(JSON.parse(datos?.candidates?.[0]?.content?.parts?.[0]?.text || '{}')).campana;
+    } catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ ok: false, modo: 'campana', error: 'campaign-synthesis-failed', detail: String(e.message || e).slice(0, 120), source }, { status: 502 }); }
+    const imageProxy = source.image ? new URL('/image/proxy?url=' + encodeURIComponent(source.image), req.url).href : '';
+    return json({ ok: true, modo: 'campana', source, imageProxy, campana });
+  }
   let guion;
   try { guion = await capsulaUrlGemini(env, src); }
   catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ ok: false, error: 'capsule-synthesis-failed', detail: String(e.message || e).slice(0, 120), ref, source, ...state }, { status: 502 }); }

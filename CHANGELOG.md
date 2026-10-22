@@ -2,6 +2,11 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.22.10.2026.r4.18:24 · WozniakGrokBot · GrokBotBox · Borrador desde URL en modo «campaña» (Creador de campañas)
+
+- `POST /capsula/url/borrador` con `modo:'campana'`: misma resolución/extracción (y `texto` manual si la página no se lee), Gemini redacta `campana` {nombre, titular ≤42, cta ≤60, etiqueta, idea} y devuelve `imageProxy` (`/image/proxy?url=<og:image>`, con CORS) para usarla como visual en el lienzo. No escribe nada.
+- Pruebas 349/349. Rollback: `wrangler rollback 95814487-b7ed-4a86-a2de-39764f7eb29e` (v.22.10.2026.r3.18:12).
+
 ## v.22.10.2026.r3.18:12 · WozniakGrokBot · GrokBotBox · Cápsulas desde URL v5.1: ficha interactiva y versiones
 
 - `/stock/publish` guarda `capsuleSource` {sourceUrl, credit, broll{start,end}, version} en el meta (y por tanto en el índice) para vídeos con `externalRef capsula-url:<hash>`. No usa el campo `sourceUrl` del body, que significa «descarga esto».

@@ -104,3 +104,21 @@ export function capsulaSuperseded(items, meta) {
   const v = capsuleVersionOf(meta);
   return (items || []).filter(it => it && it.id !== meta.id && it.type === 'video' && it.externalRef === meta.externalRef && (it.tags || []).includes(o) && capsuleVersionOf(it) < v).map(it => it.id);
 }
+
+// Modo «campaña» del borrador (Creador de campañas para pantallas, 22-oct-2026): misma extracción,
+// otro guion. Rellena el paso Contenido: marca/producto, titular corto, llamada a la acción.
+export const CAMPANA_URL_LIMITS = { nombre: 60, titular: 42, cta: 60, etiqueta: 80, idea: 280 };
+export function campanaUrlPrompt(source) {
+  const L = CAMPANA_URL_LIMITS;
+  return `Eres redactor publicitario de Admira para campañas en pantallas de tienda (digital signage, lectura en 3 segundos).\n` +
+    `A partir del contenido de abajo propone la copia de UNA campaña en español. Devuelve SOLO JSON válido con este esquema exacto:\n` +
+    `{"nombre":"producto o marca protagonista, ≤${L.nombre} caracteres","titular":"titular corto e impactante, ≤${L.titular} caracteres","cta":"mensaje o llamada a la acción, ≤${L.cta}","etiqueta":"qué muestra la imagen de la fuente, ≤${L.etiqueta}","idea":"idea clave en una frase, ≤${L.idea}"}\n` +
+    `Reglas: sin emojis, sin hashtags, sin comillas, sin Markdown, sin punto final en titular y cta. No inventes datos, precios ni marcas que no estén en el contenido.\n\n` +
+    `TIPO: ${source.kind}\nURL: ${source.url}\nTÍTULO: ${source.title}\nAUTOR: ${source.author}\nDESCRIPCIÓN: ${source.description}\n\nTEXTO:\n${String(source.text || '').slice(0, 12000)}`;
+}
+export function normalizeCampanaBorrador(raw) {
+  const L = CAMPANA_URL_LIMITS, g = raw && typeof raw === 'object' ? raw : {};
+  const out = { nombre: clean(g.nombre, L.nombre), titular: clean(g.titular, L.titular).replace(/[.。]$/, ''), cta: clean(g.cta, L.cta).replace(/[.。]$/, ''), etiqueta: clean(g.etiqueta, L.etiqueta), idea: clean(g.idea, L.idea) };
+  const errors = ['nombre', 'titular', 'cta'].filter(k => !out[k]).map(k => 'missing_' + k);
+  return { ok: errors.length === 0, campana: out, errors };
+}

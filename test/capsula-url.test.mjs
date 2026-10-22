@@ -94,3 +94,22 @@ test('v2: rehacer encarga una versión nueva aunque la cápsula ya esté publica
   const cola = await (await worker.fetch(new Request('https://api.admira.store/capsula/url/cola'), e, ctx)).json();
   assert.equal(cola.jobs[0].capsuleVersion, 2);
 });
+
+import { normalizeCampanaBorrador, campanaUrlPrompt } from '../src/capsula-url.mjs';
+test('modo campaña: el mismo borrador rellena marca, titular, CTA e imagen por proxy, sin escribir nada', async t => {
+  const calls = []; const e = env();
+  t.mock.method(globalThis, 'fetch', async (u, init = {}) => {
+    const url = String(u?.url || u); calls.push(url);
+    if (url.startsWith('https://lnkd.in/')) return new Response(null, { status: 301, headers: { Location: LI } });
+    if (url.startsWith('https://www.linkedin.com/')) return new Response('<html><head><meta property="og:title" content="We turned Claude Opus 5.5 into a motion design studio"><meta property="og:image" content="https://dms.licdn.com/x.jpg"></head><body><main><p>12 laptops and a single prompt.</p></main></body></html>', { headers: { 'Content-Type': 'text/html' } });
+    if (url.includes('generativelanguage')) { assert.match(JSON.parse(init.body).contents[0].parts[0].text, /titular/); return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ nombre: 'Claude Opus 5.5', titular: 'Un estudio de motion en un prompt.', cta: 'Descubre cómo.', etiqueta: 'Alber Adilov', idea: 'x' }) }] } }] }); }
+    return new Response('no', { status: 404 });
+  });
+  const r = await worker.fetch(post('/capsula/url/borrador', { url: 'https://lnkd.in/p/e9zXSPkK', modo: 'campana' }), e, { waitUntil() {} });
+  const d = await r.json(); assert.equal(r.status, 200, JSON.stringify(d));
+  assert.equal(d.modo, 'campana'); assert.equal(d.campana.titular, 'Un estudio de motion en un prompt'); assert.equal(d.campana.cta, 'Descubre cómo');
+  assert.equal(d.imageProxy, 'https://api.admira.store/image/proxy?url=' + encodeURIComponent('https://dms.licdn.com/x.jpg'));
+  assert.equal(d.guion, undefined); assert.equal(e.STOCK_BUCKET.m.size, 0);
+  assert.deepEqual(normalizeCampanaBorrador({}).errors, ['missing_nombre', 'missing_titular', 'missing_cta']);
+  assert.match(campanaUrlPrompt({ kind: 'x', url: 'u', title: '', author: '', description: '', text: '' }), /pantallas/);
+});
