@@ -1,0 +1,70 @@
+{
+ "plantilla": "plantilla_guion_v5",
+ "actualizado": "2026-10-22 14:00 Europe/Madrid",
+ "estructura": {
+  "total_s": 15,
+  "preroll": [
+   0,
+   2
+  ],
+  "explicacion": [
+   2,
+   14
+  ],
+  "postroll": [
+   14,
+   15
+  ],
+  "resumen": "2+12+1"
+ },
+ "barras": "progreso arriba y abajo (espejo), ancho = t/15, sin lectura de tiempo",
+ "texto": "una línea a la vez (campo linea + linea_t [inicio,fin]); fuente en una sola línea corta (remate.fuente.texto, t)",
+ "tiempos_tipo": {
+  "gancho": {
+   "t": [
+    2,
+    5.05
+   ],
+   "linea_t": [
+    2.65,
+    4.95
+   ]
+  },
+  "giro": {
+   "t": [
+    5.05,
+    10.73
+   ],
+   "linea_t": [
+    5.05,
+    10.73
+   ],
+   "broll_t": [
+    5.05,
+    9.05
+   ]
+  },
+  "remate": {
+   "t": [
+    10.73,
+    14
+   ],
+   "linea_t": [
+    10.95,
+    15
+   ]
+  },
+  "fuente_t": [
+   2.65,
+   14
+  ]
+ },
+ "conversion": "plantilla_v5.estirar(t) pasa tiempos del esquema 2+11+2 al 2+12+1",
+ "publicacion": "publicar_sabias_v5.py (sin campo comment)",
+ "stills": [
+  1,
+  5,
+  10,
+  14.5
+ ]
+}

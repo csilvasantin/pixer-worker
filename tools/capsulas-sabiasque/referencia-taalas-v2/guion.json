@@ -1,0 +1,136 @@
+{
+ "fecha": "2026-10-22",
+ "plantilla": "plantilla_guion_v5 (barras de progreso arriba/abajo + menos texto)",
+ "saga": {
+  "tema": "tecnología",
+  "color": "#1F6FEB"
+ },
+ "tipo": "tecnologia-taalas",
+ "objeto": "Taalas HC1: Llama 3.1 8B grabado en un chip (17.000 tokens/s)",
+ "fuente": "Fuente: Taalas · taalas.com/products",
+ "origen": {
+  "url": "https://www.youtube.com/shorts/F7m4XO31fxc",
+  "canal_youtube": "Tech Formation",
+  "programa": "The Peter McCormack Show",
+  "ponente": "Emad Mostaque",
+  "broll_t": [
+   32,
+   36
+  ],
+  "recorte": "crop=1080:640:0:665"
+ },
+ "locucion": {
+  "gancho": "¿Sabías que? 17.000 tokens por segundo",
+  "cifra": "tokens por segundo, por usuario",
+  "idea": "El modelo de IA va grabado en el propio chip, casi 10 veces más rápido que lo más avanzado."
+ },
+ "capsulas": [
+  {
+   "id": "tecnologia-taalas-01",
+   "version": "v2",
+   "duracion_s": 15,
+   "formatos": [
+    "1920x1080",
+    "1080x1920"
+   ],
+   "titulo": "¿Sabías que?",
+   "preroll": {
+    "t": [
+     0,
+     2
+    ],
+    "logo": "admira_oficial",
+    "texto": "¿Sabías que? Tecnología",
+    "subtitulo": "Un chip con la IA dentro"
+   },
+   "gancho": {
+    "t": [
+     2,
+     5.05
+    ],
+    "cifra": {
+     "desde": 0,
+     "hasta": 17000,
+     "unidad": "tokens/s",
+     "easing": "easeOutExpo"
+    },
+    "linea": "tokens por segundo, por usuario",
+    "linea_t": [
+     2.65,
+     4.95
+    ]
+   },
+   "giro": {
+    "t": [
+     5.05,
+     10.73
+    ],
+    "linea": "el modelo de IA va grabado en el chip",
+    "broll": {
+     "fichero": "broll/",
+     "t_capsula": [
+      5.05,
+      9.05
+     ],
+     "credito": "Vídeo: The Peter McCormack Show"
+    },
+    "linea_t": [
+     5.05,
+     10.73
+    ]
+   },
+   "remate": {
+    "t": [
+     10.73,
+     14
+    ],
+    "linea": "casi 10 veces más rápido que lo más avanzado",
+    "fuente": {
+     "texto": "Fuente: Taalas · taalas.com/products",
+     "url": "https://taalas.com/products/",
+     "t": [
+      2.65,
+      14
+     ]
+    },
+    "linea_t": [
+     10.95,
+     15
+    ]
+   },
+   "barra_progreso": {
+    "t": [
+     0,
+     15
+    ],
+    "posicion": "arriba y abajo (espejo)",
+    "lectura": null,
+    "color": "#1F6FEB"
+   },
+   "audio": {
+    "tipo": "silencio",
+    "t": [
+     0,
+     15
+    ]
+   },
+   "postroll": {
+    "t": [
+     14,
+     15
+    ],
+    "logo": "admira_oficial",
+    "claim": "Connecting things to Internet"
+   },
+   "fuente_comprobada": "2026-10-22 13:50 Europe/Madrid · taalas.com/products/ · taalas.com/the-path-to-ubiquitous-ai/",
+   "no_usar": "Compra por AMD: acuerdo definitivo anunciado el 6-ago-2026 (newsroom.amd.com), pendiente de cierre; no se muestra en pantalla.",
+   "tags": [
+    "capsula",
+    "sabiasque",
+    "tecnologia",
+    "ia"
+   ],
+   "estructura": "2+12+1 (preroll+explicación+postroll)"
+  }
+ ]
+}

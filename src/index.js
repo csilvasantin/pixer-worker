@@ -64,7 +64,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
-import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus } from './capsula-url.mjs';
+import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
 import { xpacioEstimarHandler, corsXpacio, enDesarrollo } from './xpacio-estimar.mjs';
@@ -142,7 +142,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.22.10.2026.r2.17:42';
+const WORKER_VERSION = 'v.22.10.2026.r3.18:12';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -4998,14 +4998,27 @@ async function capsulaUrlGemini(env, src) {
   let parsed; try { parsed = JSON.parse(datos?.candidates?.[0]?.content?.parts?.[0]?.text || ''); } catch { throw new Error('gemini-invalid-json'); }
   return normalizeCapsulaGuion(parsed).guion;
 }
+// Versión nueva de una cápsula desde URL: las anteriores (misma ref y orientación) se OCULTAN, no se borran.
+async function capsulaSupersede(env, meta) {
+  const out = [];
+  for (const id of capsulaSuperseded(await gridReadStockIndex(env), meta)) {
+    const old = await stockMetaById(env, id); if (!old || old.oculto) continue;
+    const next = { ...old, oculto: true, ocultoMotivo: 'capsula-url:nueva-version', ocultoPor: meta.id, ocultoAt: new Date().toISOString() };
+    try {
+      await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(next), { httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' } });
+      await upsertStockIndex(env.STOCK_BUCKET, next, stockIndexItem, { loadMeta: () => stockMetaById(env, id) }); out.push(id);
+    } catch (e) { console.warn(JSON.stringify({ message: 'capsula supersede failed', id, error: String(e) })); }
+  }
+  return out;
+}
 async function capsulaUrlJob(env, ref) {
   const key = capsulaUrlJobKey(ref); if (!key || !env.STOCK_BUCKET) return null;
   try { const o = await env.STOCK_BUCKET.get(key); return o ? await o.json() : null; } catch { return null; }
 }
 async function capsulaUrlState(env, ref) {
   const [job, items] = await Promise.all([capsulaUrlJob(env, ref), gridReadStockIndex(env)]);
-  const existing = capsulaUrlExisting(items, ref);
-  return { ref, status: capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, objeto: job.guion?.objeto, sourceUrl: job.source?.url } : null };
+  const existing = capsulaUrlExisting(items, ref, job?.capsuleVersion || 1);
+  return { ref, status: capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, capsuleVersion: job.capsuleVersion || 1, objeto: job.guion?.objeto, sourceUrl: job.source?.url } : null };
 }
 async function capsulaUrlBorradorHandler(req, env) {
   if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
@@ -5035,14 +5048,17 @@ async function capsulaUrlEncargarHandler(req, env) {
   const ref = await capsulaUrlRef(sourceKey || safe.href);
   const norm = normalizeCapsulaGuion(body?.guion);
   if (!norm.ok) return json({ ok: false, error: 'invalid-guion', errors: norm.errors }, { status: 400 });
+  const rehacer = body.rehacer === true;
   const state = await capsulaUrlState(env, ref);
-  if (state.status === 'publicada') return json({ ok: true, reused: true, ...state });
+  if (state.status === 'publicada' && !rehacer) return json({ ok: true, reused: true, ...state });
+  const prevJob = await capsulaUrlJob(env, ref);
+  const capsuleVersion = rehacer ? Math.min(99, Math.max(prevJob?.capsuleVersion || 1, ...Object.values(state.existing).map(x => x.version || 1)) + 1) : (prevJob?.capsuleVersion || 1);
   const image = typeof body.image === 'string' && /^https:\/\/[^\s"'<>]{1,600}$/.test(body.image) ? body.image : '';
-  const job = { version: 1, ref, status: 'en-cola', createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', tags: [...CAPSULA_URL_TAGS, norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')],
+  const job = { version: 1, capsuleVersion, ref, status: 'en-cola', createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', tags: [...CAPSULA_URL_TAGS, norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')],
     source: { url: String(body.url).trim().slice(0, 1000), resolvedUrl: safe.href, sourceKey, kind: capsulaUrlKind(sourceKey), image, author: clean400(body.author, 200), title: clean400(body.title, 300) },
     guion: norm.guion, requestedBy: clean400(body.requestedBy, 120) || 'Creador admira.studio' };
   const key = capsulaUrlJobKey(ref);
-  const put = await env.STOCK_BUCKET.put(key, JSON.stringify(job), { httpMetadata: { contentType: 'application/json' }, onlyIf: body.rehacer === true ? undefined : { etagDoesNotMatch: '*' } });
+  const put = await env.STOCK_BUCKET.put(key, JSON.stringify(job), { httpMetadata: { contentType: 'application/json' }, onlyIf: rehacer ? undefined : { etagDoesNotMatch: '*' } });
   if (!put) return json({ ok: true, reused: true, queued: false, ...(await capsulaUrlState(env, ref)) });
   return json({ ok: true, queued: true, ...(await capsulaUrlState(env, ref)) }, { status: 202 });
 }
@@ -5058,7 +5074,7 @@ async function capsulaUrlColaHandler(req, env) {
   const items = await gridReadStockIndex(env);
   const jobs = [];
   for (const o of listed.objects || []) {
-    try { const job = await (await env.STOCK_BUCKET.get(o.key)).json(); const existing = capsulaUrlExisting(items, job.ref); const status = capsulaUrlStatus(job, existing); if (status !== 'publicada') jobs.push({ ...job, status, existing }); } catch {}
+    try { const job = await (await env.STOCK_BUCKET.get(o.key)).json(); const existing = capsulaUrlExisting(items, job.ref, job.capsuleVersion || 1); const status = capsulaUrlStatus(job, existing); if (status !== 'publicada') jobs.push({ ...job, status, existing }); } catch {}
   }
   return json({ ok: true, jobs });
 }
@@ -5998,6 +6014,8 @@ export async function stockPublishHandler(req, env, ctx) {
     fp,
     ph,
     price,
+    // Cápsula desde URL: fuente + tramo del b-roll para el reproductor interactivo (capsula-url.mjs).
+    capsuleSource: type === 'video' ? sanitizeCapsuleSource(body.capsuleSource, typeof body.externalRef === 'string' ? body.externalRef.trim() : '') : null,
     // Catálogo al que pertenece la pieza (folleto de un cliente con fechas), o null.
     catalogo,
     // Null is intentional: replacing a binary cannot inherit the old master's copy layers.
@@ -6041,6 +6059,7 @@ export async function stockPublishHandler(req, env, ctx) {
   // Confirmar el archivo no basta: el player descubre las piezas en este índice. La escritura
   // incremental se espera y no recorre el bucket (un rebuild completo supera el waitUntil).
   const indexed = await persistPublishedStockIndex(env, meta, ctx);
+  const superseded = meta.capsuleSource ? await capsulaSupersede(env, meta) : [];
   if (!indexed.ok) return json({ ok: false, error: 'stock_index_update_failed', assetPublished: true, retryable: true, id, num: meta.num || null }, { status: 503 });
 
   // Notificación rica: motor / tipo / tamaño / URL / snippet del prompt + stats acumulados
@@ -6107,7 +6126,7 @@ export async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(meta.capsuleSource ? { capsuleSource: meta.capsuleSource, superseded } : {}), ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {

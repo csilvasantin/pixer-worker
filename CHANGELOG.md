@@ -2,6 +2,14 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.22.10.2026.r3.18:12 · WozniakGrokBot · GrokBotBox · Cápsulas desde URL v5.1: ficha interactiva y versiones
+
+- `/stock/publish` guarda `capsuleSource` {sourceUrl, credit, broll{start,end}, version} en el meta (y por tanto en el índice) para vídeos con `externalRef capsula-url:<hash>`. No usa el campo `sourceUrl` del body, que significa «descarga esto».
+- Versión nueva de una cápsula (mismo externalRef y orientación, `version` mayor): las anteriores se ocultan (`oculto:true`, `ocultoPor`, `ocultoMotivo`), no se borran. La respuesta incluye `superseded`.
+- `/capsula/url/encargar` con `rehacer:true` sube `capsuleVersion` y vuelve a encolar; estado y cola cuentan solo las piezas de esa versión o posteriores.
+- `tools/capsulas-sabiasque/`: el pipeline Python + ffmpeg de GrokBotBox (plantilla v5/v5.1, render_url, capsula_cola, publicador) versionado.
+- Pruebas 348/348. Rollback: `wrangler rollback 87a6a9e7-df1e-43ec-9168-cb53bb3d014b` (v.22.10.2026.r2.17:42).
+
 ## v.22.10.2026.r2.17:42 · WozniakGrokBot · GrokBotBox · Cápsula «¿Sabías que?» desde URL (Creador de admira.studio)
 
 - Nuevo `POST /capsula/url/borrador` {url, texto?}: resuelve acortadores y normaliza con `resolveImportUrl` + `importSourceKey` (#31), extrae título, autor, descripción, texto y miniatura (oEmbed para YouTube/TikTok/X, HTML para LinkedIn y artículos, mismas defensas SSRF que `/stock/site-capsule`) y pide a Gemini (`GEMINI_API_KEY` existente) un guion v5: objeto, subtítulo, cifra opcional, gancho, giro, remate, fuente e idea clave. No escribe nada.
