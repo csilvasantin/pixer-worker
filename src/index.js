@@ -142,7 +142,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.22.10.2026.r4.18:24';
+const WORKER_VERSION = 'v.22.10.2026.r5.22:09';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5071,7 +5071,9 @@ async function capsulaUrlEncargarHandler(req, env) {
   const image = typeof body.image === 'string' && /^https:\/\/[^\s"'<>]{1,600}$/.test(body.image) ? body.image : '';
   const job = { version: 1, capsuleVersion, ref, status: 'en-cola', createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', tags: [...CAPSULA_URL_TAGS, norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')],
     source: { url: String(body.url).trim().slice(0, 1000), resolvedUrl: safe.href, sourceKey, kind: capsulaUrlKind(sourceKey), image, author: clean400(body.author, 200), title: clean400(body.title, 300) },
-    guion: norm.guion, requestedBy: clean400(body.requestedBy, 120) || 'Creador admira.studio' };
+    guion: norm.guion, requestedBy: clean400(body.requestedBy, 120) || 'Creador admira.studio',
+    // v5.7 (22-oct-2026, Carlos): cartelas opcionales, DESACTIVADAS por defecto: la cápsula empieza y acaba en el cuerpo.
+    cartelas: { preroll: body.preroll === true, postroll: body.postroll === true } };
   const key = capsulaUrlJobKey(ref);
   const put = await env.STOCK_BUCKET.put(key, JSON.stringify(job), { httpMetadata: { contentType: 'application/json' }, onlyIf: rehacer ? undefined : { etagDoesNotMatch: '*' } });
   if (!put) return json({ ok: true, reused: true, queued: false, ...(await capsulaUrlState(env, ref)) });

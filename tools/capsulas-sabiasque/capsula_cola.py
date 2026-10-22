@@ -23,17 +23,19 @@ def guion_v5(job):
     g = job['guion']; s = job['source']; tema = g.get('tema') or 'tecnología'
     hoy = datetime.date.today().isoformat(); slug = job['ref'].split(':')[1]
     cifra = g.get('cifra') or {}
+    cart = {'preroll': bool((job.get('cartelas') or {}).get('preroll')), 'postroll': bool((job.get('cartelas') or {}).get('postroll'))}  # v5.7: apagadas por defecto
+    pre = 2 if cart['preroll'] else 0; tot = pre + 12 + (4 if cart['postroll'] else 0)
     credito = 'Vídeo: ' + (s.get('author') or {'linkedin': 'LinkedIn', 'youtube': 'YouTube', 'tiktok': 'TikTok', 'x': 'X'}.get(s.get('kind'), s.get('kind') or 'fuente'))
     return {"fecha": hoy, "plantilla": "plantilla_guion_v5", "saga": {"tema": tema, "color": COLORES.get(tema, '#1F6FEB')},
         "tipo": f"url-{slug}", "objeto": g['objeto'], "fuente": g['fuente'],
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
         "idea_clave": g.get('idea', ''),
-        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": 18, "plantilla": "v5.6", "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
+        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": tot, "plantilla": "v5.7", "cartelas": cart, "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
             "preroll": {"t": [0, 2], "logo": "admira_oficial", "titulo": "¿Sabías que?", "tipologia": tema.capitalize(), "texto": f"¿Sabías que? {tema.capitalize()}", "subtitulo": g.get('subtitulo') or ''},
             "gancho": {"t": [2, 5.05], "linea_t": [2.65, 4.95], "linea": g['gancho'],
                        "cifra": ({"desde": 0, "hasta": cifra['hasta'], "unidad": cifra.get('unidad', ''), "easing": "easeOutExpo"} if cifra.get('hasta') else None)},
-            "giro": {"t": [5.05, 10.73], "linea_t": [5.05, 10.73], "linea": g['giro'], "broll": {"fichero": "broll/", "t_capsula": [2, 14], "credito": credito}},
+            "giro": {"t": [5.05, 10.73], "linea_t": [5.05, 10.73], "linea": g['giro'], "broll": {"fichero": "broll/", "t_capsula": [pre, pre + 12], "credito": credito}},
             "remate": {"t": [10.73, 14], "linea_t": [10.95, 14], "linea": g['remate'], "fuente": {"texto": g['fuente'], "url": s['url'], "t": [2.65, 14]}},
             "barra_progreso": {"t": [0, 18], "posicion": "arriba y abajo (espejo)", "lectura": None},
             "audio": {"tipo": "silencio", "t": [0, 15]}, "postroll": {"t": [14, 18], "logo": "admira_oficial", "claim": "Connecting things to Internet", "fijo": True},
@@ -119,7 +121,7 @@ def publicar(job, out, real):
         p = pub.payload(g, os.path.join(out, nombre), orient, ref)
         p['prompt'] = (f"{g['locucion']['gancho']} · {g['locucion']['cifra']} · {g['locucion']['idea']} · Fuente: {job['source']['url']}")[:1000]
         br = g['capsulas'][0]['giro']['broll']
-        p['capsuleSource'] = {'sourceUrl': job['source']['url'], 'credit': br['credito'], 'broll': {'start': br['t_capsula'][0], 'end': br['t_capsula'][1]}, 'version': job.get('capsuleVersion') or 1}
+        p['capsuleSource'] = {'sourceUrl': job['source']['url'], 'credit': br['credito'], 'broll': {'start': br['t_capsula'][0], 'end': br['t_capsula'][1]}, 'version': job.get('capsuleVersion') or 1, **(g['capsulas'][0].get('cartelas') or {})}
         p['poster'] = poster(os.path.join(out, nombre.replace('.mp4', '-t5s.png')))
         if not real: print(f'  [ensayo] {orient}:', json.dumps({k: v for k, v in p.items() if k != 'base64'}, ensure_ascii=False)); continue
         req = urllib.request.Request(f"{pub.API}/stock/publish", data=json.dumps(p).encode(), method='POST',

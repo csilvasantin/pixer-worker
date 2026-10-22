@@ -8,7 +8,13 @@ from plantilla_v5 import PRE, CIERRE_S, T_TOTAL_V51, barra_progreso, secuencia, 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 G=json.load(open('guion.json',encoding='utf-8')); C=G['capsulas'][0]
-FPS=25; T=T_TOTAL_V51; POST=CIERRE_S   # v5.1: 2 + 12 + 4 (cierre fijo)
+FPS=25
+# v5.7: cartelas opcionales. Guiones sin «cartelas» (anteriores a v5.7) conservan las dos.
+_CT=C.get('cartelas') or {'preroll':True,'postroll':True}
+PRE_ON=bool(_CT.get('preroll')); POST_ON=bool(_CT.get('postroll'))
+CUERPO=12.0; OFF=0 if PRE_ON else 2   # el cuerpo vive en la línea de tiempo «clásica» 2–14 s
+POST=CIERRE_S if POST_ON else 0
+T=int((2 if PRE_ON else 0)+CUERPO+(CIERRE_S if POST_ON else 0))
 # v5.2: la cartela inicial usa la foto/miniatura de la fuente (fuente.jpg) de fondo, difuminada y oscurecida.
 FOTO=next((p for p in ('fuente.jpg','fuente.png','fuente.webp') if os.path.exists(p)),None)
 RED=(31,111,235); INK=(28,28,30); GREY=(95,95,100)
@@ -275,13 +281,13 @@ def explain(t,W,H):
         y=headline(L,d,t,mx,int(H*0.20),tw,V,u,INK,3); lines(L,d,t,mx,max(y+int(30*u),int(H*(0.60 if right<W else 0.74))),tw if right<W else W-2*mx,u,(INK,RED,INK),56 if right<W else 60)
     im.alpha_composite(L); return im
 def frame(t,W,H):
-    u=min(W,H)/1080; V=H>W
-    if t<2: im=brand_card(0,t,W,H,V,u)
-    elif t>=T-POST: im=brand_card(T-POST,t,W,H,V,u,out=True)
-    else: im=explain(t,W,H)
+    u=min(W,H)/1080; V=H>W; tl=t+OFF   # tl = tiempo en la línea clásica (cartela 0–2, cuerpo 2–14, cierre 14–18)
+    if PRE_ON and t<2: im=brand_card(0,t,W,H,V,u)
+    elif POST_ON and t>=T-POST: im=brand_card(T-POST,t,W,H,V,u,out=True)
+    else: im=explain(min(tl,13.999),W,H)
     barra_progreso(im,min(t,T-POST) if t<T-POST else T,T,RED,u,abajo=True)  # en el cierre fijo, barra llena y quieta
     return im
-STILLS=(1,5,7,10,15,17.5)
+STILLS=tuple(x for x in (1,5,7,10,15,17.5) if x<T)
 def render(W,H,out):
     p=subprocess.Popen(['ffmpeg','-y','-loglevel','error','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-',
        '-f','lavfi','-i',f'anullsrc=r=48000:cl=stereo:d={T}',

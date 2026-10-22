@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.22.10.2026.r5.22:09 · WozniakGrokBot · GrokBotBox · Cápsulas v5.7: cartelas opcionales (apagadas por defecto)
+
+- `POST /capsula/url/encargar`: `preroll`/`postroll` (booleanos, `false` por defecto) → `job.cartelas`. `capsuleSource` guarda `preroll`/`postroll`.
+- `tools/capsulas-sabiasque`: la cola pasa las cartelas al guion; `render_url.py` ajusta la duración (12 s sin cartelas) y el tramo interactivo cubre el cuerpo (toda la cápsula si no hay cartelas). Reglas 20–23 en el README.
+- Pruebas 350/350.
+
 ## tools/capsulas-sabiasque v5.6 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Lados invertidos y sin icono
 
 - Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas 17–19 en el README.
