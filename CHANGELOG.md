@@ -2,6 +2,14 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## tools/capsulas-sabiasque v5.2 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · B-roll real y foto en la cartela inicial
+
+- Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy).
+- Causa del b-roll ausente en #1802/#1803 (Short MgKUv4ZV1Mc): yt-dlp 2026.08.19 recibió `HTTP 429` y «Sign in to confirm you're not a bot»; `broll()` cayó en la miniatura con zoom sin decirlo claramente.
+- `capsula_cola.py`: yt-dlp actualizado (2026.10.21) y reintentos con varios clientes (`por defecto`, `android_vr`, `tv`, `ios`, `web_safari`, `mweb`, `web_embedded`), sin cookies; cada intento y el resultado (`VÍDEO` o `FALLBACK miniatura`) van a cola.log y a `broll/origen.json`. Siempre descarga la foto de la fuente (`fuente.jpg`, og:image o miniatura por yt-dlp).
+- `render_url.py` v5.2: la cartela inicial usa esa foto difuminada y oscurecida (zoom lento) de fondo, «¿Sabías que?» encima del logo (en blanco) y la tipología debajo; sin foto, el fondo de marca de siempre. Vale para todas las tipologías.
+- Rollback: revertir este commit en tools/ y copiar los dos ficheros a /workspace/sabiasque.
+
 ## v.22.10.2026.r4.18:24 · WozniakGrokBot · GrokBotBox · Borrador desde URL en modo «campaña» (Creador de campañas)
 
 - `POST /capsula/url/borrador` con `modo:'campana'`: misma resolución/extracción (y `texto` manual si la página no se lee), Gemini redacta `campana` {nombre, titular ≤42, cta ≤60, etiqueta, idea} y devuelve `imageProxy` (`/image/proxy?url=<og:image>`, con CORS) para usarla como visual en el lienzo. No escribe nada.

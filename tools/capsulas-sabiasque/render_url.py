@@ -9,6 +9,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 G=json.load(open('guion.json',encoding='utf-8')); C=G['capsulas'][0]
 FPS=25; T=T_TOTAL_V51; POST=CIERRE_S   # v5.1: 2 + 12 + 4 (cierre fijo)
+# v5.2: la cartela inicial usa la foto/miniatura de la fuente (fuente.jpg) de fondo, difuminada y oscurecida.
+FOTO=next((p for p in ('fuente.jpg','fuente.png','fuente.webp') if os.path.exists(p)),None)
 RED=(31,111,235); INK=(28,28,30); GREY=(95,95,100)
 ANTON='/usr/share/fonts/truetype/sand-box/google/Antonio/Antonio-VariableFont_wght.ttf'
 OSW='/usr/share/fonts/truetype/sand-box/google/Oswald/Oswald-VariableFont_wght.ttf'
@@ -57,8 +59,24 @@ def background(t,W,H,mode):
     return Image.fromarray(np.clip(img,0,255).astype(np.uint8)).resize((W,H),Image.BILINEAR).convert('RGBA')
 def txt(layer,xy,s,font,col,a):
     if a>0: ImageDraw.Draw(layer).text(xy,s,font=font,fill=col+(int(255*a),))
-def logo_at(im,cx,cy,lw,a,scale=1):
+_ff={}
+def foto_fondo(W,H,p=0):
+    if not FOTO: return None
+    if (W,H) not in _ff:
+        from PIL import ImageFilter, ImageEnhance
+        f=Image.open(FOTO).convert('RGB'); s=max(W/f.width,H/f.height)*1.12
+        f=f.resize((int(f.width*s)+1,int(f.height*s)+1),Image.LANCZOS)
+        f=f.filter(ImageFilter.GaussianBlur(radius=int(min(W,H)*0.018))); f=ImageEnhance.Brightness(f).enhance(0.42)
+        v=Image.new('L',f.size,0); ImageDraw.Draw(v).ellipse([-f.width*0.2,-f.height*0.2,f.width*1.2,f.height*1.2],fill=255)
+        from PIL import ImageFilter as IF; v=v.filter(IF.GaussianBlur(min(W,H)*0.15))
+        f=Image.composite(f,Image.new('RGB',f.size,(0,0,0)),v); _ff[(W,H)]=f
+    f=_ff[(W,H)]; p=max(0,min(1,p)); z=1+0.06*p; cw,ch=int(W*1.0),int(H*1.0)
+    big=f.resize((int(f.width*z),int(f.height*z)),Image.BILINEAR) if p>0 else f
+    x0=(big.width-cw)//2; y0=(big.height-ch)//2
+    return big.crop((x0,y0,x0+cw,y0+ch)).convert('RGBA')
+def logo_at(im,cx,cy,lw,a,scale=1,claro=False):
     lw=max(2,int(lw*scale)); lg=LOGO.resize((lw,int(LOGO.height*lw/LOGO.width)),Image.LANCZOS)
+    if claro: w=Image.new('RGBA',lg.size,(255,255,255,0)); w.putalpha(lg.split()[3]); lg=w
     if a<1: lg.putalpha(lg.split()[3].point(lambda p:int(p*a)))
     im.alpha_composite(lg,(int(cx-lw/2),int(cy-lg.height/2))); return lg.height
 def brand_card(t0,t,W,H,V,u,out=False):
@@ -71,18 +89,20 @@ def brand_card(t0,t,W,H,V,u,out=False):
             txt(L,((W-d.textlength(s,font=f))/2,y0+i*72*u),s,f,INK,1)
         im.alpha_composite(L); return im
     # v5.1: «¿Sabías que?» ENCIMA del logo; la tipología (categoría de la cápsula) DEBAJO.
-    im=background(t,W,H,'brand'); d=ImageDraw.Draw(im); lt=t-t0
+    # v5.2: con foto de la fuente, fondo = foto difuminada y oscurecida (zoom lento), logo y textos claros.
+    lt=t-t0; dark=foto_fondo(W,H) is not None
+    im=foto_fondo(W,H,lt/2) if dark else background(t,W,H,'brand'); d=ImageDraw.Draw(im)
     a=eo(lt/0.6); sc=0.7+0.3*eob(lt/0.8)+0.015*math.sin(t*2.5)
-    lh=logo_at(im,W/2,H*0.45,W*(0.56 if V else 0.34),a,sc)
+    lh=logo_at(im,W/2,H*0.45,W*(0.56 if V else 0.34),a,sc,claro=dark)
     L=Image.new('RGBA',(W,H))
     f=F(OSW,int((104 if V else 92)*u),700); ft=C['preroll'].get('titulo') or '¿Sabías que?'
     a1=eo((lt-0.15)/0.5); ya=H*0.45-lh/2-int((150 if V else 130)*u)+(1-a1)*(-30*u)
-    txt(L,((W-d.textlength(ft,font=f))/2,ya),ft,f,RED,a1)
+    txt(L,((W-d.textlength(ft,font=f))/2,ya),ft,f,(120,175,255) if dark else RED,a1)
     a2=eo((lt-0.35)/0.5); dy=(1-a2)*40*u; y0=H*0.45+lh/2+44*u+dy
     fk=F(OSW,int((84 if V else 76)*u),700); tip=C['preroll'].get('tipologia') or ''
-    if tip: txt(L,((W-d.textlength(tip,font=fk))/2,y0),tip,fk,INK,a2)
+    if tip: txt(L,((W-d.textlength(tip,font=fk))/2,y0),tip,fk,(255,255,255) if dark else INK,a2)
     f2=F(INTER,int(42*u),600); s2=C['preroll'].get('subtitulo') or ''; a3=eo((lt-0.6)/0.5)
-    if s2: txt(L,((W-d.textlength(s2,font=f2))/2,y0+(110 if tip else 0)*u+(1-a3)*30*u),s2,f2,GREY,a3)
+    if s2: txt(L,((W-d.textlength(s2,font=f2))/2,y0+(110 if tip else 0)*u+(1-a3)*30*u),s2,f2,(220,220,225) if dark else GREY,a3)
     im.alpha_composite(L)
     return im
 def panel(im,t,a,bx,by,bw,bh,u):
