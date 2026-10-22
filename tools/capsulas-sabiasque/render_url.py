@@ -95,6 +95,7 @@ def brand_card(t0,t,W,H,V,u,out=False):
         im.alpha_composite(L); return im
     # v5.1: «¿Sabías que?» ENCIMA del logo; la tipología (categoría de la cápsula) DEBAJO.
     # v5.2: con foto de la fuente, fondo = foto difuminada y oscurecida (zoom lento), logo y textos claros.
+    if not V and vertical_src(): return bandas_card(t-t0,W,H,u)
     lt=t-t0; dark=foto_fondo(W,H) is not None
     im=foto_fondo(W,H,lt/2) if dark else background(t,W,H,'brand'); d=ImageDraw.Draw(im)
     a=eo(lt/0.6); sc=0.7+0.3*eob(lt/0.8)+0.015*math.sin(t*2.5)
@@ -170,7 +171,7 @@ def play_hint(im,x1,y1,u,a,t):
     G_=G_.filter(ImageFilter.GaussianBlur(r*0.45)); im.alpha_composite(G_,(cx-g//2,cy-g//2))
     D=ImageDraw.Draw(im); D.ellipse([cx-r,cy-r,cx+r,cy+r],fill=(15,15,20,int(110*a)),outline=(255,255,255,int(220*a)),width=max(2,int(2.5*u)))
     k=r*0.42; D.polygon([(cx-k*0.75,cy-k),(cx-k*0.75,cy+k),(cx+k*1.05,cy)],fill=(255,255,255,int(235*a)))
-def headline(L,d,t,x,y,tw,V,u,col,maxl):
+def headline(L,d,t,x,y,tw,V,u,col,maxl,fsz=None):
     cf=C['gancho'].get('cifra') or {}
     if cf.get('hasta'):
         p=eo((t-2)/2.4); val=cf.get('desde',0)+(cf['hasta']-cf.get('desde',0))*p
@@ -179,20 +180,63 @@ def headline(L,d,t,x,y,tw,V,u,col,maxl):
         txt(L,(x,y),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,col,eo((t-2)/0.3))
         if cf.get('unidad'): txt(L,(x+int(8*u),y+int(260*u)),cf['unidad'],F(OSW,int(64*u),700),RED if col==INK else (120,175,255),eo((t-2.3)/0.5))
         return y+int(350*u)
-    fh=F(OSW,int((84 if V else 80)*u),700); ls=wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw)[:maxl]
-    for i,s_ in enumerate(ls): txt(L,(x,y+i*int(96*u)),s_,fh,col,eo((t-2-i*0.12)/0.4))
-    return y+len(ls)*int(96*u)
+    fh=F(OSW,int((fsz or (84 if V else 80))*u),700); ls=wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw)[:maxl]
+    lh_=int((fsz or 80)*1.2*u)
+    for i,s_ in enumerate(ls): txt(L,(x,y+i*lh_),s_,fh,col,eo((t-2-i*0.12)/0.4))
+    return y+len(ls)*lh_
 def lines(L,d,t,x,y,tw,u,cols3,size):
     items=[(C[k]['linea'],*C[k]['linea_t']) for k in ('gancho','giro','remate')]
     cols={items[0][0]:cols3[0],items[1][0]:cols3[1],items[2][0]:cols3[2]}; fl=F(INTER,int(size*u),700)
     for s_,al,dx in secuencia(t,items):
         for i,l in enumerate(wrap(d,s_,fl,tw)): txt(L,(x-dx*u,y+i*int(size*1.28*u)),l,fl,cols[s_],al)
+# v5.5 (22-oct-2026, Carlos · todas las tipologías): fuente VERTICAL en 16x9 → la imagen va centrada en su
+# proporción y las bandas laterales (desenfoque muy apagado de la propia imagen, sin cajas) llevan el logo
+# arriba a la izquierda y «¿Sabías que?» + tipología a la derecha. En la cartela, la imagen central pasa de
+# borrosa a nítida mientras entran los textos. El cuerpo mantiene las mismas bandas (coherencia): vídeo en el
+# centro, titular y gancho/giro/remate en la banda izquierda bajo el logo, «¿Sabías que?» + tipología a la derecha.
+REVEAL=1.6
+_bd={}
+def bandas_bg(W,H):
+    if (W,H) not in _bd:
+        from PIL import ImageFilter, ImageEnhance
+        f=cover(broll(0).convert('RGB'),W,H).filter(ImageFilter.GaussianBlur(int(H*0.05)))
+        _bd[(W,H)]=ImageEnhance.Brightness(f).enhance(0.22).convert('RGBA')
+    return _bd[(W,H)].copy()
+def centro(W,H):
+    fr=broll(0); cw=int(H*fr.width/fr.height); return (W-cw)//2,cw
+def lado_derecho(L,d,W,H,u,lt,x1):
+    ft=C['preroll'].get('titulo') or '¿Sabías que?'; tip=C['preroll'].get('tipologia') or ''
+    cx=x1+(W-x1)/2; f=F(OSW,int(84*u),700); fk=F(OSW,int(64*u),700)
+    a1=eo((lt-0.2)/0.6); a2=eo((lt-0.45)/0.6)
+    txt(L,(cx-d.textlength(ft,font=f)/2+(1-a1)*60*u,H*0.40),ft,f,(120,175,255),a1)
+    if tip: txt(L,(cx-d.textlength(tip,font=fk)/2+(1-a2)*60*u,H*0.40+int(112*u)),tip,fk,(255,255,255),a2)
+def logo_izq(im,u,a,dx=0):
+    lw=int(240*u); logo_at(im,int(80*u)+lw/2-dx,int(95*u),lw,a,claro=True)
+def bandas_card(lt,W,H,u):
+    from PIL import ImageFilter
+    im=bandas_bg(W,H); x0,cw=centro(W,H); fr=broll(0).convert('RGB').resize((cw,H),Image.LANCZOS)
+    q=max(0,min(1,lt/REVEAL)); r=40*u*(1-q*q*(3-2*q))   # smoothstep: borroso → nítido a lo largo de 1,6 s
+    if r>0.4: fr=fr.filter(ImageFilter.GaussianBlur(r))
+    im.alpha_composite(fr.convert('RGBA'),(x0,0)); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
+    a=eo((lt-0.1)/0.6); logo_izq(im,u,a,(1-a)*60*u); lado_derecho(L,d,W,H,u,lt,x0+cw)
+    im.alpha_composite(L); return im
+def explain_bandas(t,W,H,u):
+    im=bandas_bg(W,H); x0,cw=centro(W,H); im.alpha_composite(bfr(t).convert('RGBA').resize((cw,H),Image.LANCZOS),(x0,0))
+    play_hint(im,x0+cw-int(24*u),int(24*u),u,1,t); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H)); mx=int(80*u)
+    logo_izq(im,u,1); lado_derecho(L,d,W,H,u,9,x0+cw); tw=x0-2*mx
+    y=headline(L,d,t,mx,int(H*0.24),tw,False,u,(255,255,255),4,fsz=60)
+    lines(L,d,t,mx,max(y+int(40*u),int(H*0.56)),tw,u,((235,235,240),(140,190,255),(235,235,240)),42)
+    im.alpha_composite(L); return im
 def explain(t,W,H):
     V=H>W; u=min(W,H)/1080; mx=int(80*u); br=C['giro'].get('broll') or {}; fsrc=C['remate']['fuente']
     a=eo((t-E0)/0.4); vs=vertical_src() if broll_n() else False
+    if not V and vs: return explain_bandas(t,W,H,u)
     if V and vs:
         # 9x16 + fuente vertical: vídeo a pantalla completa, franjas legibles.
-        im=cover(bfr(t),W,H).convert('RGBA'); sh=Image.new('RGBA',(W,H),(8,8,12,255))
+        im=cover(bfr(t),W,H).convert('RGBA')
+        if t-E0<0.7:
+            from PIL import ImageFilter; im=im.filter(ImageFilter.GaussianBlur(24*u*(1-eo((t-E0)/0.7))))
+        sh=Image.new('RGBA',(W,H),(8,8,12,255))
         m=Image.fromarray(np.maximum(np.array(grad(W,H,0,int(H*0.20),220,0)),np.maximum(np.array(grad(W,H,int(H*0.46),int(H*0.60),0,225)),np.array(grad(W,H,int(H*0.60),H,225,235))))); im.alpha_composite(Image.composite(sh,Image.new('RGBA',(W,H)),m))
         d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
         txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)

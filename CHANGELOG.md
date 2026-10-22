@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## tools/capsulas-sabiasque v5.5 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Bandas laterales para fuente vertical
+
+- Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas 13–16 en el README.
+- `render_url.py`: 16x9 con fuente vertical → imagen centrada, bandas de desenfoque apagado, logo arriba a la izquierda, «¿Sabías que?» + tipología a la derecha; revelado borroso → nítido en la cartela y la misma composición en el cuerpo (textos en la banda izquierda). 9x16: revelado breve del vídeo al entrar al cuerpo.
+- Rollback: revertir este PR (vuelve a v5.4).
+
 ## tools/capsulas-sabiasque v5.4 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Menos es más
 
 - Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy).
