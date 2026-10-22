@@ -1,7 +1,7 @@
 {
-  "version": "v.20.10.2026.r1.23:05",
-  "agent": "NeoMacStudio",
-  "machine": "MacStudio",
-  "signature": "NeoMacStudio · MacStudio",
-  "deployer": "NeoMacStudio"
+  "version": "v.22.10.2026.r1.15:45",
+  "agent": "GrokBot",
+  "machine": "Box",
+  "signature": "GrokBot · Box",
+  "deployer": "GrokBot"
 }
