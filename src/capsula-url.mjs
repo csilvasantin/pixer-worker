@@ -94,7 +94,7 @@ export function sanitizeCapsuleSource(raw, externalRef) {
   const start = n(raw.broll?.start), end = n(raw.broll?.end);
   const broll = Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start && end <= 120 ? { start, end } : null;
   const version = Math.max(1, Math.min(99, parseInt(raw.version, 10) || 1));
-  return { sourceUrl: url.href.slice(0, 1000), credit: String(raw.credit || '').replace(/\s+/g, ' ').trim().slice(0, 120), broll, version };
+  return { sourceUrl: url.href.slice(0, 1000), credit: String(raw.credit || '').replace(/\s+/g, ' ').trim().slice(0, 120), broll, version, preroll: raw.preroll === true, postroll: raw.postroll === true };
 }
 export const capsuleVersionOf = item => Math.max(1, parseInt(item?.capsuleSource?.version, 10) || 1);
 // Piezas anteriores de la misma cápsula y orientación que una versión nueva sustituye (se ocultan, no se borran).

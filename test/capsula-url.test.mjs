@@ -75,7 +75,7 @@ import { sanitizeCapsuleSource, capsulaSuperseded } from '../src/capsula-url.mjs
 test('v2: capsuleSource guarda fuente y tramo del b-roll, y una versión nueva oculta la anterior por orientación', () => {
   const ref = 'capsula-url:f2382b48829e119e';
   const cs = sanitizeCapsuleSource({ sourceUrl: 'https://lnkd.in/p/e9zXSPkK', credit: 'Vídeo: Alber Adilov', broll: { start: 5.05, end: 9.05 }, version: 2 }, ref);
-  assert.deepEqual(cs, { sourceUrl: 'https://lnkd.in/p/e9zXSPkK', credit: 'Vídeo: Alber Adilov', broll: { start: 5.05, end: 9.05 }, version: 2 });
+  assert.deepEqual(cs, { sourceUrl: 'https://lnkd.in/p/e9zXSPkK', credit: 'Vídeo: Alber Adilov', broll: { start: 5.05, end: 9.05 }, version: 2, preroll: false, postroll: false });
   assert.equal(sanitizeCapsuleSource({ sourceUrl: 'javascript:alert(1)' }, ref), null);
   assert.equal(sanitizeCapsuleSource({ sourceUrl: 'https://x.com/a' }, 'otra-ref'), null);
   assert.equal(sanitizeCapsuleSource({ sourceUrl: 'https://x.com/a', broll: { start: 9, end: 5 } }, ref).broll, null);
@@ -112,4 +112,11 @@ test('modo campaña: el mismo borrador rellena marca, titular, CTA e imagen por 
   assert.equal(d.guion, undefined); assert.equal(e.STOCK_BUCKET.m.size, 0);
   assert.deepEqual(normalizeCampanaBorrador({}).errors, ['missing_nombre', 'missing_titular', 'missing_cta']);
   assert.match(campanaUrlPrompt({ kind: 'x', url: 'u', title: '', author: '', description: '', text: '' }), /pantallas/);
+});
+
+test('v5.7: cartelas opcionales, apagadas por defecto, en el encargo y en capsuleSource', async () => {
+  const ref = 'capsula-url:f2382b48829e119e';
+  assert.deepEqual([sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', broll: { start: 0, end: 12 } }, ref).preroll, sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', postroll: true }, ref).postroll], [false, true]);
+  const src = (await import('node:fs')).readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  assert.match(src, /cartelas: \{ preroll: body\.preroll === true, postroll: body\.postroll === true \}/);
 });

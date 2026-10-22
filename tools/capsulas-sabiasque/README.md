@@ -45,3 +45,10 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 17. **Lados invertidos en 16x9 con fuente vertical** (cartela y cuerpo): banda IZQUIERDA = logo de Admira arriba y debajo «¿Sabías que?» + tipología; banda DERECHA = titular y gancho/giro/remate. El vídeo sigue centrado con el revelado borroso → nítido. (Sustituye el reparto de las reglas 13 y 15.)
 18. **Sin icono de reproducir** en ningún formato (sustituye la regla 10). La interactividad es sólo del modal del Stock: cursor de mano y clic en la imagen dentro de 2–14 s abre la fuente; el modal ya no pinta la pastilla «Ver el original» (admira-studio, parche capsula-fuente-v56).
 19. El crédito mínimo gris del cierre («Vídeo original: …») se mantiene como en v5.4.
+
+## v5.7 · cartelas opcionales (Carlos, 22-oct-2026 · todas las tipologías)
+
+20. **Preroll y postroll son opcionales y van DESACTIVADOS por defecto.** `POST /capsula/url/encargar` acepta `preroll` y `postroll` (booleanos, por defecto `false`); el encargo los guarda en `cartelas`, la cola los pasa al guion y `capsuleSource` los registra. En el Creador (`/creador/?capsula=new`) hay dos interruptores «Preroll» y «Postroll», apagados.
+21. **Duración:** cuerpo 12 s + 2 s si hay preroll + 4 s si hay postroll (12, 14, 16 o 18 s). El vídeo de la fuente va en bucle si es más corto. El tramo interactivo (`capsuleSource.broll`) es el cuerpo: sin cartelas, toda la cápsula (0–12 s).
+22. **Sin cartela** la marca sigue en el cuerpo: en 16x9 con fuente vertical, logo y «¿Sabías que?» + tipología en la banda izquierda; en 9x16, «¿Sabías que?» y logo en la franja superior. Sin postroll no hay crédito final (el crédito queda en `capsuleSource.credit` para el modal).
+23. Guiones anteriores a v5.7 (sin `cartelas`) se renderizan con las dos cartelas, como antes.
