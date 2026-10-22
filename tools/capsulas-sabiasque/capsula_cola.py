@@ -9,7 +9,7 @@ generalización de tecnologia-taalas/v2/render_v2.py) + payload() de publicar_sa
 Dedup: externalRef = ref del encargo; se consulta el índice del Stock por orientación antes de publicar,
 y el worker solo deja un encargo por origen. B-roll: vídeo de la fuente con yt-dlp (4 s del centro) o,
 si no es vídeo, su miniatura con zoom lento."""
-import json, os, shutil, subprocess, sys, urllib.request, datetime
+import glob, json, os, shutil, subprocess, sys, urllib.request, datetime
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
@@ -74,6 +74,12 @@ def broll(job, out):
     if s.get('kind') in ('linkedin', 'youtube', 'tiktok', 'x', 'vimeo', 'instagram'):
         mp4 = os.path.join(out, 'fuente.mp4')
         try:
+            if not os.path.exists(mp4):
+                # v5.3: reutiliza el vídeo ya bajado en una versión anterior del mismo encargo (YouTube corta a ratos).
+                base = os.path.basename(out).split('-v')[0]; raiz = os.path.dirname(out)
+                prev = sorted(glob.glob(os.path.join(raiz, base + '*', 'fuente.mp4')), key=os.path.getmtime, reverse=True)
+                prev = [x for x in prev if os.path.getsize(x) > 50000 and os.path.dirname(x) != out]
+                if prev: shutil.copy(prev[0], mp4); print(f'  b-roll: reutilizo el vídeo de la fuente ya descargado ({os.path.relpath(prev[0], raiz)})')
             cli = 'previo' if os.path.exists(mp4) else bajar_video(s['url'], mp4)
             if cli:
                 dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp4], text=True).strip() or 8)

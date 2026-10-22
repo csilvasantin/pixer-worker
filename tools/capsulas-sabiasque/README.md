@@ -24,5 +24,5 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 5. **Fuente horizontal:** la composición de siempre (caja a la derecha en 16x9, caja ancha en medio en 9x16), pero durante toda la explicación.
 6. **Cierre (14–18 s):** fijo, por corte, sin animación (v5.1).
 7. **Stock:** `capsuleSource.broll` = `{start:2,end:14}`: pulsar el vídeo en cualquier momento de la explicación abre la fuente.
-8. **B-roll real:** yt-dlp con varios clientes (por defecto, android_vr, tv, ios, web_safari, mweb, web_embedded) sin cookies; bandas negras recortadas con cropdetect; si todo falla, «FALLBACK miniatura» en cola.log y `broll/origen.json`.
+8. **B-roll real:** si ya se bajó el vídeo en una versión anterior del mismo encargo se reutiliza; si no, yt-dlp con varios clientes (por defecto, android_vr, tv, ios, web_safari, mweb, web_embedded) sin cookies; bandas negras recortadas con cropdetect; si todo falla, «FALLBACK miniatura» en cola.log y `broll/origen.json`.
 9. **Versiones:** `rehacer:true` en `/capsula/url/encargar` sube `capsuleVersion`; al publicar, las piezas anteriores quedan `oculto:true` (no se borran). Para rehacer a mano, parar antes `cola_bucle.sh` y reanudarlo después para no publicar dos veces.
