@@ -164,6 +164,7 @@ def grad(W,H,y0,y1,a0,a1):
 # v5.4: sin pastilla ni texto. Pista sutil dentro del vídeo: icono pequeño de reproducir con un leve
 # resplandor que respira, en la esquina superior derecha del vídeo. La interactividad la da el modal del Stock.
 def play_hint(im,x1,y1,u,a,t):
+    return  # v5.6: sin icono; la interactividad la da el modal (cursor de mano)
     if a<=0: return
     from PIL import ImageFilter
     r=int(26*u); g=int(r*2.6); cx,cy=x1-g//2,y1+g//2; pulse=0.55+0.25*(0.5+0.5*math.sin(t*2.4))
@@ -204,12 +205,13 @@ def bandas_bg(W,H):
     return _bd[(W,H)].copy()
 def centro(W,H):
     fr=broll(0); cw=int(H*fr.width/fr.height); return (W-cw)//2,cw
-def lado_derecho(L,d,W,H,u,lt,x1):
+# v5.6: banda IZQUIERDA = logo arriba + «¿Sabías que?» + tipología; banda DERECHA = explicación.
+def lado_marca(L,d,W,H,u,lt,x0):
     ft=C['preroll'].get('titulo') or '¿Sabías que?'; tip=C['preroll'].get('tipologia') or ''
-    cx=x1+(W-x1)/2; f=F(OSW,int(84*u),700); fk=F(OSW,int(64*u),700)
+    cx=x0/2; f=F(OSW,int(84*u),700); fk=F(OSW,int(64*u),700)
     a1=eo((lt-0.2)/0.6); a2=eo((lt-0.45)/0.6)
-    txt(L,(cx-d.textlength(ft,font=f)/2+(1-a1)*60*u,H*0.40),ft,f,(120,175,255),a1)
-    if tip: txt(L,(cx-d.textlength(tip,font=fk)/2+(1-a2)*60*u,H*0.40+int(112*u)),tip,fk,(255,255,255),a2)
+    txt(L,(cx-d.textlength(ft,font=f)/2-(1-a1)*60*u,H*0.40),ft,f,(120,175,255),a1)
+    if tip: txt(L,(cx-d.textlength(tip,font=fk)/2-(1-a2)*60*u,H*0.40+int(112*u)),tip,fk,(255,255,255),a2)
 def logo_izq(im,u,a,dx=0):
     lw=int(240*u); logo_at(im,int(80*u)+lw/2-dx,int(95*u),lw,a,claro=True)
 def bandas_card(lt,W,H,u):
@@ -218,14 +220,14 @@ def bandas_card(lt,W,H,u):
     q=max(0,min(1,lt/REVEAL)); r=40*u*(1-q*q*(3-2*q))   # smoothstep: borroso → nítido a lo largo de 1,6 s
     if r>0.4: fr=fr.filter(ImageFilter.GaussianBlur(r))
     im.alpha_composite(fr.convert('RGBA'),(x0,0)); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
-    a=eo((lt-0.1)/0.6); logo_izq(im,u,a,(1-a)*60*u); lado_derecho(L,d,W,H,u,lt,x0+cw)
+    a=eo((lt-0.1)/0.6); logo_izq(im,u,a,(1-a)*60*u); lado_marca(L,d,W,H,u,lt,x0)
     im.alpha_composite(L); return im
 def explain_bandas(t,W,H,u):
     im=bandas_bg(W,H); x0,cw=centro(W,H); im.alpha_composite(bfr(t).convert('RGBA').resize((cw,H),Image.LANCZOS),(x0,0))
-    play_hint(im,x0+cw-int(24*u),int(24*u),u,1,t); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H)); mx=int(80*u)
-    logo_izq(im,u,1); lado_derecho(L,d,W,H,u,9,x0+cw); tw=x0-2*mx
-    y=headline(L,d,t,mx,int(H*0.24),tw,False,u,(255,255,255),4,fsz=60)
-    lines(L,d,t,mx,max(y+int(40*u),int(H*0.56)),tw,u,((235,235,240),(140,190,255),(235,235,240)),42)
+    d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H)); mx=int(80*u)
+    logo_izq(im,u,1); lado_marca(L,d,W,H,u,9,x0); xr=x0+cw+mx; tw=W-xr-mx
+    y=headline(L,d,t,xr,int(H*0.24),tw,False,u,(255,255,255),4,fsz=60)
+    lines(L,d,t,xr,max(y+int(40*u),int(H*0.56)),tw,u,((235,235,240),(140,190,255),(235,235,240)),42)
     im.alpha_composite(L); return im
 def explain(t,W,H):
     V=H>W; u=min(W,H)/1080; mx=int(80*u); br=C['giro'].get('broll') or {}; fsrc=C['remate']['fuente']
