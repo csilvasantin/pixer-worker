@@ -66,12 +66,13 @@ export function normalizeCapsulaGuion(raw) {
 }
 
 // Assets del Stock que ya son esta cápsula (misma ref → dedup por orientación).
-export function capsulaUrlExisting(items, ref) {
+export function capsulaUrlExisting(items, ref, minVersion = 1) {
   const out = {};
   for (const it of Array.isArray(items) ? items : []) {
-    if (!it || it.type !== 'video' || it.externalRef !== ref || it.hidden || it.deleted) continue;
+    if (!it || it.type !== 'video' || it.externalRef !== ref || it.hidden || it.deleted || it.oculto) continue;
+    if (Math.max(1, parseInt(it?.capsuleSource?.version, 10) || 1) < minVersion) continue;
     const tags = it.tags || [];
-    for (const o of ['vertical', 'horizontal']) if (tags.includes(o) && !out[o]) out[o] = { id: it.id, num: it.num ?? null, url: it.url || null };
+    for (const o of ['vertical', 'horizontal']) if (tags.includes(o) && !out[o]) out[o] = { id: it.id, num: it.num ?? null, url: it.url || null, version: Math.max(1, parseInt(it?.capsuleSource?.version, 10) || 1) };
   }
   return out;
 }
@@ -80,4 +81,26 @@ export function capsulaUrlStatus(job, existing) {
   if (existing.vertical && existing.horizontal) return 'publicada';
   if (existing.vertical || existing.horizontal) return 'parcial';
   return job ? (job.status || 'en-cola') : 'sin-encargo';
+}
+
+// Ficha interactiva de la cápsula (v2, 22-oct-2026): fuente y tramo del b-roll en el meta,
+// sin depender del prompt. `sourceUrl` no se usa en el body de /stock/publish porque allí
+// significa «descarga esto»; por eso va dentro de `capsuleSource`.
+export function sanitizeCapsuleSource(raw, externalRef) {
+  if (!raw || typeof raw !== 'object' || !/^capsula-url:[a-f0-9]{16}$/.test(String(externalRef || ''))) return null;
+  let url; try { url = new URL(String(raw.sourceUrl || '')); } catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password) return null;
+  const n = v => Math.round(Number(v) * 100) / 100;
+  const start = n(raw.broll?.start), end = n(raw.broll?.end);
+  const broll = Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start && end <= 120 ? { start, end } : null;
+  const version = Math.max(1, Math.min(99, parseInt(raw.version, 10) || 1));
+  return { sourceUrl: url.href.slice(0, 1000), credit: String(raw.credit || '').replace(/\s+/g, ' ').trim().slice(0, 120), broll, version };
+}
+export const capsuleVersionOf = item => Math.max(1, parseInt(item?.capsuleSource?.version, 10) || 1);
+// Piezas anteriores de la misma cápsula y orientación que una versión nueva sustituye (se ocultan, no se borran).
+export function capsulaSuperseded(items, meta) {
+  if (!meta?.capsuleSource || !/^capsula-url:/.test(meta.externalRef || '')) return [];
+  const o = ['vertical', 'horizontal'].find(x => (meta.tags || []).includes(x)); if (!o) return [];
+  const v = capsuleVersionOf(meta);
+  return (items || []).filter(it => it && it.id !== meta.id && it.type === 'video' && it.externalRef === meta.externalRef && (it.tags || []).includes(o) && capsuleVersionOf(it) < v).map(it => it.id);
 }

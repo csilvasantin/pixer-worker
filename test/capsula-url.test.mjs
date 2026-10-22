@@ -70,3 +70,27 @@ test('encargar: guion editado en cola una sola vez (dedup) y visible en la cola 
   assert.equal(cola.jobs[0].source.resolvedUrl.includes('utm_'), false);
   const est = await (await worker.fetch(new Request('https://api.admira.store/capsula/url/estado?ref=' + da.ref), e, ctx)).json(); assert.equal(est.status, 'en-cola');
 });
+
+import { sanitizeCapsuleSource, capsulaSuperseded } from '../src/capsula-url.mjs';
+test('v2: capsuleSource guarda fuente y tramo del b-roll, y una versión nueva oculta la anterior por orientación', () => {
+  const ref = 'capsula-url:f2382b48829e119e';
+  const cs = sanitizeCapsuleSource({ sourceUrl: 'https://lnkd.in/p/e9zXSPkK', credit: 'Vídeo: Alber Adilov', broll: { start: 5.05, end: 9.05 }, version: 2 }, ref);
+  assert.deepEqual(cs, { sourceUrl: 'https://lnkd.in/p/e9zXSPkK', credit: 'Vídeo: Alber Adilov', broll: { start: 5.05, end: 9.05 }, version: 2 });
+  assert.equal(sanitizeCapsuleSource({ sourceUrl: 'javascript:alert(1)' }, ref), null);
+  assert.equal(sanitizeCapsuleSource({ sourceUrl: 'https://x.com/a' }, 'otra-ref'), null);
+  assert.equal(sanitizeCapsuleSource({ sourceUrl: 'https://x.com/a', broll: { start: 9, end: 5 } }, ref).broll, null);
+  const items = [{ id: 'v1', type: 'video', externalRef: ref, tags: ['vertical'] }, { id: 'h1', type: 'video', externalRef: ref, tags: ['horizontal'] }, { id: 'o', type: 'video', externalRef: 'x', tags: ['vertical'] }];
+  assert.deepEqual(capsulaSuperseded(items, { id: 'v2', externalRef: ref, tags: ['vertical'], capsuleSource: cs }), ['v1']);
+  assert.deepEqual(capsulaSuperseded(items, { id: 'v2', externalRef: ref, tags: ['vertical'], capsuleSource: { ...cs, version: 1 } }), []);
+  assert.equal(capsulaUrlExisting([...items, { id: 'v2', type: 'video', externalRef: ref, tags: ['vertical'], capsuleSource: cs }], ref, 2).vertical.id, 'v2');
+  assert.equal(capsulaUrlExisting(items, ref, 2).vertical, undefined);
+});
+test('v2: rehacer encarga una versión nueva aunque la cápsula ya esté publicada', async t => {
+  const calls = []; mockFetch(t, calls); const e = env(); const ctx = { waitUntil() {} };
+  const a = await (await worker.fetch(post('/capsula/url/encargar', { url: 'https://lnkd.in/p/e9zXSPkK', guion: GUION }), e, ctx)).json();
+  assert.equal(a.job.capsuleVersion, 1);
+  const b = await (await worker.fetch(post('/capsula/url/encargar', { url: 'https://lnkd.in/p/e9zXSPkK', guion: GUION, rehacer: true }), e, ctx)).json();
+  assert.equal(b.queued, true); assert.equal(b.job.capsuleVersion, 2);
+  const cola = await (await worker.fetch(new Request('https://api.admira.store/capsula/url/cola'), e, ctx)).json();
+  assert.equal(cola.jobs[0].capsuleVersion, 2);
+});

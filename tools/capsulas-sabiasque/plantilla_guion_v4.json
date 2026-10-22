@@ -1,0 +1,9 @@
+{"fecha":"2026-10-22","saga":{"tema":"ia","color":"#7B5CFF"},
+ "capsulas":[{"id":"ia-01","duracion_s":15,"formatos":["1920x1080","1080x1920"],
+  "titulo":"¿Sabías que?","mudo_1s":"cifra y verbo legibles en el frame 0",
+  "gancho":{"t":[2,5],"cifra":{"desde":0,"hasta":90,"unidad":"%","easing":"easeOutExpo"},"linea1":"…"},
+  "giro":{"t":[5,10],"linea2":"…","broll":"url_video_que_cuenta_la_noticia"},
+  "remate":{"t":[10,13],"matiz":"…","fuente":{"nombre":"…","url":"https://…"}},
+  "imagen_oficial":"https://…","sello_sin_verificar":false,
+  "cierre":{"t":[13,15],"logo":"admira_oficial","titulo_bajo_logo":true},
+  "tags":["sabiasque","ia"]}]}
