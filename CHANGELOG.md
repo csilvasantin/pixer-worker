@@ -2,6 +2,12 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## tools/capsulas-sabiasque v5.3 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Vídeo de la fuente durante toda la explicación
+
+- Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas básicas en tools/capsulas-sabiasque/README.md.
+- `render_url.py`: vídeo de la fuente de 2 s a 14 s (en bucle si es corto). Fuente vertical: en 16x9 a la derecha a toda la altura con textos a la izquierda; en 9x16 a pantalla completa con franjas oscuras legibles. Fuente horizontal: composición de siempre, fija.
+- `capsula_cola.py`: 12 s de b-roll (o la fuente entera), recorte de bandas con cropdetect, `capsuleSource.broll` = 2–14 s.
+
 ## tools/capsulas-sabiasque v5.2 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · B-roll real y foto en la cartela inicial
 
 - Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy).
