@@ -19,7 +19,7 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 
 1. **Cartela inicial (0–2 s):** foto/miniatura de la fuente de fondo, difuminada y oscurecida; «¿Sabías que?» encima del logo de Admira (en blanco) y la tipología debajo (v5.2). Sin subtítulo (v5.4: repetía el titular).
 2. **El vídeo de la fuente está presente durante TODA la explicación (2 s → 14 s)**, junto al texto, no en un tramo de 4 s. Se toman 12 s del centro de la fuente; si dura menos, se repite en bucle.
-3. **Fuente vertical (Shorts, TikTok, Reels) en 16x9:** vídeo a la DERECHA a toda la altura; titular y gancho/giro/remate a la IZQUIERDA; sin crédito ni pastilla en el cuerpo (v5.4).
+3. **Fuente vertical (Shorts, TikTok, Reels) en 16x9:** desde v5.5, ver regla 13 (bandas laterales). Antes: vídeo a la DERECHA a toda la altura; titular y gancho/giro/remate a la IZQUIERDA; sin crédito ni pastilla en el cuerpo (v5.4).
 4. **Fuente vertical en 9x16:** vídeo a pantalla completa como protagonista; franja oscura degradada arriba (¿Sabías que? + logo) y abajo (titular y gancho/giro/remate); sin crédito ni pastilla (v5.4).
 5. **Fuente horizontal:** la composición de siempre (caja a la derecha en 16x9, caja ancha en medio en 9x16), pero durante toda la explicación.
 6. **Cierre (14–18 s):** fijo, por corte, sin animación (v5.1).
@@ -32,3 +32,10 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 10. **Nada de pastillas ni «Toca para ver el original».** La única pista es un icono pequeño de reproducir (círculo con triángulo) con un leve resplandor que respira, en la esquina superior derecha del vídeo. La interactividad real la da el modal del Stock (cursor de mano, clic abre la fuente en 2–14 s).
 11. **La fuente se menciona una sola vez:** ni crédito «Vídeo: …» ni línea «Fuente: …» en el cuerpo. Al pie del cierre fijo, pequeño y gris: «Vídeo original: <autor> · <dominio>» (atribución mínima del material ajeno). El crédito sigue en `capsuleSource.credit` para el modal.
 12. **Fuera lo que sobra:** sin subtítulo en la cartela inicial, sin degradado de pie en el vídeo de 16x9 (ya no hay texto encima).
+
+## v5.5 · bandas laterales para fuente vertical (Carlos, 22-oct-2026 · todas las tipologías)
+
+13. **Fuente vertical en 16x9:** la imagen/vídeo va CENTRADA en su proporción vertical a toda la altura. Las bandas laterales son un desenfoque muy apagado de la propia imagen (sin cajas). Banda izquierda: logo de Admira arriba a la izquierda (en blanco). Banda derecha: «¿Sabías que?» y debajo la tipología.
+14. **Cartela inicial (0–2 s):** la imagen central pasa de borrosa a nítida en 1,6 s (smoothstep) mientras el logo y los textos de la derecha entran desde los lados.
+15. **Cuerpo (2–14 s) con la misma composición de bandas** por coherencia: vídeo centrado sin saltos desde la cartela, logo y «¿Sabías que?» + tipología fijos en su sitio, titular y gancho/giro/remate en la banda izquierda bajo el logo; icono de reproducir en la esquina del vídeo.
+16. **9x16:** sin bandas; composición v5.4 con la cartela de foto difuminada. El vídeo del cuerpo entra con un revelado breve de borroso a nítido (0,7 s).
