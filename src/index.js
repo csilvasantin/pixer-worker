@@ -64,6 +64,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
+import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
 import { xpacioEstimarHandler, corsXpacio, enDesarrollo } from './xpacio-estimar.mjs';
@@ -141,7 +142,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.22.10.2026.r1.15:45';
+const WORKER_VERSION = 'v.22.10.2026.r2.17:42';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -4947,6 +4948,121 @@ async function siteCapsulePublish(req, env, ctx, payload) {
   return result;
 }
 
+// ─── Cápsula «¿Sabías que?» desde URL (Creador de admira.studio, 22-oct-2026) ───
+// Ver src/capsula-url.mjs. borrador → Carlos edita → encargar → GrokBotBox renderiza con
+// plantilla v5 y publica con externalRef = ref. El estado se deduce del Stock (dedup por ref).
+const CAPSULA_URL_ORIGINS = new Set(['https://admira.studio', 'https://www.admira.studio', 'https://pixeria.com', 'https://www.pixeria.com']);
+function capsulaUrlOriginOk(req) { const o = req.headers.get('Origin') || ''; return CAPSULA_URL_ORIGINS.has(o) || LOCAL_ORIGIN_RE.test(o); }
+async function capsulaUrlSource(env, link) {
+  const resolved = await resolveImportUrl(link);
+  const safe = siteCapsuleUrl(resolved) || siteCapsuleUrl(link);
+  if (!safe) return { error: 'unsafe-or-invalid-url' };
+  const sourceKey = importSourceKey(safe.href) || importSourceKey(link);
+  const kind = capsulaUrlKind(sourceKey);
+  const src = { url: String(link).trim(), resolvedUrl: safe.href, sourceKey, kind, title: '', author: '', description: '', text: '', image: '' };
+  const ua = { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/2.0; +https://www.pixeria.com)', Accept: 'text/html,application/xhtml+xml,application/json' };
+  const oembed = { youtube: 'https://www.youtube.com/oembed?format=json&url=', tiktok: 'https://www.tiktok.com/oembed?url=', x: 'https://publish.twitter.com/oembed?omit_script=1&url=' }[kind];
+  if (oembed) {
+    try {
+      const r = await fetchConLimite(oembed + encodeURIComponent(safe.href), { headers: ua }, { ms: LIMITES.descarga, proveedor: kind, etapa: 'oembed' });
+      if (r.ok) { const d = await r.json(); src.title = clean400(d.title); src.author = clean400(d.author_name); src.image = d.thumbnail_url || ''; if (d.html) src.text = siteCapsuleText(String(d.html)); }
+    } catch {}
+  }
+  if (kind !== 'x') {
+    try {
+      const r = await fetchConLimite(safe.href, { headers: ua, redirect: 'follow' }, { ms: LIMITES.descarga, proveedor: safe.hostname, etapa: 'fuente' });
+      const ct = String(r.headers.get('Content-Type') || '').toLowerCase();
+      if (r.ok && (ct.includes('text/html') || ct.includes('xhtml'))) {
+        const html = (await r.text()).slice(0, 1200000);
+        const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        src.title = src.title || clean400(siteCapsuleMeta(html, 'og:title') || siteCapsuleEntity(t?.[1] || ''));
+        src.description = clean400(siteCapsuleMeta(html, 'og:description') || siteCapsuleMeta(html, 'description'), 1500);
+        src.author = src.author || clean400(siteCapsuleMeta(html, 'author') || siteCapsuleMeta(html, 'article:author'));
+        src.image = src.image || siteCapsuleMeta(html, 'og:image:secure_url') || siteCapsuleMeta(html, 'og:image') || '';
+        const body = siteCapsuleText(html);
+        if (kind === 'articulo' || body.length > src.text.length) src.text = kind === 'articulo' ? body : (src.text || body.slice(0, 4000));
+      }
+    } catch {}
+  }
+  if (!/^https:\/\//.test(src.image)) src.image = '';
+  return src;
+}
+function clean400(v, max = 400) { return String(v || '').replace(/\s+/g, ' ').trim().slice(0, max); }
+async function capsulaUrlGemini(env, src) {
+  if (!env.GEMINI_API_KEY) throw new Error('server-missing-key');
+  const { r, datos } = await pedirConLimite('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+    method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: capsulaUrlPrompt(src) }] }], generationConfig: { temperature: 0.3, responseMimeType: 'application/json' } }),
+  }, { ms: LIMITES.textoLargo, proveedor: 'gemini', etapa: 'capsula-url' });
+  if (!r.ok) throw new Error(`gemini-${r.status}`);
+  let parsed; try { parsed = JSON.parse(datos?.candidates?.[0]?.content?.parts?.[0]?.text || ''); } catch { throw new Error('gemini-invalid-json'); }
+  return normalizeCapsulaGuion(parsed).guion;
+}
+async function capsulaUrlJob(env, ref) {
+  const key = capsulaUrlJobKey(ref); if (!key || !env.STOCK_BUCKET) return null;
+  try { const o = await env.STOCK_BUCKET.get(key); return o ? await o.json() : null; } catch { return null; }
+}
+async function capsulaUrlState(env, ref) {
+  const [job, items] = await Promise.all([capsulaUrlJob(env, ref), gridReadStockIndex(env)]);
+  const existing = capsulaUrlExisting(items, ref);
+  return { ref, status: capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, objeto: job.guion?.objeto, sourceUrl: job.source?.url } : null };
+}
+async function capsulaUrlBorradorHandler(req, env) {
+  if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
+  if (+req.headers.get('Content-Length') > 8192) return json({ error: 'body-too-large' }, { status: 413 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const src = await capsulaUrlSource(env, body?.url);
+  if (src.error) return json({ error: src.error }, { status: 400 });
+  const ref = await capsulaUrlRef(src.sourceKey || src.resolvedUrl);
+  const state = await capsulaUrlState(env, ref);
+  const manual = clean400(body?.texto, 12000);
+  if (manual) src.text = manual;
+  const source = { url: src.url, resolvedUrl: src.resolvedUrl, sourceKey: src.sourceKey, kind: src.kind, title: src.title, author: src.author, image: src.image, description: src.description.slice(0, 600), textLength: src.text.length };
+  if (!src.title && !src.description && src.text.length < 80) return json({ ok: false, error: 'source-has-no-readable-content', ref, source, ...state }, { status: 422 });
+  let guion;
+  try { guion = await capsulaUrlGemini(env, src); }
+  catch (e) { return (esErrorLimite(e) && e.tipo === 'timeout' && respuestaLimite(e)) || json({ ok: false, error: 'capsule-synthesis-failed', detail: String(e.message || e).slice(0, 120), ref, source, ...state }, { status: 502 }); }
+  return json({ ok: true, ref, source, guion, ...state });
+}
+async function capsulaUrlEncargarHandler(req, env) {
+  if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  if (+req.headers.get('Content-Length') > 16384) return json({ error: 'body-too-large' }, { status: 413 });
+  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const safe = siteCapsuleUrl(await resolveImportUrl(body?.url)) || siteCapsuleUrl(body?.url);
+  if (!safe) return json({ error: 'unsafe-or-invalid-url' }, { status: 400 });
+  const sourceKey = importSourceKey(safe.href) || importSourceKey(body.url);
+  const ref = await capsulaUrlRef(sourceKey || safe.href);
+  const norm = normalizeCapsulaGuion(body?.guion);
+  if (!norm.ok) return json({ ok: false, error: 'invalid-guion', errors: norm.errors }, { status: 400 });
+  const state = await capsulaUrlState(env, ref);
+  if (state.status === 'publicada') return json({ ok: true, reused: true, ...state });
+  const image = typeof body.image === 'string' && /^https:\/\/[^\s"'<>]{1,600}$/.test(body.image) ? body.image : '';
+  const job = { version: 1, ref, status: 'en-cola', createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', tags: [...CAPSULA_URL_TAGS, norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')],
+    source: { url: String(body.url).trim().slice(0, 1000), resolvedUrl: safe.href, sourceKey, kind: capsulaUrlKind(sourceKey), image, author: clean400(body.author, 200), title: clean400(body.title, 300) },
+    guion: norm.guion, requestedBy: clean400(body.requestedBy, 120) || 'Creador admira.studio' };
+  const key = capsulaUrlJobKey(ref);
+  const put = await env.STOCK_BUCKET.put(key, JSON.stringify(job), { httpMetadata: { contentType: 'application/json' }, onlyIf: body.rehacer === true ? undefined : { etagDoesNotMatch: '*' } });
+  if (!put) return json({ ok: true, reused: true, queued: false, ...(await capsulaUrlState(env, ref)) });
+  return json({ ok: true, queued: true, ...(await capsulaUrlState(env, ref)) }, { status: 202 });
+}
+async function capsulaUrlEstadoHandler(req, env, url) {
+  const ref = url.searchParams.get('ref') || '';
+  if (!capsulaUrlJobKey(ref)) return json({ error: 'bad-ref' }, { status: 400 });
+  return json({ ok: true, ...(await capsulaUrlState(env, ref)) });
+}
+// Cola para el renderizador de GrokBotBox: encargos cuya cápsula aún no está en el Stock.
+async function capsulaUrlColaHandler(req, env) {
+  if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
+  const listed = await env.STOCK_BUCKET.list({ prefix: CAPSULA_URL_JOB_PREFIX, limit: 200 });
+  const items = await gridReadStockIndex(env);
+  const jobs = [];
+  for (const o of listed.objects || []) {
+    try { const job = await (await env.STOCK_BUCKET.get(o.key)).json(); const existing = capsulaUrlExisting(items, job.ref); const status = capsulaUrlStatus(job, existing); if (status !== 'publicada') jobs.push({ ...job, status, existing }); } catch {}
+  }
+  return json({ ok: true, jobs });
+}
+
 async function stockSiteCapsuleHandler(req, env, ctx) {
   const origin = req.headers.get('Origin') || '';
   if (origin !== 'https://admira.academy' && origin !== 'https://www.admira.academy' && !LOCAL_ORIGIN_RE.test(origin)) {
@@ -8417,6 +8533,14 @@ export default {
         res = await stockUploadAbortHandler(req, env);
       } else if (path === '/stock/interactive' && req.method === 'POST') {
         res = await stockInteractiveHandler(req, env, ctx);
+      } else if (path === '/capsula/url/borrador' && req.method === 'POST') {
+        res = await capsulaUrlBorradorHandler(req, env);
+      } else if (path === '/capsula/url/encargar' && req.method === 'POST') {
+        res = await capsulaUrlEncargarHandler(req, env);
+      } else if (path === '/capsula/url/estado' && req.method === 'GET') {
+        res = await capsulaUrlEstadoHandler(req, env, url);
+      } else if (path === '/capsula/url/cola' && req.method === 'GET') {
+        res = await capsulaUrlColaHandler(req, env);
       } else if (path === '/stock/site-capsule' && req.method === 'POST') {
         res = await stockSiteCapsuleHandler(req, env, ctx);
       } else if (path === '/stock/reindex' && req.method === 'POST') {

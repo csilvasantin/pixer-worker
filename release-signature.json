@@ -1,7 +1,7 @@
 {
-  "version": "v.22.10.2026.r1.15:45",
-  "agent": "GrokBot",
-  "machine": "Box",
-  "signature": "GrokBot · Box",
-  "deployer": "GrokBot"
+  "version": "v.22.10.2026.r2.17:42",
+  "agent": "WozniakGrokBot",
+  "machine": "GrokBotBox",
+  "signature": "WozniakGrokBot · GrokBotBox",
+  "deployer": "WozniakGrokBot"
 }
