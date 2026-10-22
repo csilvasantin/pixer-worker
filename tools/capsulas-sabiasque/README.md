@@ -39,3 +39,9 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 14. **Cartela inicial (0–2 s):** la imagen central pasa de borrosa a nítida en 1,6 s (smoothstep) mientras el logo y los textos de la derecha entran desde los lados.
 15. **Cuerpo (2–14 s) con la misma composición de bandas** por coherencia: vídeo centrado sin saltos desde la cartela, logo y «¿Sabías que?» + tipología fijos en su sitio, titular y gancho/giro/remate en la banda izquierda bajo el logo; icono de reproducir en la esquina del vídeo.
 16. **9x16:** sin bandas; composición v5.4 con la cartela de foto difuminada. El vídeo del cuerpo entra con un revelado breve de borroso a nítido (0,7 s).
+
+## v5.6 (Carlos, 22-oct-2026 · todas las tipologías)
+
+17. **Lados invertidos en 16x9 con fuente vertical** (cartela y cuerpo): banda IZQUIERDA = logo de Admira arriba y debajo «¿Sabías que?» + tipología; banda DERECHA = titular y gancho/giro/remate. El vídeo sigue centrado con el revelado borroso → nítido. (Sustituye el reparto de las reglas 13 y 15.)
+18. **Sin icono de reproducir** en ningún formato (sustituye la regla 10). La interactividad es sólo del modal del Stock: cursor de mano y clic en la imagen dentro de 2–14 s abre la fuente; el modal ya no pinta la pastilla «Ver el original» (admira-studio, parche capsula-fuente-v56).
+19. El crédito mínimo gris del cierre («Vídeo original: …») se mantiene como en v5.4.

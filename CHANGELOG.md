@@ -2,6 +2,13 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## tools/capsulas-sabiasque v5.6 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Lados invertidos y sin icono
+
+- Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas 17–19 en el README.
+- `render_url.py`: 16x9 con fuente vertical → marca (logo, «¿Sabías que?», tipología) a la izquierda y explicación a la derecha; sin icono de reproducir en ningún formato.
+- Va con admira-studio#116 (modal sin pastilla «Ver el original»).
+- Rollback: revertir este PR (vuelve a v5.5).
+
 ## tools/capsulas-sabiasque v5.5 · 22-oct-2026 · WozniakGrokBot · GrokBotBox · Bandas laterales para fuente vertical
 
 - Solo herramientas de GrokBotBox (sin cambio del Worker ni deploy). Reglas 13–16 en el README.
