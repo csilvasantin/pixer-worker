@@ -37,6 +37,11 @@ import {
   mergeReplacedMeta,
   recentFingerprintInput,
   stockDedupDecision,
+  STOCK_CLAIM_PREFIX,
+  TG_IMPORT_CLAIM_STALE_MS,
+  claimIsLive,
+  importSourceKey,
+  isShortenerHost,
 } from './stock-dedup.mjs';
 import {
   STOCK_TAGS_MAX,
@@ -136,7 +141,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.20.10.2026.r1.23:05';
+const WORKER_VERSION = 'v.22.10.2026.r1.15:45';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -4194,6 +4199,45 @@ function telegramHelpText(env) {
   ].join('\n');
 }
 
+// Dedup previo de una importación por URL desde Telegram. Devuelve
+// { handled:true } si ya existe o ya se está importando (y avisa), o
+// { handled:false, release } con la reserva tomada para esta importación.
+async function tgImportDedup(env, chatId, link) {
+  const srcKey = await importSourceKeyResolved(link).catch(() => null);
+  if (!srcKey || !env.STOCK_BUCKET) return { handled: false, release: async () => {} };
+  let owner = await stockLiveSourceOwner(env, srcKey);
+  if (!owner) {
+    // Piezas importadas antes de las reservas: se buscan por su enlace en el índice.
+    try {
+      const items = await gridReadStockIndex(env);
+      const hit = (items || []).find(m => m && m.id && STOCK_URL_IMPORT_MOTORS.includes(m.motor) && /^https?:\/\//i.test(m.prompt || '')
+        && (String(m.prompt).trim() === link || importSourceKey(m.prompt) === srcKey));
+      if (hit) {
+        const meta = await stockMetaById(env, hit.id);
+        if (meta && !meta.oculto) {
+          owner = meta;
+          await stockTryClaim(env, await stockClaimKey('src', srcKey), { id: meta.id, at: new Date().toISOString(), kind: 'src', key: srcKey }, { aliveOf: async () => false });
+        }
+      }
+    } catch {}
+  }
+  if (owner) {
+    const num = owner.num ? `#${owner.num}` : `<code>${escHtml(owner.id)}</code>`;
+    console.log(JSON.stringify({ message: 'tg import dedup: ya existe', srcKey, id: owner.id, num: owner.num || null }));
+    await tgSend(env, chatId, `♻️ Ya existe ${num} en Stock: no lo vuelvo a importar.\n<code>${escHtml(link)}</code>${owner.url ? `\n<a href="${escHtml(owner.url)}">Verlo en Stock</a>` : ''}`);
+    return { handled: true, existing: owner };
+  }
+  const tgKey = await stockClaimKey('tg', srcKey);
+  const mine = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const c = await stockTryClaim(env, tgKey, { id: mine, at: new Date().toISOString(), kind: 'tg', key: srcKey }, { staleMs: TG_IMPORT_CLAIM_STALE_MS });
+  if (!c.won) {
+    console.log(JSON.stringify({ message: 'tg import dedup: en curso', srcKey }));
+    await tgSend(env, chatId, `⏳ Ese enlace ya se está importando: no lanzo otra descarga.\n<code>${escHtml(link)}</code>`);
+    return { handled: true };
+  }
+  return { handled: false, release: () => stockReleaseClaim(env, tgKey, mine) };
+}
+
 async function telegramWebhookHandler(req, env, ctx) {
   // Verificación del secret de Telegram (cabecera fijada en setWebhook)
   const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
@@ -4287,6 +4331,9 @@ async function telegramWebhookHandler(req, env, ctx) {
 
   if (isImage) {
     ctx.waitUntil((async () => {
+      const dd = await tgImportDedup(env, chatId, link);
+      if (dd.handled) return;
+      try {
       await tgSend(env, chatId, `📥 Importando imagen 🖼️ de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
       try {
         const pubReq = new Request(new URL('/stock/publish', req.url).toString(), {
@@ -4305,12 +4352,16 @@ async function telegramWebhookHandler(req, env, ctx) {
         const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
         await tgSend(env, chatId, `🚨 Error importando la imagen: <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
       }
+      } finally { await dd.release(); }
     })());
     return json({ ok: true });
   }
 
   const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
   ctx.waitUntil((async () => {
+    const dd = await tgImportDedup(env, chatId, link);
+    if (dd.handled) return;
+    try {
     // Se guarda el id de ESTE mensaje: es el que se irá reescribiendo con el progreso y,
     // al final, con el resultado. Así la promesa «te aviso» se cumple en el mismo sitio
     // donde se hizo, en vez de acumular mensajes sueltos.
@@ -4394,6 +4445,7 @@ async function telegramWebhookHandler(req, env, ctx) {
       const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
       await tgSend(env, chatId, `🚨 No pude contactar el importador (Mac Studio / Mac Mini, ¿admira-tube caído?): <code>${escHtml(String(e).slice(0, 180))}</code>${savedLine}`);
     }
+    } finally { await dd.release(); }
   })());
   return json({ ok: true });
 }
@@ -5110,6 +5162,93 @@ async function stockRememberRecent(env, input, id) {
     await env.SIGNAGE_KV.put(await stockRecentKey(input), String(id), { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) });
   } catch {}
 }
+// ─── Reservas atómicas de importación (dedup idempotente, 22-oct-2026) ───────
+// R2 evalúa `If-None-Match: *` en la misma escritura: de N peticiones simultáneas
+// solo una crea la reserva. KV no sirve para esto (eventualmente consistente).
+async function resolveImportUrl(link) {
+  let current = String(link || '').trim();
+  for (let hop = 0; hop < 4; hop++) {
+    let u;
+    try { u = new URL(current); } catch { return current; }
+    if (!isShortenerHost(u.hostname.toLowerCase())) return current;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const r = await fetch(current, { method: 'GET', redirect: 'manual', signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AdmiraBot/1.0)' } });
+      const loc = r.headers.get('Location');
+      try { r.body && r.body.cancel(); } catch {}
+      if (!loc || r.status < 300 || r.status >= 400) return current;
+      current = new URL(loc, current).toString();
+    } catch { return current; }
+    finally { clearTimeout(timer); }
+  }
+  return current;
+}
+async function importSourceKeyResolved(link) {
+  const raw = String(link || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return null;
+  return importSourceKey(await resolveImportUrl(raw)) || importSourceKey(raw);
+}
+async function stockClaimKey(kind, key) {
+  return `${STOCK_CLAIM_PREFIX}${kind}/${await sha256HexText(key)}.json`;
+}
+async function stockReadClaim(env, claimKey) {
+  try {
+    const obj = await env.STOCK_BUCKET.get(claimKey);
+    if (!obj) return null;
+    return { data: await obj.json().catch(() => null), etag: obj.etag };
+  } catch { return null; }
+}
+const CLAIM_HTTP = { httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' } };
+// Intenta reservar. Devuelve { won, claim } (claim = la reserva vigente, propia o ajena).
+// `aliveOf(claim)` decide si una reserva ajena sigue valiendo (su asset existe / es reciente).
+async function stockTryClaim(env, claimKey, data, { staleMs, aliveOf } = {}) {
+  if (!env.STOCK_BUCKET) return { won: true, claim: data };
+  const body = JSON.stringify(data);
+  try {
+    const put = await env.STOCK_BUCKET.put(claimKey, body, { ...CLAIM_HTTP, onlyIf: { etagDoesNotMatch: '*' } });
+    if (put) return { won: true, claim: data };
+  } catch (e) { console.warn(JSON.stringify({ message: 'stock claim put failed', claimKey, error: String(e).slice(0, 160) })); return { won: true, claim: data }; }
+  const prev = await stockReadClaim(env, claimKey);
+  if (!prev) return stockTryClaim(env, claimKey, data, { staleMs, aliveOf });
+  if (prev.data && data.id && prev.data.id === data.id) return { won: true, claim: prev.data };
+  const ownerAlive = aliveOf ? await aliveOf(prev.data) : false;
+  // aliveOf → true (asset vivo), 'dead' (existe pero ya no es ese contenido / está oculto) o false (aún no existe).
+  if (ownerAlive !== 'dead' && claimIsLive(prev.data, { ownerAlive: ownerAlive === true, staleMs })) return { won: false, claim: prev.data };
+  // Reserva abandonada: se toma solo si nadie la ha cambiado entre medias.
+  try {
+    const put = await env.STOCK_BUCKET.put(claimKey, body, { ...CLAIM_HTTP, onlyIf: { etagMatches: prev.etag } });
+    if (put) return { won: true, claim: data };
+  } catch {}
+  const now = await stockReadClaim(env, claimKey);
+  return { won: !!(now && now.data && now.data.id === data.id), claim: now ? now.data : prev.data };
+}
+async function stockReleaseClaim(env, claimKey, id) {
+  try {
+    const prev = await stockReadClaim(env, claimKey);
+    if (prev && prev.data && (!id || prev.data.id === id)) await env.STOCK_BUCKET.delete(claimKey);
+  } catch {}
+}
+// Asset vivo (existe y no está oculto) al que apunta una reserva de origen, o null.
+async function stockLiveSourceOwner(env, srcKey) {
+  if (!srcKey || !env.STOCK_BUCKET) return null;
+  const c = await stockReadClaim(env, await stockClaimKey('src', srcKey));
+  if (!c || !c.data || !c.data.id) return null;
+  const meta = await stockMetaById(env, c.data.id);
+  return meta && !meta.oculto ? meta : null;
+}
+async function stockWaitForMeta(env, id, ms = 20000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    const meta = await stockMetaById(env, id);
+    if (meta) return meta;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return null;
+}
+const STOCK_URL_IMPORT_MOTORS = ['yt-dlp', 'Telegram Import'];
+const srcClaimAlive = (env) => async (c) => { const m = c && c.id ? await stockMetaById(env, c.id) : null; return m ? (m.oculto ? 'dead' : true) : false; };
+
 // Quién puede borrar: el carril interno de admiranext (misma cabecera que el
 // publish con externalId) o quien tenga NOTIFY_KEY (`?secret=`, cabecera
 // `X-Notify-Key` o `{secret}` en el body). Hasta el 11-sep-2026 DELETE no
@@ -5432,7 +5571,11 @@ export async function stockPublishHandler(req, env, ctx) {
   const existingMeta = externalId ? await stockMetaById(env, id) : null;
   const hashHint = !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
   const recentInput = externalId || compositionIn ? null : recentFingerprintInput({ title, motor, sourceUrl });
+  let srcKey = null; // clave de origen de importaciones por URL (se calcula más abajo)
   const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
+    // Lo que ya existía queda apuntado también por su origen: la próxima vez que
+    // llegue el mismo enlace se responde «ya existe» sin descargar.
+    if (srcKey && ownerId) ctx.waitUntil((async () => stockTryClaim(env, await stockClaimKey('src', srcKey), { id: ownerId, at: new Date().toISOString(), kind: 'src', key: srcKey }, { aliveOf: srcClaimAlive(env) }))().catch(() => {}));
     // Un duplicado no se copia: si venía de una subida por partes, su fichero de
     // `uploads/` sobra (la dedup temprana responde antes de llegar a borrarlo).
     if (r2Staged) ctx.waitUntil(env.STOCK_BUCKET.delete(r2Staged).catch(() => {}));
@@ -5482,6 +5625,15 @@ export async function stockPublishHandler(req, env, ctx) {
     if (early.action === 'reuse') {
       return reusedResponse(early.id, early.reason, early.id === id ? existingMeta : await stockMetaById(env, early.id));
     }
+  }
+  // Origen de una importación por URL (Telegram/yt-dlp): misma URL normalizada
+  // (lnkd.in resuelto, id del post) → «ya existe», sin descargar nada.
+  const srcLink = [prompt, sourceUrl].map(v => String(v || '').trim()).find(v => /^https?:\/\//i.test(v)) || '';
+  srcKey = (!externalId && !compositionIn && STOCK_URL_IMPORT_MOTORS.includes(String(motor || '')) && srcLink)
+    ? await importSourceKeyResolved(srcLink) : null;
+  if (srcKey) {
+    const srcOwner = await stockLiveSourceOwner(env, srcKey);
+    if (srcOwner && srcOwner.id !== id) return reusedResponse(srcOwner.id, 'duplicate_source', srcOwner);
   }
   if (recentInput) {
     const recentId = await stockRecentLookup(env, recentInput);
@@ -5570,6 +5722,29 @@ export async function stockPublishHandler(req, env, ctx) {
   const dedupSettle = async (written) => {
     const hashOwnerId = contentHash ? await stockHashLookup(env, contentHash) : null;
     decision = stockDedupDecision({ id, externalId, existingMeta, contentHash, hashOwnerId });
+    if (decision.action === 'create' && !externalId && isSha256Hex(contentHash)) {
+      // Reserva atómica del contenido (y del origen): cierra la carrera de N
+      // publicaciones simultáneas del mismo binario (#1795/#1796/#1797).
+      const now = new Date().toISOString();
+      const aliveOf = async (c) => { const m = c && c.id ? await stockMetaById(env, c.id) : null; return m ? (m.contentHash === contentHash ? true : 'dead') : false; };
+      const hashClaimKey = await stockClaimKey('hash', contentHash);
+      const h = await stockTryClaim(env, hashClaimKey, { id, at: now, kind: 'hash' }, { aliveOf });
+      let ownerId = h.won ? null : (h.claim && h.claim.id);
+      if (!ownerId && srcKey) {
+        const s = await stockTryClaim(env, await stockClaimKey('src', srcKey), { id, at: now, kind: 'src', key: srcKey }, { aliveOf: srcClaimAlive(env) });
+        if (!s.won && s.claim && s.claim.id && s.claim.id !== id) {
+          ownerId = s.claim.id;
+          await stockReleaseClaim(env, hashClaimKey, id);
+        }
+      }
+      if (ownerId && ownerId !== id) {
+        if (written) { try { await env.STOCK_BUCKET.delete(assetKey); } catch {} }
+        const ownerMeta = await stockWaitForMeta(env, ownerId);
+        console.log(JSON.stringify({ message: 'stock publish dedup (claim)', id, reused: ownerId, contentHash, srcKey, ownerReady: !!ownerMeta }));
+        if (ownerMeta) return reusedResponse(ownerId, 'duplicate_concurrent', ownerMeta, true);
+        return json({ ok: false, reused: true, reason: 'import-in-progress', id: ownerId, retryable: true }, { status: 409 });
+      }
+    }
     if (decision.action !== 'reuse') return null;
     const keepsOwnFile = decision.id === id && existingMeta && existingMeta.assetKey === assetKey;
     if (written && !keepsOwnFile) { try { await env.STOCK_BUCKET.delete(assetKey); } catch {} }

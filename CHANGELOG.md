@@ -2,6 +2,14 @@
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.22.10.2026.r1.15:45 · GrokBot · Box · Stock: dedup idempotente de importaciones (Telegram/yt-dlp)
+
+- Incidente 22-oct-2026 15:30 (Madrid): el mismo vídeo de LinkedIn (`https://lnkd.in/p/e9zXSPkK`, 5,58 MB) entró tres veces (#1795, #1796, #1797) en 2 s, con el **mismo sha256**. La dedup por contenido existía pero era «mirar y luego escribir»: las tres publicaciones consultaron `stock:hash:*` (KV, eventualmente consistente) antes de que ninguna lo escribiera; entre medias va la clasificación con Gemini (1-2 s).
+- `/stock/publish`: **reserva atómica en R2** (`put` con `etagDoesNotMatch: '*'`) por contenido (`dedup-claims/stock/hash/<sha>`) y por origen (`dedup-claims/stock/src/<sha(clave)>`) antes de clasificar y escribir meta. Solo una petición gana; las demás borran su binario, esperan al ganador y responden `reused` (`duplicate_concurrent`), o 409 `import-in-progress` si el ganador aún no terminó. Reservas abandonadas (sin asset tras 3 min, asset oculto o con otro hash) se recuperan con `etagMatches`.
+- Clave de origen (`importSourceKey`, `src/stock-dedup.mjs`): se resuelven acortadores (lnkd.in, bit.ly, t.co…) y se usa el id del post/vídeo (`linkedin:<id>`, `youtube:<id>`, `tiktok:`, `x:`, `vimeo:`, `instagram:`) o la URL sin parámetros de tracking. Motores `yt-dlp` y `Telegram Import`: si el origen ya tiene asset vivo → `reused` `duplicate_source` sin descargar.
+- Webhook de Telegram: antes de mandar el enlace al proxy se comprueba el origen (reserva o índice) y se responde «♻️ Ya existe #N en Stock»; si ya hay una importación en curso del mismo enlace (reserva `tg`, 12 min) se responde «⏳ ya se está importando» y no se lanza otra descarga.
+- Pruebas: `test/stock-import-dedup.test.mjs` (la carrera de 3 publicaciones simultáneas reproduce el fallo con el código anterior).
+
 ## v.18.10.2026.r2.20:45 · GrokBot · Box · Telegram: importador Mac Studio primero, sin doble importación
 
 - Importación de URL por Telegram (`/tube/import-to-stock`): lista de bases con **Mac Studio primero** y Mac Mini de respaldo (`src/tube-failover.mjs`). `ADMIRA_TUBE_BASE` admite una lista separada por comas (van primero; las de por defecto detrás).

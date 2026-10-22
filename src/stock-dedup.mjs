@@ -90,3 +90,65 @@ export function mergeReplacedMeta(existingMeta, freshMeta, now = Date.now()) {
     replacedFromHash: kept.contentHash || null,
   };
 }
+
+// ─── Importaciones por URL (Telegram → yt-dlp) ────────────────────────────────
+// El 22-oct-2026 el mismo vídeo de LinkedIn (https://lnkd.in/p/e9zXSPkK) entró
+// TRES veces (#1795, #1796, #1797) en 2 s, con el MISMO sha256. Las reglas de
+// arriba existían, pero eran «mirar y luego escribir»: las tres peticiones
+// miraron el índice hash→id antes de que ninguna lo escribiera (entre medias
+// va la clasificación con Gemini, ~1-2 s, y KV es eventualmente consistente).
+// Arreglo: una RESERVA atómica en R2 (put con If-None-Match: *) por contenido y
+// por origen. Solo una petición gana; las demás esperan al ganador y responden
+// reused. La clave de origen es la URL normalizada (resolviendo acortadores
+// como lnkd.in) o, mejor aún, el id del post/vídeo en la plataforma.
+
+export const STOCK_CLAIM_PREFIX = 'dedup-claims/stock/'; // fuera de stock/: los rebuilds recorren ese prefijo
+// Una reserva cuyo asset no llegó a existir se considera abandonada pasado este
+// tiempo (la parte posterior a la reserva es Gemini + escrituras: segundos).
+export const STOCK_CLAIM_STALE_MS = 3 * 60 * 1000;
+// Reserva del webhook de Telegram mientras el proxy descarga (monitor = 9 min).
+export const TG_IMPORT_CLAIM_STALE_MS = 12 * 60 * 1000;
+
+const TRACKING_PARAMS = /^(utm_.*|fbclid|gclid|igsh|igshid|si|feature|rcm|trk|trackingid|lipi|ref|ref_src|ref_url|s|t|origin|highlightedupdateurn|highlightedupdatetype|share_id|is_from_webapp|sender_device|_r)$/i;
+
+// Hosts acortadores que hay que resolver (redirección) antes de normalizar.
+export function isShortenerHost(host) {
+  return /^(lnkd\.in|bit\.ly|t\.co|tinyurl\.com|ow\.ly|buff\.ly|goo\.gl|vm\.tiktok\.com|vt\.tiktok\.com|fb\.watch|on\.soundcloud\.com|shorturl\.at)$/i.test(String(host || ''));
+}
+
+// Clave estable del ORIGEN de una importación. Devuelve null si no es una URL http(s).
+//   youtube:<id11> · linkedin:<id numérico del post> · tiktok:<id> · x:<id> · vimeo:<id>
+//   o, si no hay id reconocible, url:<host><path>?<query sin tracking> en minúsculas.
+export function importSourceKey(raw) {
+  let u;
+  try { u = new URL(String(raw || '').trim()); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol)) return null;
+  const host = u.hostname.toLowerCase().replace(/^(www|m|mobile)\./, '');
+  const path = u.pathname;
+  let m;
+  if (host === 'youtu.be' && (m = path.match(/^\/([A-Za-z0-9_-]{11})/))) return `youtube:${m[1]}`;
+  if (/(^|\.)youtube\.com$/.test(host)) {
+    const v = u.searchParams.get('v');
+    if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) return `youtube:${v}`;
+    if ((m = path.match(/^\/(?:shorts|embed|live|v)\/([A-Za-z0-9_-]{11})/))) return `youtube:${m[1]}`;
+  }
+  if (/(^|\.)linkedin\.com$/.test(host)) {
+    const all = decodeURIComponent(path + ' ' + u.search);
+    if ((m = all.match(/(?:ugcPost|activity|share)[-:](\d{10,})/i))) return `linkedin:${m[1]}`;
+  }
+  if (/(^|\.)tiktok\.com$/.test(host) && (m = path.match(/\/(?:video|photo)\/(\d{8,})/))) return `tiktok:${m[1]}`;
+  if (/^(x\.com|twitter\.com)$/.test(host) && (m = path.match(/\/status(?:es)?\/(\d{5,})/))) return `x:${m[1]}`;
+  if (host === 'vimeo.com' && (m = path.match(/^\/(?:.*\/)?(\d{5,})(?:\/|$)/))) return `vimeo:${m[1]}`;
+  if (/(^|\.)instagram\.com$/.test(host) && (m = path.match(/^\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/))) return `instagram:${m[1]}`;
+  const keep = [...u.searchParams.entries()].filter(([k]) => !TRACKING_PARAMS.test(k)).sort(([a], [b]) => a.localeCompare(b));
+  const q = keep.length ? '?' + keep.map(([k, v]) => `${k}=${v}`).join('&') : '';
+  return `url:${host}${path.replace(/\/+$/, '') || '/'}${q}`.toLowerCase();
+}
+
+// ¿Sigue vigente una reserva? `ownerAlive` = el asset reservado ya existe.
+export function claimIsLive(claim, { now = Date.now(), ownerAlive = false, staleMs = STOCK_CLAIM_STALE_MS } = {}) {
+  if (!claim || typeof claim !== 'object') return false;
+  if (ownerAlive) return true;
+  const at = Date.parse(claim.at || '');
+  return Number.isFinite(at) && now - at < staleMs;
+}
