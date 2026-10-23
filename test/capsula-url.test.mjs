@@ -137,12 +137,27 @@ test('Director reads exact script; revisions preserve source and require authori
  assert.equal((await worker.fetch(save({...changed,revision:'old'}),e,ctx)).status,409);
  assert.equal((await worker.fetch(save(changed),e,ctx)).status,409); // rendering must finish first
  e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify({items:['vertical','horizontal'].map((o,i)=>({id:'published-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:1}}))}));
+ e.STOCK_BUCKET.m.set('capsula-url/editor/'+ref.slice(12)+'/v1/manifest.json',JSON.stringify({schema:'admira.capsule-preview.v1',ref,version:1,sourceVersion:1,sourceUrl:'https://stock.admira.store/source.mp4'}));
  const response=await worker.fetch(save(changed),e,ctx);assert.equal(response.status,202,await response.clone().text());
- const next=JSON.parse(e.STOCK_BUCKET.m.get(key));assert.equal(next.guion.giro,'Texto cambiado por Carlos');assert.equal(next.capsuleVersion,2);assert.deepEqual(next.source,job.source);assert.equal(next.cartelas.preroll,true);
+ const next=JSON.parse(e.STOCK_BUCKET.m.get(key));assert.equal(next.guion.giro,'Texto cambiado por Carlos');assert.equal(next.capsuleVersion,2);assert.deepEqual(next.source,job.source);assert.equal(next.cartelas.preroll,true);const reused=JSON.parse(e.STOCK_BUCKET.m.get('capsula-url/editor/'+ref.slice(12)+'/v2/manifest.json'));assert.equal(reused.version,2);assert.equal(reused.sourceVersion,1);
  assert.ok([...e.STOCK_BUCKET.m.keys()].some(k=>k.startsWith('capsula-url/history/')));
  // Simulate an R2 conditional-write conflict after the revision was read.
  const published={items:['vertical','horizontal'].map((o,i)=>({id:'v2-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:2}}))};e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify(published));
  const put=e.STOCK_BUCKET.put.bind(e.STOCK_BUCKET);e.STOCK_BUCKET.put=async(k,v,o)=>k===key&&o?.onlyIf?.etagMatches?null:put(k,v,o);
  assert.equal((await worker.fetch(save(changed),e,ctx)).status,409);
  assert.equal(JSON.parse(e.STOCK_BUCKET.m.get(key)).capsuleVersion,2);
+});
+
+test('clean preview media requires authorization, exact version and MP4; preserves original job', async t=>{
+ const calls=[];mockFetch(t,calls);const e=env();e.NOTIFY_KEY='preview-key';const ctx={waitUntil(){}};
+ const queued=await(await worker.fetch(post('/capsula/url/encargar',{url:LI,guion:GUION}),e,ctx)).json();const ref=queued.ref,key=capsulaUrlJobKey(ref),before=e.STOCK_BUCKET.m.get(key);
+ const endpoint='https://api.admira.store/capsula/url/preview?ref='+ref+'&version=1';
+ assert.equal((await worker.fetch(new Request(endpoint),e,ctx)).status,404);
+ const bytes=new Uint8Array(64);bytes.set(new TextEncoder().encode('ftyp'),4);
+ const put=(secret='preview-key',url=endpoint,body=bytes)=>new Request(url,{method:'PUT',headers:{Origin:'https://www.admira.studio','Content-Type':'video/mp4','X-Notify-Key':secret,'X-Capsule-Aspect':'0.5625'},body});
+ assert.equal((await worker.fetch(put('wrong'),e,ctx)).status,401);
+ assert.equal((await worker.fetch(put('preview-key',endpoint.replace('version=1','version=2')),e,ctx)).status,409);
+ assert.equal((await worker.fetch(put('preview-key',endpoint,new Uint8Array(64)),e,ctx)).status,400);
+ const response=await worker.fetch(put(),e,ctx);assert.equal(response.status,200);const manifest=await response.json();assert.equal(manifest.ref,ref);assert.equal(manifest.version,1);assert.match(manifest.sourceUrl,/\/v1\/[a-f0-9]{64}\.mp4$/);
+ const saved=await(await worker.fetch(new Request(endpoint),e,ctx)).json();assert.equal(saved.sourceAspect,.5625);assert.equal(saved.schema,'admira.capsule-preview.v1');assert.equal(e.STOCK_BUCKET.m.get(key),before);
 });

@@ -5086,6 +5086,33 @@ async function capsulaUrlEstadoHandler(req, env, url) {
   if (!capsulaUrlJobKey(ref)) return json({ error: 'bad-ref' }, { status: 400 });
   return json({ ok: true, ...(await capsulaUrlState(env, ref)) });
 }
+// A separate, text-free media track enables immediate browser editing without touching Stock.
+async function capsulaPreviewHandler(req,env,url){
+ const ref=url.searchParams.get('ref')||'',version=Number(url.searchParams.get('version'));
+ if(!capsulaUrlJobKey(ref)||!Number.isInteger(version)||version<1||version>99)return json({error:'bad-preview-reference'},{status:400});
+ if(!env.STOCK_BUCKET)return json({error:'r2-not-bound'},{status:503});
+ const prefix=`capsula-url/editor/${ref.slice(12)}/v${version}`;
+ if(req.method==='GET'){
+  const object=await env.STOCK_BUCKET.get(prefix+'/manifest.json');
+  return object?json(await object.json(),{headers:{'Cache-Control':'no-store'}}):json({error:'preview-not-ready'},{status:404});
+ }
+ if(!capsulaUrlOriginOk(req))return json({error:'forbidden-origin'},{status:403});
+ if(!await stockDeleteAuthorized(req,env,new URL(url.origin+url.pathname)))return json({error:'unauthorized'},{status:401});
+ const job=await capsulaUrlJob(env,ref);
+ if(!job||(job.capsuleVersion||1)!==version)return json({error:'revision-conflict'},{status:409});
+ const aspect=Number(req.headers.get('X-Capsule-Aspect'));
+ if(!Number.isFinite(aspect)||aspect<0.1||aspect>5||req.headers.get('Content-Type')!=='video/mp4')return json({error:'bad-preview-media'},{status:400});
+ if(Number(req.headers.get('Content-Length'))>33554432)return json({error:'body-too-large'},{status:413});
+ const bytes=await req.arrayBuffer();
+ if(bytes.byteLength<32||bytes.byteLength>33554432||new TextDecoder().decode(bytes.slice(4,8))!=='ftyp')return json({error:'bad-preview-media'},{status:400});
+ // Content-addressed paths keep a concurrent preview upload from mismatching its manifest.
+ const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(n=>n.toString(16).padStart(2,'0')).join('');
+ const mediaKey=prefix+'/'+hash+'.mp4';
+ await env.STOCK_BUCKET.put(mediaKey,bytes,{httpMetadata:{contentType:'video/mp4',cacheControl:'public, max-age=31536000, immutable'}});
+ const manifest={schema:'admira.capsule-preview.v1',ref,version,sourceAspect:aspect,sourceUrl:'https://stock.admira.store/'+mediaKey,bodyDuration:12,template:'v5.7',sourceVersion:version};
+ await env.STOCK_BUCKET.put(prefix+'/manifest.json',JSON.stringify(manifest),{httpMetadata:{contentType:'application/json',cacheControl:'no-store'}});
+ return json({ok:true,...manifest});
+}
 // Director edits the exact saved script. Never reconstruct on-screen copy from a prompt.
 async function capsulaDirectorHandler(req, env, url) {
   const ref = url.searchParams.get('ref') || '';
@@ -5115,6 +5142,11 @@ async function capsulaDirectorHandler(req, env, url) {
   await env.STOCK_BUCKET.put(`capsula-url/history/${ref.slice(12)}/v${version}-${revision}.json`,JSON.stringify(job),{httpMetadata:{contentType:'application/json'}});
   const written=await env.STOCK_BUCKET.put(key,JSON.stringify(next),{onlyIf:{etagMatches:revision},httpMetadata:{contentType:'application/json'}});
   if(!written)return json({error:'revision-conflict'}, {status:409});
+  // Text-only revisions reuse the clean source track, including while final encoding is pending.
+  try{
+    const previous=await env.STOCK_BUCKET.get(`capsula-url/editor/${ref.slice(12)}/v${version}/manifest.json`);
+    if(previous){const preview=await previous.json();await env.STOCK_BUCKET.put(`capsula-url/editor/${ref.slice(12)}/v${version+1}/manifest.json`,JSON.stringify({...preview,version:version+1}),{httpMetadata:{contentType:'application/json',cacheControl:'no-store'}});}
+  }catch{console.warn('capsule preview reuse pending');}
   return json({ok:true,queued:true,revision:written.etag,...await capsulaUrlState(env,ref)}, {status:202});
 }
 // Cola para el renderizador de GrokBotBox: encargos cuya cápsula aún no está en el Stock.
@@ -8612,6 +8644,8 @@ export default {
         res = await capsulaUrlEncargarHandler(req, env);
       } else if (path === '/capsula/url/estado' && req.method === 'GET') {
         res = await capsulaUrlEstadoHandler(req, env, url);
+      } else if (path === '/capsula/url/preview' && ['GET','PUT'].includes(req.method)) {
+        res = await capsulaPreviewHandler(req, env, url);
       } else if (path === '/capsula/url/director' && ['GET','POST'].includes(req.method)) {
         res = await capsulaDirectorHandler(req, env, url);
       } else if (path === '/capsula/url/cola' && req.method === 'GET') {
