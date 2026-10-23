@@ -1,3 +1,4 @@
+import { shotIntervalGet, shotIntervalPut } from './shot-interval.mjs';
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
 import { presenceBeat, presenceAll, presenceObservation } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
@@ -277,6 +278,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
+  '/signage/shot/interval', // lo sondea cada player nativo cada 60 s — no spamear
   '/signage/shot', // captura real de pantalla: POST ~1/8s por player + GET polling del panel — no spamear
   '/emit', // proof-of-play de admira.tv: POST cada ~12s por pantalla — no spamear Telegram
   '/emit/range', // lectura del informe (GET) — no notificar
@@ -8545,6 +8547,10 @@ export default {
         res = await signageAssignHandler(req, env);
       } else if (path === '/signage/shot' && req.method === 'POST') {
         res = await signageShotPostHandler(req, env);
+      } else if (path === '/signage/shot/interval' && req.method === 'GET') {
+        res = await shotIntervalGet(env, url, json);
+      } else if (path === '/signage/shot/interval' && (req.method === 'PUT' || req.method === 'POST')) {
+        res = await shotIntervalPut(req, env, json, gridKeyOk);
       } else if (path === '/signage/shot' && req.method === 'GET') {
         res = await signageShotGetHandler(req, env, url);
       } else if (path === '/notify' && req.method === 'POST') {
