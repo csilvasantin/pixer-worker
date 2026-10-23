@@ -145,5 +145,14 @@ def main():
         broll(job, out)
         if not (os.path.exists(os.path.join(out, 'capsula-9x16.mp4')) and os.path.exists(os.path.join(out, 'capsula-16x9.mp4'))):
             subprocess.run([sys.executable, 'render_url.py'], cwd=out, check=True)
+        if real:
+            from editor_preview import publish_preview
+            try:
+                preview_headers = {**UA}
+                for env_name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
+                    if os.environ.get(env_name): preview_headers[header] = os.environ[env_name]
+                publish_preview(job, out, API, preview_headers)
+            except Exception as error:
+                print('  editor: vista previa pendiente:', type(error).__name__)
         publicar(job, out, real)
 if __name__ == '__main__': main()
