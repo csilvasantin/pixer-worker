@@ -52,3 +52,49 @@ Rehacer una cápsula: `POST /capsula/url/encargar` con `rehacer: true` (sube `ca
 21. **Duración:** cuerpo 12 s + 2 s si hay preroll + 4 s si hay postroll (12, 14, 16 o 18 s). El vídeo de la fuente va en bucle si es más corto. El tramo interactivo (`capsuleSource.broll`) es el cuerpo: sin cartelas, toda la cápsula (0–12 s).
 22. **Sin cartela** la marca sigue en el cuerpo: en 16x9 con fuente vertical, logo y «¿Sabías que?» + tipología en la banda izquierda; en 9x16, «¿Sabías que?» y logo en la franja superior. Sin postroll no hay crédito final (el crédito queda en `capsuleSource.credit` para el modal).
 23. Guiones anteriores a v5.7 (sin `cartelas`) se renderizan con las dos cartelas, como antes.
+
+## Editor de fuente · previews sin publicación
+
+`capsula_document.py` conserva el `sourceGuion` original y convierte la fuente
+editable `capsula/1` a la plantilla real v5.7. Los tramos de edición son contiguos
+y usan segundos de salida. El campo `textos.titulo` es el titular de la pieza;
+«¿Sabías que?» sigue siendo la marca de la plantilla. Los estilos permitidos
+son `normal`, `enfasis` y `cifra`; sus rangos mantienen los índices del texto,
+también al ajustar líneas. Las imágenes de apoyo conservan crédito, intervalo y
+recorte normalizado `{x,y,w,h}`.
+
+Para recuperar una fuente desde un guion conservado:
+
+```bash
+python3 seed_capsula.py /ruta/guion.json --parent-id ID_STOCK --version 8 --media-url https://servidor/media/fuente.mp4 --output capsula.json
+```
+
+La semilla incluye la media base con `role: "background"`, su URL HTTPS,
+crédito recuperado del guion, recorte e intervalo. `--credit` permite completar
+o corregir el crédito. La URL debe servir el vídeo fuente directamente, para
+que la composición se construya con los textos editables; conserva la URL
+durante la revisión. El MP4 original del Stock permanece conservado.
+
+Un trabajo del editor contiene `previewOnly: true`, `capsula`, `ref`,
+`capsuleVersion` y un `renderId` distinto por revisión. La numeración técnica del
+Stock (por ejemplo, v8 → v9) se conserva separada de las revisiones editoriales
+(por ejemplo, preview v2). Cada `renderId` guarda su propia carpeta y sus MP4,
+guion y capturas. Se permite una ruta local de media al ejecutar `--job`.
+
+```bash
+python3 capsula_cola.py --job /ruta/preview-job.json --output-root /ruta/revisiones
+```
+
+El resultado `preview.json` incluye los dos vídeos full HD, 25 fps, y las
+capturas de cada formato. `--upload-preview` los sube al servidor configurado
+con `STOCK_API`, utilizando `CAPSULA_QUEUE_KEY` solo en memoria para autenticar
+al renderizador. El modo preview impide publicar y sustituir versiones incluso
+si el consumidor general se arranca con `--publicar`.
+
+Dependencias locales: Python 3 con Pillow y numpy, ffmpeg y ffprobe. En macOS,
+configura `CAPSULA_FONT_ANTON`, `CAPSULA_FONT_OSW` y `CAPSULA_FONT_INTER` con las
+fuentes Antonio, Oswald e Inter de la plantilla para obtener la misma
+tipografía que en Linux. Sin esas fuentes se usa una fuente de reserva.
+
+Validación de adaptación, recorte, intervalos, estilos, conservación y bloqueo
+de publicación: `python3 -m unittest test_capsula_document.py`.

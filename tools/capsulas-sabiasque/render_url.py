@@ -7,26 +7,40 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plantilla_v5 import PRE, CIERRE_S, T_TOTAL_V51, barra_progreso, secuencia, fit_line, linea_fuente
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-G=json.load(open('guion.json',encoding='utf-8')); C=G['capsulas'][0]
+from capsula_text import fit_text, draw_spans
+with open('guion.json',encoding='utf-8') as source:
+    G=json.load(source)
+C=G['capsulas'][0]
 FPS=25
 # v5.7: cartelas opcionales. Guiones sin «cartelas» (anteriores a v5.7) conservan las dos.
 _CT=C.get('cartelas') or {'preroll':True,'postroll':True}
 PRE_ON=bool(_CT.get('preroll')); POST_ON=bool(_CT.get('postroll'))
-CUERPO=12.0; OFF=0 if PRE_ON else 2   # el cuerpo vive en la línea de tiempo «clásica» 2–14 s
+OFF=0 if PRE_ON else 2   # el guion conserva coordenadas clásicas; el editor usa segundos de salida
 POST=CIERRE_S if POST_ON else 0
-T=int((2 if PRE_ON else 0)+CUERPO+(CIERRE_S if POST_ON else 0))
+T=float(C.get('duracion_s') or ((2 if PRE_ON else 0)+12+POST))
+CUERPO=T-(2 if PRE_ON else 0)-POST
+EDITOR=G.get('capsulaEditor') or {}
 # v5.2: la cartela inicial usa la foto/miniatura de la fuente (fuente.jpg) de fondo, difuminada y oscurecida.
 FOTO=next((p for p in ('fuente.jpg','fuente.png','fuente.webp') if os.path.exists(p)),None)
 RED=(31,111,235); INK=(28,28,30); GREY=(95,95,100)
+try:
+    _color=(G.get('saga') or {}).get('color', '#1F6FEB').lstrip('#')
+    RED=tuple(int(_color[i:i+2],16) for i in (0,2,4))
+except (ValueError,TypeError): pass
 ANTON='/usr/share/fonts/truetype/sand-box/google/Antonio/Antonio-VariableFont_wght.ttf'
 OSW='/usr/share/fonts/truetype/sand-box/google/Oswald/Oswald-VariableFont_wght.ttf'
 INTER='/usr/share/fonts/truetype/sand-box/google/Inter/Inter-VariableFont_opsz,wght.ttf'
 _fc={}
 def F(p,s,w):
+    is_inter = p == INTER
+    if not os.path.exists(p):
+        # Official Linux fonts remain preferred. macOS previews can use local template fonts.
+        p=next((v for v in (os.environ.get('CAPSULA_FONT_'+('INTER' if p==INTER else 'OSW' if p==OSW else 'ANTON'), ''),
+            '/System/Library/Fonts/Supplemental/Arial Narrow.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf') if v and os.path.isfile(v)), p)
     k=(p,s,w)
     if k not in _fc:
         f=ImageFont.truetype(p,s)
-        try: f.set_variation_by_axes([w] if p!=INTER else [14,w])
+        try: f.set_variation_by_axes([14,w] if is_inter else [w])
         except Exception: pass
         _fc[k]=f
     return _fc[k]
@@ -138,9 +152,14 @@ def panel(im,t,a,bx,by,bw,bh,u):
     im.alpha_composite(Pn)
 BROLL=None
 def broll_n():
+    bg=next((m for m in EDITOR.get('media',[]) if m.get('role')=='background'),None)
+    if bg:
+        return max(1,len(media_frames(bg)))
     import glob; return len(glob.glob('broll/f*.png'))
 def broll(i):
     global BROLL
+    bg=next((m for m in EDITOR.get('media',[]) if m.get('role')=='background'),None)
+    if bg: return media_image(bg,i/FPS)
     if BROLL is None:
         import glob; BROLL=sorted(glob.glob('broll/f*.png'))
     return Image.open(BROLL[max(0,min(len(BROLL)-1,i))]).convert('RGBA')
@@ -155,10 +174,48 @@ def fmt(n): return f"{n:,}".replace(',','.')
 #    (título y logo) y abajo (titular + gancho/giro/remate + fuente), crédito y «Toca para ver el original» en medio;
 #  · fuente horizontal: la composición de siempre (caja del vídeo a la derecha en 16x9, en medio en 9x16), pero fija.
 E0=2.0
+_media_frames={}
+def safe_local(value):
+    if not value or os.path.isabs(value) or '..' in value.split('/'):
+        raise ValueError('Ruta de media no controlada')
+    return value
+def media_frames(item):
+    import glob
+    directory=item.get('localFrames')
+    if not directory: return []
+    safe_local(directory)
+    if directory not in _media_frames: _media_frames[directory]=sorted(glob.glob(os.path.join(directory,'f*.png')))
+    return _media_frames[directory]
+def media_image(item,seconds):
+    frames=media_frames(item)
+    filename=frames[int(max(0,seconds)*FPS)%len(frames)] if frames else safe_local(item.get('localFile'))
+    image=Image.open(filename).convert('RGBA'); crop=item.get('recorte')
+    if crop:
+        x,y=crop.get('x',0),crop.get('y',0); w,h=crop.get('w',crop.get('width',1)),crop.get('h',crop.get('height',1))
+        image=image.crop((int(x*image.width),int(y*image.height),int((x+w)*image.width),int((y+h)*image.height)))
+    return image
+def editor_frame(seconds,base):
+    for item in EDITOR.get('media',[]):
+        if item.get('role')=='background': continue
+        a,b=item['t']
+        if not a<=seconds<b: continue
+        overlay=media_image(item,seconds-a)
+        pos=item.get('posicion') or {'x':0.18,'y':0.25,'w':0.64,'h':0.38}
+        x,y,w,h=[float(pos.get(k,d)) for k,d in (('x',.18),('y',.25),('w',.64),('h',.38))]
+        overlay.thumbnail((max(1,int(base.width*w)),max(1,int(base.height*h))),Image.Resampling.LANCZOS)
+        base.alpha_composite(overlay,(int(base.width*x+(base.width*w-overlay.width)/2),int(base.height*y+(base.height*h-overlay.height)/2)))
+    return base
 def bfr(t):
+    seconds=t-OFF
+    backgrounds=[m for m in EDITOR.get('media',[]) if m.get('role')=='background']
+    if backgrounds:
+        # The background persists for the whole capsule; a short video loops.
+        bg=next((m for m in backgrounds if m['t'][0]<=seconds<m['t'][1]),backgrounds[0])
+        image=media_image(bg,max(0,seconds-bg['t'][0]))
+        return editor_frame(seconds,image)
     n=broll_n()
-    if n<=1: return kenburns(broll(0),((t-E0)/(T-POST-E0)))
-    return broll(int((t-E0)*FPS)%n)
+    if n<=1: return editor_frame(seconds,kenburns(broll(0),max(0,(t-E0)/max(.001,CUERPO))))
+    return editor_frame(seconds,broll(int(max(0,t-E0)*FPS)%n))
 def vertical_src():
     return broll_n()>0 and broll(0).height>broll(0).width
 def cover(fr,W,H):
@@ -167,6 +224,13 @@ def cover(fr,W,H):
 def grad(W,H,y0,y1,a0,a1):
     g=np.linspace(a0,a1,max(1,y1-y0),dtype=np.float32)[:,None].repeat(W,1)
     m=Image.new('L',(W,H),0); m.paste(Image.fromarray(np.clip(g,0,255).astype(np.uint8)),(0,y0)); return m
+_vertical_shadows={}
+def vertical_shadows(W,H):
+    if (W,H) not in _vertical_shadows:
+        mask=Image.fromarray(np.maximum(np.array(grad(W,H,0,int(H*0.20),220,0)),np.maximum(np.array(grad(W,H,int(H*0.46),int(H*0.60),0,225)),np.array(grad(W,H,int(H*0.60),H,225,235)))))
+        _vertical_shadows[(W,H)]=Image.composite(Image.new('RGBA',(W,H),(8,8,12,255)),Image.new('RGBA',(W,H)),mask)
+    return _vertical_shadows[(W,H)]
+_text_layouts={}
 # v5.4: sin pastilla ni texto. Pista sutil dentro del vídeo: icono pequeño de reproducir con un leve
 # resplandor que respira, en la esquina superior derecha del vídeo. La interactividad la da el modal del Stock.
 def play_hint(im,x1,y1,u,a,t):
@@ -187,15 +251,37 @@ def headline(L,d,t,x,y,tw,V,u,col,maxl,fsz=None):
         txt(L,(x,y),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,col,eo((t-2)/0.3))
         if cf.get('unidad'): txt(L,(x+int(8*u),y+int(260*u)),cf['unidad'],F(OSW,int(64*u),700),RED if col==INK else (120,175,255),eo((t-2.3)/0.5))
         return y+int(350*u)
-    fh=F(OSW,int((fsz or (84 if V else 80))*u),700); ls=wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw)[:maxl]
-    lh_=int((fsz or 80)*1.2*u)
-    for i,s_ in enumerate(ls): txt(L,(x,y+i*lh_),s_,fh,col,eo((t-2-i*0.12)/0.4))
+    title=C['preroll']['subtitulo'] or G['objeto']
+    layout=('headline',title,int((fsz or (84 if V else 80))*u),tw,maxl,max(10,int(18*u)))
+    if layout not in _text_layouts:
+        _text_layouts[layout]=fit_text(d,title,lambda n:F(OSW,n,700),layout[2],tw,maxl,minsize=layout[5])
+    fh,ls,size=_text_layouts[layout]
+    lh_=size*1.2
+    spans=[s for s in EDITOR.get('spans',[]) if s['campo']=='titulo']
+    for i,(s_,offset) in enumerate(ls): draw_spans(ImageDraw.Draw(L),(x,y+i*lh_),s_,offset,fh,col,eo((t-2-i*.12)/.4),spans,RED)
     return y+len(ls)*lh_
 def lines(L,d,t,x,y,tw,u,cols3,size):
-    items=[(C[k]['linea'],*C[k]['linea_t']) for k in ('gancho','giro','remate')]
-    cols={items[0][0]:cols3[0],items[1][0]:cols3[1],items[2][0]:cols3[2]}; fl=F(INTER,int(size*u),700)
-    for s_,al,dx in secuencia(t,items):
-        for i,l in enumerate(wrap(d,s_,fl,tw)): txt(L,(x-dx*u,y+i*int(size*1.28*u)),l,fl,cols[s_],al)
+    maxheight=L.height-y-int(32*u)
+    for index,key in enumerate(('gancho','giro','remate')):
+        text=C[key]['linea']; a,b=C[key]['linea_t']
+        if not a<=t<b: continue
+        # One active message at a time, including across timing edits.
+        alpha=eo((t-a)/min(.5,(b-a)/3)); dx=(1-alpha)*60*u
+        layout=('beat',text,size,u,tw,maxheight)
+        chosen=_text_layouts.get(layout)
+        if not chosen:
+            for candidate in range(max(12,int(size*u)),max(11,int(14*u)),-1):
+                try:
+                    font,wrapped,actual=fit_text(d,text,lambda n:F(INTER,n,700),candidate,tw,
+                        max(1,int(maxheight/(candidate*1.28))),minsize=candidate)
+                    if len(wrapped)*actual*1.28<=maxheight: chosen=(font,wrapped,actual);break
+                except ValueError: pass
+            if not chosen: raise ValueError(f'{key}: texto demasiado largo para la zona disponible')
+            _text_layouts[layout]=chosen
+        font,wrapped,actual=chosen
+        spans=[s for s in EDITOR.get('spans',[]) if s['campo']==key]
+        for i,(line,offset) in enumerate(wrapped):
+            draw_spans(ImageDraw.Draw(L),(x-dx,y+i*actual*1.28),line,offset,font,cols3[index],alpha,spans,RED)
 # v5.5 (22-oct-2026, Carlos · todas las tipologías): fuente VERTICAL en 16x9 → la imagen va centrada en su
 # proporción y las bandas laterales (desenfoque muy apagado de la propia imagen, sin cajas) llevan el logo
 # arriba a la izquierda y «¿Sabías que?» + tipología a la derecha. En la cartela, la imagen central pasa de
@@ -244,8 +330,7 @@ def explain(t,W,H):
         im=cover(bfr(t),W,H).convert('RGBA')
         if t-E0<0.7:
             from PIL import ImageFilter; im=im.filter(ImageFilter.GaussianBlur(24*u*(1-eo((t-E0)/0.7))))
-        sh=Image.new('RGBA',(W,H),(8,8,12,255))
-        m=Image.fromarray(np.maximum(np.array(grad(W,H,0,int(H*0.20),220,0)),np.maximum(np.array(grad(W,H,int(H*0.46),int(H*0.60),0,225)),np.array(grad(W,H,int(H*0.60),H,225,235))))); im.alpha_composite(Image.composite(sh,Image.new('RGBA',(W,H)),m))
+        im.alpha_composite(vertical_shadows(W,H))
         d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
         txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)
         play_hint(im,W-mx,int(H*0.20),u,a,t)
@@ -284,7 +369,9 @@ def frame(t,W,H):
     u=min(W,H)/1080; V=H>W; tl=t+OFF   # tl = tiempo en la línea clásica (cartela 0–2, cuerpo 2–14, cierre 14–18)
     if PRE_ON and t<2: im=brand_card(0,t,W,H,V,u)
     elif POST_ON and t>=T-POST: im=brand_card(T-POST,t,W,H,V,u,out=True)
-    else: im=explain(min(tl,13.999),W,H)
+    else: im=explain(tl,W,H)
+    # Credits stay in editable metadata; v5.7 only draws source attribution in
+    # its optional postroll. Editor media must not add captions to the body.
     barra_progreso(im,min(t,T-POST) if t<T-POST else T,T,RED,u,abajo=True)  # en el cierre fijo, barra llena y quieta
     return im
 STILLS=tuple(x for x in (1,5,7,10,15,17.5) if x<T)
@@ -292,10 +379,11 @@ def render(W,H,out):
     p=subprocess.Popen(['ffmpeg','-y','-loglevel','error','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-',
        '-f','lavfi','-i',f'anullsrc=r=48000:cl=stereo:d={T}',
        '-map','0:v','-map','1:a','-c:v','libx264','-pix_fmt','yuv420p','-crf','18','-preset','medium','-c:a','aac','-b:a','128k','-t',str(T),'-movflags','+faststart',out],stdin=subprocess.PIPE)
-    for i in range(FPS*T):
+    for i in range(round(FPS*T)):
         t=i/FPS; im=frame(t,W,H).convert('RGB'); p.stdin.write(im.tobytes())
         pass
-    p.stdin.close(); p.wait()
+    p.stdin.close()
+    if p.wait()!=0: raise RuntimeError('ffmpeg no pudo generar el MP4')
     for s in STILLS: frame(s,W,H).convert('RGB').save(out.replace('.mp4',f'-t{s:g}s.png'))  # stills en el instante exacto
 if __name__=='__main__':
     render(1920,1080,'capsula-16x9.mp4'); render(1080,1920,'capsula-9x16.mp4')
