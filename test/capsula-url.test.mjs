@@ -1,3 +1,5 @@
+import {timingSafeEqual} from 'node:crypto';
+if(typeof crypto.subtle.timingSafeEqual!=='function')Object.defineProperty(crypto.subtle,'timingSafeEqual',{value:(a,b)=>timingSafeEqual(Buffer.from(a),Buffer.from(b))});
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.js';
@@ -119,4 +121,28 @@ test('v5.7: cartelas opcionales, apagadas por defecto, en el encargo y en capsul
   assert.deepEqual([sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', broll: { start: 0, end: 12 } }, ref).preroll, sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', postroll: true }, ref).postroll], [false, true]);
   const src = (await import('node:fs')).readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
   assert.match(src, /cartelas: \{ preroll: body\.preroll === true, postroll: body\.postroll === true \}/);
+});
+
+test('Director reads exact script; revisions preserve source and require authorization and compare-and-swap', async t => {
+ const calls=[];mockFetch(t,calls);const e=env();e.NOTIFY_KEY='test-editor-key';const ctx={waitUntil(){}};
+ const queued=await (await worker.fetch(post('/capsula/url/encargar',{url:LI,guion:GUION}),e,ctx)).json();
+ const ref=queued.ref,key=capsulaUrlJobKey(ref),job=JSON.parse(e.STOCK_BUCKET.m.get(key));
+ job.source.broll={start:2,end:10};e.STOCK_BUCKET.m.set(key,JSON.stringify(job));
+ const endpoint='https://api.admira.store/capsula/url/director?ref='+ref;
+ const original=await (await worker.fetch(new Request(endpoint),e,ctx)).json();
+ assert.equal(original.guion.giro,GUION.giro);assert.equal(original.revision,'e');assert.equal(original.requestedBy,undefined);
+ const save=(body,secret='test-editor-key')=>new Request(endpoint,{method:'POST',headers:{Origin:'https://ainimation.studio','Content-Type':'application/json','X-Notify-Key':secret},body:JSON.stringify(body)});
+ const changed={revision:'e',guion:{...GUION,giro:'Texto cambiado por Carlos'},cartelas:{preroll:true,postroll:false}};
+ const denied=await worker.fetch(save(changed,'wrong'),e,ctx);assert.equal(denied.status,401,await denied.text());
+ assert.equal((await worker.fetch(save({...changed,revision:'old'}),e,ctx)).status,409);
+ assert.equal((await worker.fetch(save(changed),e,ctx)).status,409); // rendering must finish first
+ e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify({items:['vertical','horizontal'].map((o,i)=>({id:'published-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:1}}))}));
+ const response=await worker.fetch(save(changed),e,ctx);assert.equal(response.status,202,await response.clone().text());
+ const next=JSON.parse(e.STOCK_BUCKET.m.get(key));assert.equal(next.guion.giro,'Texto cambiado por Carlos');assert.equal(next.capsuleVersion,2);assert.deepEqual(next.source,job.source);assert.equal(next.cartelas.preroll,true);
+ assert.ok([...e.STOCK_BUCKET.m.keys()].some(k=>k.startsWith('capsula-url/history/')));
+ // Simulate an R2 conditional-write conflict after the revision was read.
+ const published={items:['vertical','horizontal'].map((o,i)=>({id:'v2-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:2}}))};e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify(published));
+ const put=e.STOCK_BUCKET.put.bind(e.STOCK_BUCKET);e.STOCK_BUCKET.put=async(k,v,o)=>k===key&&o?.onlyIf?.etagMatches?null:put(k,v,o);
+ assert.equal((await worker.fetch(save(changed),e,ctx)).status,409);
+ assert.equal(JSON.parse(e.STOCK_BUCKET.m.get(key)).capsuleVersion,2);
 });

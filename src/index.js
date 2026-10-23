@@ -5086,6 +5086,37 @@ async function capsulaUrlEstadoHandler(req, env, url) {
   if (!capsulaUrlJobKey(ref)) return json({ error: 'bad-ref' }, { status: 400 });
   return json({ ok: true, ...(await capsulaUrlState(env, ref)) });
 }
+// Director edits the exact saved script. Never reconstruct on-screen copy from a prompt.
+async function capsulaDirectorHandler(req, env, url) {
+  const ref = url.searchParams.get('ref') || '';
+  const key = capsulaUrlJobKey(ref);
+  if (!key) return json({error:'bad-ref'}, {status:400});
+  if (!env.STOCK_BUCKET) return json({error:'r2-not-bound'}, {status:503});
+  const object = await env.STOCK_BUCKET.get(key);
+  if (!object) return json({error:'capsule-project-not-found'}, {status:404});
+  const job = await object.json();
+  const revision = object.etag;
+  if (req.method === 'GET') return json({ok:true,ref,revision,guion:job.guion,cartelas:job.cartelas||{preroll:false,postroll:false},capsuleVersion:job.capsuleVersion||1,sourceUrl:job.source?.url,...await capsulaUrlState(env,ref)}, {headers:{'Cache-Control':'no-store'}});
+  if (!capsulaUrlOriginOk(req) && !['https://ainimation.studio','https://www.ainimation.studio'].includes(req.headers.get('Origin'))) return json({error:'forbidden-origin'}, {status:403});
+  if (!await stockDeleteAuthorized(req,env,new URL(url.origin+url.pathname))) return json({error:'unauthorized'}, {status:401});
+  if (!/^application\/json(?:;|$)/i.test(req.headers.get('Content-Type')||'')) return json({error:'json-required'}, {status:415});
+  const raw=await req.text();
+  if(raw.length>16000)return json({error:'body-too-large'}, {status:413});
+  let body;try{body=JSON.parse(raw);}catch{return json({error:'bad-json'}, {status:400});}
+  if(body.revision!==revision)return json({error:'revision-conflict'}, {status:409});
+  const norm=normalizeCapsulaGuion(body.guion);
+  if(!norm.ok)return json({error:'invalid-guion',errors:norm.errors}, {status:400});
+  const state=await capsulaUrlState(env,ref);
+  if(state.status!=='publicada')return json({error:'render-in-progress'}, {status:409});
+  const version=Math.max(job.capsuleVersion||1,...Object.values(state.existing).map(x=>x.version||1));
+  if(version>=99)return json({error:'version-limit'}, {status:409});
+  // Preserve all source/media options. The existing renderer consumes this same queue.
+  const next={...job,guion:norm.guion,capsuleVersion:version+1,status:'en-cola',createdAt:new Date().toISOString(),requestedBy:'Ainimation Director',tags:[...CAPSULA_URL_TAGS,norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g,'')],cartelas:{preroll:body.cartelas?.preroll===true,postroll:body.cartelas?.postroll===true}};
+  await env.STOCK_BUCKET.put(`capsula-url/history/${ref.slice(12)}/v${version}-${revision}.json`,JSON.stringify(job),{httpMetadata:{contentType:'application/json'}});
+  const written=await env.STOCK_BUCKET.put(key,JSON.stringify(next),{onlyIf:{etagMatches:revision},httpMetadata:{contentType:'application/json'}});
+  if(!written)return json({error:'revision-conflict'}, {status:409});
+  return json({ok:true,queued:true,revision:written.etag,...await capsulaUrlState(env,ref)}, {status:202});
+}
 // Cola para el renderizador de GrokBotBox: encargos cuya cápsula aún no está en el Stock.
 async function capsulaUrlColaHandler(req, env) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
@@ -8581,6 +8612,8 @@ export default {
         res = await capsulaUrlEncargarHandler(req, env);
       } else if (path === '/capsula/url/estado' && req.method === 'GET') {
         res = await capsulaUrlEstadoHandler(req, env, url);
+      } else if (path === '/capsula/url/director' && ['GET','POST'].includes(req.method)) {
+        res = await capsulaDirectorHandler(req, env, url);
       } else if (path === '/capsula/url/cola' && req.method === 'GET') {
         res = await capsulaUrlColaHandler(req, env);
       } else if (path === '/stock/site-capsule' && req.method === 'POST') {
