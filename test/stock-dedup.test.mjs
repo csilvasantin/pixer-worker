@@ -100,7 +100,7 @@ test('el publish calcula sha256 en los dos carriles y lo guarda en meta.contentH
 });
 
 test('los índices KV de dedup se escriben antes de responder y se olvidan al borrar', () => {
-  assert.match(source, /await Promise\.all\(\[\n\s+stockRememberHash\(env, contentHash, id\),\n\s+stockRememberRecent\(env, recentInput, id\),/);
+  assert.match(source, /await Promise\.all\(\[\n\s+editorProject \? Promise\.resolve\(\) : stockRememberHash\(env, contentHash, id\),\n\s+stockRememberRecent\(env, recentInput, id\),/);
   assert.match(source, /if \(meta && meta\.contentHash\) ctx\.waitUntil\(stockForgetHash\(env, meta\.contentHash\)\)/);
   assert.match(source, /STOCK_HASH_KV_PREFIX \+ hash/);
 });
