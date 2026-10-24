@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unittest
 
-TOOLS = Path(__file__).resolve().parents[1] / 'tools/capsulas-sabiasque'
+TOOLS = Path(os.environ.get('CAPSULE_RENDER_TOOLS') or (Path(__file__).resolve().parents[1] / 'tools/capsulas-sabiasque')).resolve()
 sys.path.insert(0, str(TOOLS))
 from text_positions import normalize_positions, shifted_xy, SCHEMA
 from capsula_cola import guion_v5
@@ -35,7 +35,10 @@ class TextPositionsTest(unittest.TestCase):
                 normalize_positions(bad)
 
     def test_queue_and_actual_frames(self):
-        if not os.environ.get('CAPSULE_FONT_DIR'):
+        default_fonts = Path('/usr/share/fonts/truetype/sand-box/google')
+        if not os.environ.get('CAPSULE_FONT_DIR') and not all((default_fonts / path).is_file() for path in [
+            'Antonio/Antonio-VariableFont_wght.ttf', 'Oswald/Oswald-VariableFont_wght.ttf',
+            'Inter/Inter-VariableFont_opsz,wght.ttf']):
             self.skipTest('Set CAPSULE_FONT_DIR to the bundled capsule fonts')
         job = {'ref': 'capsula-url:0000000000000001', 'source': {'url': 'https://example.test/', 'kind': 'articulo'},
                'guion': {'objeto': 'ENSAYO', 'subtitulo': 'ENSAYO', 'tema': 'creatividad',
