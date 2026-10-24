@@ -13,6 +13,7 @@ import glob, json, os, shutil, subprocess, sys, urllib.request, datetime
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
+from text_positions import normalize_positions, SCHEMA as TEXT_POSITION_SCHEMA
 API = os.environ.get('STOCK_API', 'https://api.admira.store')
 UA = {'user-agent': 'Mozilla/5.0 admiranext-capsulas', 'origin': 'https://www.admira.studio'}
 PLANT = next(p for p in (os.path.join(BASE, 'tecnologia-taalas', 'v2'), BASE) if os.path.exists(os.path.join(p, 'logo.png')))
@@ -27,6 +28,7 @@ def guion_v5(job):
     pre = 2 if cart['preroll'] else 0; tot = pre + 12 + (4 if cart['postroll'] else 0)
     credito = 'Vídeo: ' + (s.get('author') or {'linkedin': 'LinkedIn', 'youtube': 'YouTube', 'tiktok': 'TikTok', 'x': 'X'}.get(s.get('kind'), s.get('kind') or 'fuente'))
     return {"fecha": hoy, "plantilla": "plantilla_guion_v5", "saga": {"tema": tema, "color": COLORES.get(tema, '#1F6FEB')},
+        "textPositions": normalize_positions(job.get("textPositions")), "textPositionSchema": TEXT_POSITION_SCHEMA,
         "tipo": f"url-{slug}", "objeto": g['objeto'], "fuente": g['fuente'],
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
@@ -142,6 +144,7 @@ def main():
         json.dump(guion_v5(job), open(os.path.join(out, 'guion.json'), 'w'), indent=1, ensure_ascii=False)
         shutil.copy(os.path.join(PLANT, 'logo.png'), out); shutil.copy(os.path.join(BASE, 'plantilla_v5.py'), out)
         shutil.copy(os.path.join(BASE, 'render_url.py'), out)
+        shutil.copy(os.path.join(BASE, 'text_positions.py'), out)
         broll(job, out)
         if not (os.path.exists(os.path.join(out, 'capsula-9x16.mp4')) and os.path.exists(os.path.join(out, 'capsula-16x9.mp4'))):
             subprocess.run([sys.executable, 'render_url.py'], cwd=out, check=True)
