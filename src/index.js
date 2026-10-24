@@ -6758,7 +6758,7 @@ async function stockDeleteHandler(req, env, ctx, id) {
 
   let meta = null;
   try { meta = await metaObj.json(); } catch {}
-  if (meta && meta.contentHash) ctx.waitUntil(stockForgetHash(env, meta.contentHash));
+  if (meta && meta.contentHash) ctx.waitUntil(stockForgetHash(env, meta.contentHash, id));
 
   const keysToDelete = [metaKey];
   if (meta?.editorProjectUrl) keysToDelete.push(`stock/${id}/editor-project.json`);

@@ -1,3 +1,5 @@
+import {timingSafeEqual} from 'node:crypto';
+if(typeof crypto.subtle.timingSafeEqual!=='function')Object.defineProperty(crypto.subtle,'timingSafeEqual',{value:(a,b)=>timingSafeEqual(Buffer.from(a),Buffer.from(b))});
 import {r2Conditions} from './helpers/r2-conditions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -34,4 +36,18 @@ test('bad parent or nonportable source fails before writing anything',async()=>{
   const r=await stockPublishHandler(req(extra),e,ctx);assert.ok(r.status>=400);assert.equal(e.STOCK_BUCKET.map.size,0);
  }
  assert.throws(()=>validateEditorProject({...project,kind:'unknown'}));
+});
+
+test('deleting an editable version preserves another asset hash owner and deletes its source', async()=>{
+ const bucket=r2Conditions(new Bucket()),kv=new Map(),pending=[];
+ const env={STOCK_BUCKET:bucket,NOTIFY_KEY:'test-secret',SIGNAGE_KV:{get:async k=>kv.get(k)||null,delete:async k=>kv.delete(k),put:async(k,v)=>kv.set(k,v)}};
+ const ctx={waitUntil:p=>pending.push(Promise.resolve(p))};
+ const hash='a'.repeat(64),key='stock:hash:'+hash;
+ kv.set(key,'original');
+ await bucket.put('stock/revision/meta.json',JSON.stringify({id:'revision',contentHash:hash,editorProjectUrl:'https://api.admira.store/stock/editor-project/revision',assetKey:'stock/revision/asset.webm'}));
+ await bucket.put('stock/revision/editor-project.json',JSON.stringify(project));
+ await bucket.put('stock/revision/asset.webm','render');
+ const r=await worker.fetch(new Request('https://api.admira.store/stock/revision',{method:'DELETE',headers:{'X-Notify-Key':'test-secret'}}),env,ctx);
+ assert.equal(r.status,200,await r.clone().text());await Promise.all(pending);
+ assert.equal(kv.get(key),'original');assert.equal(await bucket.get('stock/revision/editor-project.json'),null);
 });
