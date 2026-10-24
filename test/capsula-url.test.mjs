@@ -130,7 +130,7 @@ test('Director reads exact script; revisions preserve source and require authori
  job.source.broll={start:2,end:10};e.STOCK_BUCKET.m.set(key,JSON.stringify(job));
  const endpoint='https://api.admira.store/capsula/url/director?ref='+ref;
  const original=await (await worker.fetch(new Request(endpoint),e,ctx)).json();
- assert.equal(original.guion.giro,GUION.giro);assert.equal(original.revision,'e');assert.equal(original.requestedBy,undefined);
+ assert.deepEqual(original.textPositions,{});assert.equal(original.textPositionRendering,false);assert.equal(original.guion.giro,GUION.giro);assert.equal(original.revision,'e');assert.equal(original.requestedBy,undefined);
  const save=(body,secret='test-editor-key')=>new Request(endpoint,{method:'POST',headers:{Origin:'https://ainimation.studio','Content-Type':'application/json','X-Notify-Key':secret},body:JSON.stringify(body)});
  const changed={revision:'e',guion:{...GUION,giro:'Texto cambiado por Carlos'},cartelas:{preroll:true,postroll:false}};
  const denied=await worker.fetch(save(changed,'wrong'),e,ctx);assert.equal(denied.status,401,await denied.text());
@@ -138,8 +138,12 @@ test('Director reads exact script; revisions preserve source and require authori
  assert.equal((await worker.fetch(save(changed),e,ctx)).status,409); // rendering must finish first
  e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify({items:['vertical','horizontal'].map((o,i)=>({id:'published-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:1}}))}));
  e.STOCK_BUCKET.m.set('capsula-url/editor/'+ref.slice(12)+'/v1/manifest.json',JSON.stringify({schema:'admira.capsule-preview.v1',ref,version:1,sourceVersion:1,sourceUrl:'https://stock.admira.store/source.mp4'}));
+ changed.textPositions={horizontal:{heading:{x:-.1,y:.05},gancho:{x:.02,y:0}},vertical:{remate:{x:0,y:-.1}}};
+ assert.equal((await worker.fetch(save(changed),e,ctx)).status,503);assert.equal(JSON.parse(e.STOCK_BUCKET.m.get(key)).capsuleVersion,1);
+ assert.equal((await worker.fetch(save({...changed,textPositions:{horizontal:{heading:{x:2,y:0}}}}),e,ctx)).status,400);
+ e.CAPSULE_TEXT_POSITIONS_RENDERER='admira.text-positions.v1';
  const response=await worker.fetch(save(changed),e,ctx);assert.equal(response.status,202,await response.clone().text());
- const next=JSON.parse(e.STOCK_BUCKET.m.get(key));assert.equal(next.guion.giro,'Texto cambiado por Carlos');assert.equal(next.capsuleVersion,2);assert.deepEqual(next.source,job.source);assert.equal(next.cartelas.preroll,true);const reused=JSON.parse(e.STOCK_BUCKET.m.get('capsula-url/editor/'+ref.slice(12)+'/v2/manifest.json'));assert.equal(reused.version,2);assert.equal(reused.sourceVersion,1);
+ const next=JSON.parse(e.STOCK_BUCKET.m.get(key));assert.deepEqual(next.textPositions,changed.textPositions);const withLayout=await(await worker.fetch(new Request(endpoint),e,ctx)).json();assert.equal(withLayout.textPositionRendering,true);assert.deepEqual(withLayout.textPositions,changed.textPositions);assert.equal(next.guion.giro,'Texto cambiado por Carlos');assert.equal(next.capsuleVersion,2);assert.deepEqual(next.source,job.source);assert.equal(next.cartelas.preroll,true);const reused=JSON.parse(e.STOCK_BUCKET.m.get('capsula-url/editor/'+ref.slice(12)+'/v2/manifest.json'));assert.equal(reused.version,2);assert.equal(reused.sourceVersion,1);
  assert.ok([...e.STOCK_BUCKET.m.keys()].some(k=>k.startsWith('capsula-url/history/')));
  // Simulate an R2 conditional-write conflict after the revision was read.
  const published={items:['vertical','horizontal'].map((o,i)=>({id:'v2-'+i,type:'video',externalRef:ref,tags:[o],capsuleSource:{version:2}}))};e.STOCK_BUCKET.m.set('stock/index.json',JSON.stringify(published));
