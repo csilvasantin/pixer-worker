@@ -104,4 +104,6 @@ de publicación: `python3 -m unittest test_capsula_document.py`.
 
 `process_job` conserva el exportador de pista limpia y `text_positions.py` de main para los trabajos ordinarios. Los trabajos `capsula/1` usan el adaptador de texto, estilos, media y tiempos; copian también `text_positions.py` e incluyen su contenido en la huella de caché. Los previews salen antes de la publicación de pistas o versiones del Stock. Media puede cubrir hasta la duración de salida, incluida la cartela de cierre, igual que permite la API.
 
-Comprobaciones: 371 tests Node, 11 tests del documento/cola, contrato de posiciones con imágenes reales en ambos formatos y recorrido del navegador con el Worker real sobre bucket en memoria. El despliegue del Worker debe coordinarse con el puente Pixeria y AInimation; instalar primero el consumidor y generar/subir fuentes verificadas. No activar la opción de edición completa para una pieza sin `capsula/1` y su media fuente.
+Comprobaciones: 371 tests Node, 12 tests del documento/cola, contrato de posiciones con imágenes reales en ambos formatos y recorrido del navegador con el Worker real sobre bucket en memoria. El despliegue del Worker debe coordinarse con el puente Pixeria y AInimation; instalar primero el consumidor y generar/subir fuentes verificadas. No activar la opción de edición completa para una pieza sin `capsula/1` y su media fuente.
+
+La caché de fotogramas distingue URL y duración extraída: ampliar un tramo de 3 a 12 segundos obliga a extraer los 12 segundos, sin repetir el tramo corto de la revisión anterior.

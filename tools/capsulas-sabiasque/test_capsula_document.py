@@ -144,6 +144,24 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(second['out'], 'guion.json')))
             self.assertEqual(doc, original)
 
+    def test_frame_cache_cannot_reuse_a_shorter_video_extraction(self):
+        import capsula_cola
+        with tempfile.TemporaryDirectory() as directory:
+            src = os.path.join(directory, 'source.mp4')
+            with open(src, 'wb') as fh: fh.write(b'local-fixture')
+            cache = os.path.join(directory, 'cache')
+            frame_dirs = []
+            with patch.object(capsula_cola.subprocess, 'run') as extract:
+                for index, seconds in enumerate([3, 12, 12]):
+                    out = os.path.join(directory, str(index)); os.mkdir(out)
+                    job = {'capsula': {'media': [{'src': src, 'tipo': 'video', 't': [0, seconds]}]}}
+                    capsula_cola.prepare_editor_media(job, out, allow_local=True, cache_root=cache)
+                    frame_dirs.append(job['capsula']['media'][0]['localFrames'])
+                self.assertEqual(extract.call_count, 2)
+                self.assertEqual([call.args[0][call.args[0].index('-t')+1] for call in extract.call_args_list], ['3', '12'])
+            self.assertNotEqual(frame_dirs[0], frame_dirs[1])
+            self.assertEqual(frame_dirs[1], frame_dirs[2])
+
     def test_real_renderer_applies_media_crop_timing_and_edited_beats(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:

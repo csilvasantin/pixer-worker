@@ -204,14 +204,16 @@ def prepare_editor_media(job, out, allow_local=False, cache_root=None):
         else:
             raise ValueError('media no accesible: '+src[:150])
         if item['tipo'] == 'video':
-            directory = 'frames-'+hashlib.sha256(src.encode()).hexdigest()[:20]
+            frame_seconds = min(180, item['t'][1]-item['t'][0])
+            frame_key = json.dumps([src, frame_seconds], separators=(',', ':'))
+            directory = 'frames-'+hashlib.sha256(frame_key.encode()).hexdigest()[:20]
             frames = os.path.join(out, directory)
             cached_frames = os.path.join(cache_root, directory) if cache_root else frames
             if not os.path.isfile(os.path.join(cached_frames, '.complete')):
                 partial = cached_frames+'.partial'
                 os.makedirs(partial, exist_ok=True)
                 subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', os.path.join(out, item['localFile']),
-                    '-t', str(min(180, item['t'][1]-item['t'][0])), '-vf', 'scale=1080:-2,fps=25',
+                    '-t', str(frame_seconds), '-vf', 'scale=1080:-2,fps=25',
                     os.path.join(partial, 'f%05d.png')], check=True)
                 if os.path.isdir(cached_frames):
                     shutil.rmtree(cached_frames)
