@@ -1,3 +1,6 @@
+import {validateEditorProject} from './stock-editor-project.mjs';
+import {normalizeTextPositions,TEXT_POSITIONS_SCHEMA} from './capsule-text-positions.mjs';
+import { shotIntervalGet, shotIntervalPut } from './shot-interval.mjs';
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
 import { presenceBeat, presenceAll, presenceObservation } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
@@ -279,6 +282,7 @@ const NOTIFY_SKIP_EXACT = new Set([
   '/signage/push', // notificado dentro del handler con asset/origen/target
   '/signage/screens',
   '/signage/now', // puntero "ahora reproduciendo" por pantalla — POST muy frecuente
+  '/signage/shot/interval', // lo sondea cada player nativo cada 60 s — no spamear
   '/signage/shot', // captura real de pantalla: POST ~1/8s por player + GET polling del panel — no spamear
   '/emit', // proof-of-play de admira.tv: POST cada ~12s por pantalla — no spamear Telegram
   '/emit/range', // lectura del informe (GET) — no notificar
@@ -5191,6 +5195,72 @@ async function capsulaUrlEstadoHandler(req, env, url) {
   if(renderId&&!state.job)return json({error:'preview-not-found'},{status:404});
   return json({ ok: true, ...state });
 }
+// A separate, text-free media track enables immediate browser editing without touching Stock.
+async function capsulaPreviewHandler(req,env,url){
+ const ref=url.searchParams.get('ref')||'',version=Number(url.searchParams.get('version'));
+ if(!capsulaUrlJobKey(ref)||!Number.isInteger(version)||version<1||version>99)return json({error:'bad-preview-reference'},{status:400});
+ if(!env.STOCK_BUCKET)return json({error:'r2-not-bound'},{status:503});
+ const prefix=`capsula-url/editor/${ref.slice(12)}/v${version}`;
+ if(req.method==='GET'){
+  const object=await env.STOCK_BUCKET.get(prefix+'/manifest.json');
+  return object?json(await object.json(),{headers:{'Cache-Control':'no-store'}}):json({error:'preview-not-ready'},{status:404});
+ }
+ if(!capsulaUrlOriginOk(req))return json({error:'forbidden-origin'},{status:403});
+ if(!await stockDeleteAuthorized(req,env,new URL(url.origin+url.pathname)))return json({error:'unauthorized'},{status:401});
+ const job=await capsulaUrlJob(env,ref);
+ if(!job||(job.capsuleVersion||1)!==version)return json({error:'revision-conflict'},{status:409});
+ const aspect=Number(req.headers.get('X-Capsule-Aspect'));
+ if(!Number.isFinite(aspect)||aspect<0.1||aspect>5||req.headers.get('Content-Type')!=='video/mp4')return json({error:'bad-preview-media'},{status:400});
+ if(Number(req.headers.get('Content-Length'))>33554432)return json({error:'body-too-large'},{status:413});
+ const bytes=await req.arrayBuffer();
+ if(bytes.byteLength<32||bytes.byteLength>33554432||new TextDecoder().decode(bytes.slice(4,8))!=='ftyp')return json({error:'bad-preview-media'},{status:400});
+ // Content-addressed paths keep a concurrent preview upload from mismatching its manifest.
+ const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(n=>n.toString(16).padStart(2,'0')).join('');
+ const mediaKey=prefix+'/'+hash+'.mp4';
+ await env.STOCK_BUCKET.put(mediaKey,bytes,{httpMetadata:{contentType:'video/mp4',cacheControl:'public, max-age=31536000, immutable'}});
+ const manifest={schema:'admira.capsule-preview.v1',ref,version,sourceAspect:aspect,sourceUrl:'https://stock.admira.store/'+mediaKey,bodyDuration:12,template:'v5.7',sourceVersion:version};
+ await env.STOCK_BUCKET.put(prefix+'/manifest.json',JSON.stringify(manifest),{httpMetadata:{contentType:'application/json',cacheControl:'no-store'}});
+ return json({ok:true,...manifest});
+}
+// Director edits the exact saved script. Never reconstruct on-screen copy from a prompt.
+async function capsulaDirectorHandler(req, env, url) {
+  const ref = url.searchParams.get('ref') || '';
+  const key = capsulaUrlJobKey(ref);
+  if (!key) return json({error:'bad-ref'}, {status:400});
+  if (!env.STOCK_BUCKET) return json({error:'r2-not-bound'}, {status:503});
+  const object = await env.STOCK_BUCKET.get(key);
+  if (!object) return json({error:'capsule-project-not-found'}, {status:404});
+  const job = await object.json();
+  const revision = object.etag;
+  if (req.method === 'GET') return json({ok:true,ref,revision,guion:job.guion,textPositions:normalizeTextPositions(job.textPositions).positions||{},textPositionRendering:env.CAPSULE_TEXT_POSITIONS_RENDERER===TEXT_POSITIONS_SCHEMA,textPositionSchema:TEXT_POSITIONS_SCHEMA,cartelas:job.cartelas||{preroll:false,postroll:false},capsuleVersion:job.capsuleVersion||1,sourceUrl:job.source?.url,...await capsulaUrlState(env,ref)}, {headers:{'Cache-Control':'no-store'}});
+  if (!capsulaUrlOriginOk(req) && !['https://ainimation.studio','https://www.ainimation.studio'].includes(req.headers.get('Origin'))) return json({error:'forbidden-origin'}, {status:403});
+  if (!await stockDeleteAuthorized(req,env,new URL(url.origin+url.pathname))) return json({error:'unauthorized'}, {status:401});
+  if (!/^application\/json(?:;|$)/i.test(req.headers.get('Content-Type')||'')) return json({error:'json-required'}, {status:415});
+  const raw=await req.text();
+  if(raw.length>16000)return json({error:'body-too-large'}, {status:413});
+  let body;try{body=JSON.parse(raw);}catch{return json({error:'bad-json'}, {status:400});}
+  if(body.revision!==revision)return json({error:'revision-conflict'}, {status:409});
+  const layout=normalizeTextPositions(Object.hasOwn(body,'textPositions')?body.textPositions:job.textPositions);
+  if(!layout.ok)return json({error:layout.error},{status:400});
+  if(Object.keys(layout.positions).length&&env.CAPSULE_TEXT_POSITIONS_RENDERER!==TEXT_POSITIONS_SCHEMA)return json({error:'position-renderer-unavailable'},{status:503});
+  const norm=normalizeCapsulaGuion(body.guion);
+  if(!norm.ok)return json({error:'invalid-guion',errors:norm.errors}, {status:400});
+  const state=await capsulaUrlState(env,ref);
+  if(state.status!=='publicada')return json({error:'render-in-progress'}, {status:409});
+  const version=Math.max(job.capsuleVersion||1,...Object.values(state.existing).map(x=>x.version||1));
+  if(version>=99)return json({error:'version-limit'}, {status:409});
+  // Preserve all source/media options. The existing renderer consumes this same queue.
+  const next={...job,guion:norm.guion,textPositions:layout.positions,capsuleVersion:version+1,status:'en-cola',createdAt:new Date().toISOString(),requestedBy:'Ainimation Director',tags:[...CAPSULA_URL_TAGS,norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g,'')],cartelas:{preroll:body.cartelas?.preroll===true,postroll:body.cartelas?.postroll===true}};
+  await env.STOCK_BUCKET.put(`capsula-url/history/${ref.slice(12)}/v${version}-${revision}.json`,JSON.stringify(job),{httpMetadata:{contentType:'application/json'}});
+  const written=await env.STOCK_BUCKET.put(key,JSON.stringify(next),{onlyIf:{etagMatches:revision},httpMetadata:{contentType:'application/json'}});
+  if(!written)return json({error:'revision-conflict'}, {status:409});
+  // Text-only revisions reuse the clean source track, including while final encoding is pending.
+  try{
+    const previous=await env.STOCK_BUCKET.get(`capsula-url/editor/${ref.slice(12)}/v${version}/manifest.json`);
+    if(previous){const preview=await previous.json();await env.STOCK_BUCKET.put(`capsula-url/editor/${ref.slice(12)}/v${version+1}/manifest.json`,JSON.stringify({...preview,version:version+1}),{httpMetadata:{contentType:'application/json',cacheControl:'no-store'}});}
+  }catch{console.warn('capsule preview reuse pending');}
+  return json({ok:true,queued:true,revision:written.etag,...await capsulaUrlState(env,ref)}, {status:202});
+}
 // Cola para el renderizador de GrokBotBox: encargos cuya cápsula aún no está en el Stock.
 async function capsulaUrlColaHandler(req, env) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
@@ -5725,6 +5795,18 @@ export async function stockPublishHandler(req, env, ctx) {
   }
 
   const importContext = ['yt-dlp', 'local'].includes(motor) ? searchContext(body.searchContext) : null;
+  let editorProject = null, editParent = null;
+  if (body.editorProject != null) {
+    try { editorProject = validateEditorProject(body.editorProject); }
+    catch (e) { return json({error:e.message}, {status:400}); }
+    if (String(motor).toLowerCase() !== 'ainimation' || type !== 'animation' || body.externalId) return json({error:'invalid-editor-export'}, {status:400});
+    if (body.externalRef != null) {
+      if (!/^[A-Za-z0-9-]{1,160}$/.test(body.externalRef)) return json({error:'bad-editor-parent'}, {status:400});
+      editParent = await stockMetaById(env, body.externalRef);
+      if (!editParent) return json({error:'editor-parent-not-found'}, {status:404});
+    }
+  }
+
   const isKnowledgeCapsule = type === 'capsula' || type === 'guion';
   // Metadatos de mobiliario (type 'furni'): huella en tiles [w,d] y alto en px.
   const fp = (Array.isArray(body.fp) && body.fp.length === 2)
@@ -5850,8 +5932,8 @@ export async function stockPublishHandler(req, env, ctx) {
   //   un asset con ese hash, se responde reused sin bajar nada.
   // · reciente: mismo title+motor+sourceUrl dentro de la ventana → reused.
   const existingMeta = externalId ? await stockMetaById(env, id) : null;
-  const hashHint = !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
-  const recentInput = externalId || compositionIn ? null : recentFingerprintInput({ title, motor, sourceUrl });
+  const hashHint = !editorProject && !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
+  const recentInput = externalId || compositionIn || editorProject ? null : recentFingerprintInput({ title, motor, sourceUrl });
   let srcKey = null; // clave de origen de importaciones por URL (se calcula más abajo)
   const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
     // Lo que ya existía queda apuntado también por su origen: la próxima vez que
@@ -6001,6 +6083,8 @@ export async function stockPublishHandler(req, env, ctx) {
   // resulta duplicado se borra lo recién escrito (`written`).
   let decision = null;
   const dedupSettle = async (written) => {
+    // An editable publication is a new revision, even when its rendered bytes match.
+    if (editorProject) { decision = {action:'create'}; return null; }
     const hashOwnerId = contentHash ? await stockHashLookup(env, contentHash) : null;
     decision = stockDedupDecision({ id, externalId, existingMeta, contentHash, hashOwnerId });
     if (decision.action === 'create' && !externalId && isSha256Hex(contentHash)) {
@@ -6086,6 +6170,10 @@ export async function stockPublishHandler(req, env, ctx) {
     await env.STOCK_BUCKET.put(assetKey, bytes, putOptions);
   }
   const replacing = !!(decision && decision.action === 'replace');
+  const editorProjectUrl = editorProject ? `${new URL(req.url).origin}/stock/editor-project/${id}` : null;
+  if (editorProject) await env.STOCK_BUCKET.put(`stock/${id}/editor-project.json`, JSON.stringify(editorProject), {
+    httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=31536000, immutable'},
+  });
 
   // Clasificación automática con Gemini (sincronizada, ~1-2s): tags para la
   // biblioteca + audience/category para publicidad dirigida (/targetPublicity).
@@ -6157,6 +6245,7 @@ export async function stockPublishHandler(req, env, ctx) {
     thumbnail: thumbnail ? String(thumbnail).slice(0, 500) : (thumbHeredada || null),
     url: publicUrl,
     assetKey,
+    ...(editorProject ? {editorProjectUrl, editorKind:editorProject.kind, versionRoot:editParent?.versionRoot || editParent?.id || id} : {}),
     externalIdOrigen: externalId || null, // Vía 1: la clave original (admiranext:catalogo:<id>:<producto>) para la traza; externalRef sigue siendo el id derivado
     externalRef: externalId ? id : (typeof body.externalRef === 'string'
       ? body.externalRef.trim().slice(0, 160) || null : null),
@@ -6202,7 +6291,7 @@ export async function stockPublishHandler(req, env, ctx) {
   // Índices de dedup. Se ESPERAN (no waitUntil): el doble clic llega en
   // milisegundos y la segunda petición tiene que encontrar ya la marca.
   await Promise.all([
-    stockRememberHash(env, contentHash, id),
+    editorProject ? Promise.resolve() : stockRememberHash(env, contentHash, id),
     stockRememberRecent(env, recentInput, id),
   ]);
 
@@ -6278,7 +6367,7 @@ export async function stockPublishHandler(req, env, ctx) {
     }));
   }
 
-  return json({ ok: true, id, num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(meta.capsuleSource ? { capsuleSource: meta.capsuleSource, superseded } : {}), ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
+  return json({ ok: true, id, ...(editorProject ? {editorProjectUrl,externalRef:meta.externalRef,versionRoot:meta.versionRoot} : {}), num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(meta.capsuleSource ? { capsuleSource: meta.capsuleSource, superseded } : {}), ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
 async function stockListHandler(req, env, url) {
@@ -6804,9 +6893,10 @@ async function stockDeleteHandler(req, env, ctx, id) {
 
   let meta = null;
   try { meta = await metaObj.json(); } catch {}
-  if (meta && meta.contentHash) ctx.waitUntil(stockForgetHash(env, meta.contentHash));
+  if (meta && meta.contentHash) ctx.waitUntil(stockForgetHash(env, meta.contentHash, id));
 
   const keysToDelete = [metaKey];
+  if (meta?.editorProjectUrl) keysToDelete.push(`stock/${id}/editor-project.json`);
   if (meta && meta.assetKey) keysToDelete.push(meta.assetKey);
 
   // Limpieza defensiva: lista el prefijo stock/{id}/ por si quedan huérfanos.
@@ -8680,6 +8770,10 @@ export default {
         res = await signageAssignHandler(req, env);
       } else if (path === '/signage/shot' && req.method === 'POST') {
         res = await signageShotPostHandler(req, env);
+      } else if (path === '/signage/shot/interval' && req.method === 'GET') {
+        res = await shotIntervalGet(env, url, json);
+      } else if (path === '/signage/shot/interval' && (req.method === 'PUT' || req.method === 'POST')) {
+        res = await shotIntervalPut(req, env, json, gridKeyOk);
       } else if (path === '/signage/shot' && req.method === 'GET') {
         res = await signageShotGetHandler(req, env, url);
       } else if (path === '/notify' && req.method === 'POST') {
@@ -8718,6 +8812,10 @@ export default {
         res = await capsulaPreviewStatusHandler(req, env);
       } else if (path === '/capsula/url/estado' && req.method === 'GET') {
         res = await capsulaUrlEstadoHandler(req, env, url);
+      } else if (path === '/capsula/url/preview' && ['GET','PUT'].includes(req.method)) {
+        res = await capsulaPreviewHandler(req, env, url);
+      } else if (path === '/capsula/url/director' && ['GET','POST'].includes(req.method)) {
+        res = await capsulaDirectorHandler(req, env, url);
       } else if (path === '/capsula/url/cola' && req.method === 'GET') {
         res = await capsulaUrlColaHandler(req, env);
       } else if (path === '/stock/site-capsule' && req.method === 'POST') {
@@ -8727,6 +8825,9 @@ export default {
         let _b = {}; try { _b = await req.json(); } catch {}
         if (!env.NOTIFY_KEY || _b.secret !== env.NOTIFY_KEY) { res = json({ error: 'unauthorized' }, { status: 401 }); }
         else { await rebuildStockIndex(env); res = json({ ok: true, reindexed: true }); }
+      } else if (/^\/stock\/editor-project\/[A-Za-z0-9-]+$/.test(path) && req.method === 'GET') {
+        const obj = await env.STOCK_BUCKET?.get(`stock/${path.split('/')[3]}/editor-project.json`);
+        res = obj ? new Response(obj.body, {headers:{'Content-Type':'application/json','Cache-Control':'public, max-age=31536000, immutable'}}) : json({error:'editor-project-not-found'},{status:404});
       } else if (path === '/stock/list' && req.method === 'GET') {
         res = await stockListHandler(req, env, url);
       } else if (path === '/stock/catalogos' && req.method === 'GET') {

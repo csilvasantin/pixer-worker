@@ -98,3 +98,10 @@ tipografía que en Linux. Sin esas fuentes se usa una fuente de reserva.
 
 Validación de adaptación, recorte, intervalos, estilos, conservación y bloqueo
 de publicación: `python3 -m unittest test_capsula_document.py`.
+
+
+### Integración del editor completo con main (26 octubre 2026)
+
+`process_job` conserva el exportador de pista limpia y `text_positions.py` de main para los trabajos ordinarios. Los trabajos `capsula/1` usan el adaptador de texto, estilos, media y tiempos; copian también `text_positions.py` e incluyen su contenido en la huella de caché. Los previews salen antes de la publicación de pistas o versiones del Stock. Media puede cubrir hasta la duración de salida, incluida la cartela de cierre, igual que permite la API.
+
+Comprobaciones: 371 tests Node, 11 tests del documento/cola, contrato de posiciones con imágenes reales en ambos formatos y recorrido del navegador con el Worker real sobre bucket en memoria. El despliegue del Worker debe coordinarse con el puente Pixeria y AInimation; instalar primero el consumidor y generar/subir fuentes verificadas. No activar la opción de edición completa para una pieza sin `capsula/1` y su media fuente.

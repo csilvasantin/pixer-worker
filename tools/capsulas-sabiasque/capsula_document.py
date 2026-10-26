@@ -38,8 +38,8 @@ def validate(document):
         if item.get('tipo') not in ('image', 'video') or not item.get('src'):
             raise ValueError('media necesita tipo y src')
         _, media_end = interval(item.get('t'), 'media.t')
-        if media_end > previous:
-            raise ValueError('media.t supera el cuerpo de la cápsula')
+        if media_end > previous + (4 if (document.get('cartelas') or {}).get('postroll') else 0):
+            raise ValueError('media.t supera la duración de la cápsula')
         if not str(item.get('credito') or '').strip():
             raise ValueError('media necesita crédito')
         crop = item.get('recorte')

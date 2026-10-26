@@ -41,6 +41,18 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(result['remate']['linea_t'], [8.25, 17.5])
         self.assertEqual(result['giro']['broll']['t_capsula'], [0, 15.5])
 
+    def test_media_can_extend_through_the_closing_card(self):
+        doc = from_guion(fixture(), 'original', 8)
+        doc['cartelas'] = {'preroll': False, 'postroll': True}
+        doc['tiempos'] = {'gancho': [0, 2], 'giro': [2, 8], 'remate': [8, 12]}
+        doc['media'] = [{'id': 'base', 'tipo': 'video', 'role': 'background',
+                         'src': 'https://stock.admira.store/source.mp4', 't': [0, 16],
+                         'credito': 'Fuente de prueba'}]
+        self.assertEqual(to_guion(doc)['capsulas'][0]['duracion_s'], 16)
+        doc['media'][0]['t'][1] = 16.1
+        with self.assertRaises(ValueError):
+            validate(doc)
+
     def test_seed_uses_contiguous_beats_and_editable_headline(self):
         seed = fixture()
         seed['capsulas'][0]['gancho']['cifra'] = None

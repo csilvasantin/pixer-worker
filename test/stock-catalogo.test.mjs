@@ -136,7 +136,8 @@ test('index.js cablea el contrato: tope 10, meta.catalogo, /stock/catalogos, PAT
   assert.ok(!src.includes('.filter(Boolean).slice(0,4)'), 'ya no corta a 4');
   assert.ok(src.includes("path === '/stock/catalogos' && req.method === 'GET'"));
   assert.ok(src.includes("req.method === 'PATCH'"));
-  assert.ok(src.includes("'POST, GET, PATCH, DELETE, OPTIONS'"));
+  const allowedMethods = src.match(/'Access-Control-Allow-Methods': '([^']+)'/)[1].split(', ');
+  for (const method of ['POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) assert.ok(allowedMethods.includes(method));
   assert.ok(src.includes('X-AdmiraNeXT-Ingest, X-Notify-Key'));
   assert.ok(src.includes("url.searchParams.get('catalogo')") && src.includes("url.searchParams.get('cliente')") && src.includes("url.searchParams.get('tag')") && src.includes("url.searchParams.get('q')"));
 });

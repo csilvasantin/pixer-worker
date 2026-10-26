@@ -5,12 +5,15 @@ Uso: cd <carpeta con guion.json, logo.png y broll/> && python3 render_url.py"""
 import json, math, subprocess, os, sys, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plantilla_v5 import PRE, CIERRE_S, T_TOTAL_V51, barra_progreso, secuencia, fit_line, linea_fuente
+from text_positions import normalize_positions, shifted_xy, SCHEMA as TEXT_POSITION_SCHEMA
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from capsula_text import fit_text, draw_spans
 with open('guion.json',encoding='utf-8') as source:
     G=json.load(source)
 C=G['capsulas'][0]
+TEXT_POSITIONS=normalize_positions(G.get('textPositions'))
+if TEXT_POSITIONS and G.get('textPositionSchema') != TEXT_POSITION_SCHEMA: raise ValueError('unsupported-text-position-schema')
 FPS=25
 # v5.7: cartelas opcionales. Guiones sin «cartelas» (anteriores a v5.7) conservan las dos.
 _CT=C.get('cartelas') or {'preroll':True,'postroll':True}
@@ -28,8 +31,11 @@ try:
     RED=tuple(int(_color[i:i+2],16) for i in (0,2,4))
 except (ValueError,TypeError): pass
 ANTON='/usr/share/fonts/truetype/sand-box/google/Antonio/Antonio-VariableFont_wght.ttf'
+if os.environ.get('CAPSULE_FONT_DIR'): ANTON=os.path.join(os.environ['CAPSULE_FONT_DIR'],'Antonio-Variable.ttf')
 OSW='/usr/share/fonts/truetype/sand-box/google/Oswald/Oswald-VariableFont_wght.ttf'
+if os.environ.get('CAPSULE_FONT_DIR'): OSW=os.path.join(os.environ['CAPSULE_FONT_DIR'],'Oswald-Variable.ttf')
 INTER='/usr/share/fonts/truetype/sand-box/google/Inter/Inter-VariableFont_opsz,wght.ttf'
+if os.environ.get('CAPSULE_FONT_DIR'): INTER=os.path.join(os.environ['CAPSULE_FONT_DIR'],'Inter-Variable.ttf')
 _fc={}
 def F(p,s,w):
     is_inter = p == INTER
@@ -77,6 +83,9 @@ def background(t,W,H,mode):
             dot=np.exp(-(((x-cx)*w/h)**2+(y-cy)**2)/(0.00008+0.0002*s))[...,None]
             img=img*(1-0.25*dot)+np.array(RED,np.float32)*0.25*dot
     return Image.fromarray(np.clip(img,0,255).astype(np.uint8)).resize((W,H),Image.BILINEAR).convert('RGBA')
+def text_box(layer,key,xy,s,font,col,a):
+    width,height=layer.size
+    txt(layer,shifted_xy(TEXT_POSITIONS,key,width,height,*xy),s,font,col,a)
 def txt(layer,xy,s,font,col,a):
     if a>0: ImageDraw.Draw(layer).text(xy,s,font=font,fill=col+(int(255*a),))
 _ff={}
@@ -106,12 +115,12 @@ def brand_card(t0,t,W,H,V,u,out=False):
         lh=logo_at(im,W/2,H*0.42,W*(0.62 if V else 0.40),1,1); y0=H*0.42+lh/2+50*u; L=Image.new('RGBA',(W,H))
         f=F(INTER,int((58 if V else 56)*u),600)
         for i,s in enumerate(wrap(d,C['postroll']['claim'],f,W*0.86)):
-            txt(L,((W-d.textlength(s,font=f))/2,y0+i*72*u),s,f,INK,1)
+            text_box(L,'claim',((W-d.textlength(s,font=f))/2,y0+i*72*u),s,f,INK,1)
         # v5.4: única mención de la fuente en toda la cápsula, pequeña y gris, al pie del cierre.
         src=(C['remate'].get('fuente') or {}).get('texto') or ''
         if src:
             fs_=F(INTER,int(28*u),500); src='Vídeo original: '+re.sub(r'^(Fuente|Source)\s*:\s*','',src)
-            txt(L,((W-d.textlength(src,font=fs_))/2,H-int(150*u)),src,fs_,(150,150,155),1)
+            text_box(L,'fuente',((W-d.textlength(src,font=fs_))/2,H-int(150*u)),src,fs_,(150,150,155),1)
         im.alpha_composite(L); return im
     # v5.1: «¿Sabías que?» ENCIMA del logo; la tipología (categoría de la cápsula) DEBAJO.
     # v5.2: con foto de la fuente, fondo = foto difuminada y oscurecida (zoom lento), logo y textos claros.
@@ -123,10 +132,10 @@ def brand_card(t0,t,W,H,V,u,out=False):
     L=Image.new('RGBA',(W,H))
     f=F(OSW,int((104 if V else 92)*u),700); ft=C['preroll'].get('titulo') or '¿Sabías que?'
     a1=eo((lt-0.15)/0.5); ya=H*0.45-lh/2-int((150 if V else 130)*u)+(1-a1)*(-30*u)
-    txt(L,((W-d.textlength(ft,font=f))/2,ya),ft,f,(120,175,255) if dark else RED,a1)
+    text_box(L,'marca',((W-d.textlength(ft,font=f))/2,ya),ft,f,(120,175,255) if dark else RED,a1)
     a2=eo((lt-0.35)/0.5); dy=(1-a2)*40*u; y0=H*0.45+lh/2+44*u+dy
     fk=F(OSW,int((84 if V else 76)*u),700); tip=C['preroll'].get('tipologia') or ''
-    if tip: txt(L,((W-d.textlength(tip,font=fk))/2,y0),tip,fk,(255,255,255) if dark else INK,a2)
+    if tip: text_box(L,'marca',((W-d.textlength(tip,font=fk))/2,y0),tip,fk,(255,255,255) if dark else INK,a2)
     f2=F(INTER,int(42*u),600); s2=C['preroll'].get('subtitulo') or ''; a3=eo((lt-0.6)/0.5)
     s2=''  # v5.4: sin subtítulo en la cartela inicial (repetía el titular del cuerpo)
     if s2: txt(L,((W-d.textlength(s2,font=f2))/2,y0+(110 if tip else 0)*u+(1-a3)*30*u),s2,f2,(220,220,225) if dark else GREY,a3)
@@ -248,9 +257,14 @@ def headline(L,d,t,x,y,tw,V,u,col,maxl,fsz=None):
         p=eo((t-2)/2.4); val=cf.get('desde',0)+(cf['hasta']-cf.get('desde',0))*p
         n=int(round(val/10))*10 if cf['hasta']>=1000 else (round(val,1) if cf['hasta']!=int(cf['hasta']) else int(round(val)))
         fc=F(ANTON,int((220 if V else 220)*u),700)
-        txt(L,(x,y),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,col,eo((t-2)/0.3))
-        if cf.get('unidad'): txt(L,(x+int(8*u),y+int(260*u)),cf['unidad'],F(OSW,int(64*u),700),RED if col==INK else (120,175,255),eo((t-2.3)/0.5))
+        text_box(L,'heading',(x,y),fmt(n) if isinstance(n,int) else str(n).replace('.',','),fc,col,eo((t-2)/0.3))
+        if cf.get('unidad'): text_box(L,'unidad',(x+int(8*u),y+int(260*u)),cf['unidad'],F(OSW,int(64*u),700),RED if col==INK else (120,175,255),eo((t-2.3)/0.5))
         return y+int(350*u)
+    if not EDITOR:
+        fh=F(OSW,int((fsz or (84 if V else 80))*u),700); ls=wrap(d,C['preroll']['subtitulo'] or G['objeto'],fh,tw)[:maxl]
+        lh_=int((fsz or 80)*1.2*u)
+        for i,s_ in enumerate(ls): text_box(L,'heading',(x,y+i*lh_),s_,fh,col,eo((t-2-i*0.12)/0.4))
+        return y+len(ls)*lh_
     title=C['preroll']['subtitulo'] or G['objeto']
     layout=('headline',title,int((fsz or (84 if V else 80))*u),tw,maxl,max(10,int(18*u)))
     if layout not in _text_layouts:
@@ -258,9 +272,17 @@ def headline(L,d,t,x,y,tw,V,u,col,maxl,fsz=None):
     fh,ls,size=_text_layouts[layout]
     lh_=size*1.2
     spans=[s for s in EDITOR.get('spans',[]) if s['campo']=='titulo']
-    for i,(s_,offset) in enumerate(ls): draw_spans(ImageDraw.Draw(L),(x,y+i*lh_),s_,offset,fh,col,eo((t-2-i*.12)/.4),spans,RED)
+    for i,(s_,offset) in enumerate(ls): draw_spans(ImageDraw.Draw(L),shifted_xy(TEXT_POSITIONS,'heading',L.width,L.height,x,y+i*lh_),s_,offset,fh,col,eo((t-2-i*.12)/.4),spans,RED)
     return y+len(ls)*lh_
 def lines(L,d,t,x,y,tw,u,cols3,size):
+    if not EDITOR:
+        keys=('gancho','giro','remate')
+        items=[(key,*C[key]['linea_t']) for key in keys]
+        cols=dict(zip(keys,cols3)); fl=F(INTER,int(size*u),700)
+        for key,al,dx in secuencia(t,items):
+            for i,line in enumerate(wrap(d,C[key]['linea'],fl,tw)):
+                text_box(L,key,(x-dx*u,y+i*int(size*1.28*u)),line,fl,cols[key],al)
+        return
     maxheight=L.height-y-int(32*u)
     for index,key in enumerate(('gancho','giro','remate')):
         text=C[key]['linea']; a,b=C[key]['linea_t']
@@ -281,7 +303,7 @@ def lines(L,d,t,x,y,tw,u,cols3,size):
         font,wrapped,actual=chosen
         spans=[s for s in EDITOR.get('spans',[]) if s['campo']==key]
         for i,(line,offset) in enumerate(wrapped):
-            draw_spans(ImageDraw.Draw(L),(x-dx,y+i*actual*1.28),line,offset,font,cols3[index],alpha,spans,RED)
+            draw_spans(ImageDraw.Draw(L),shifted_xy(TEXT_POSITIONS,key,L.width,L.height,x-dx,y+i*actual*1.28),line,offset,font,cols3[index],alpha,spans,RED)
 # v5.5 (22-oct-2026, Carlos · todas las tipologías): fuente VERTICAL en 16x9 → la imagen va centrada en su
 # proporción y las bandas laterales (desenfoque muy apagado de la propia imagen, sin cajas) llevan el logo
 # arriba a la izquierda y «¿Sabías que?» + tipología a la derecha. En la cartela, la imagen central pasa de
@@ -302,8 +324,8 @@ def lado_marca(L,d,W,H,u,lt,x0):
     ft=C['preroll'].get('titulo') or '¿Sabías que?'; tip=C['preroll'].get('tipologia') or ''
     cx=x0/2; f=F(OSW,int(84*u),700); fk=F(OSW,int(64*u),700)
     a1=eo((lt-0.2)/0.6); a2=eo((lt-0.45)/0.6)
-    txt(L,(cx-d.textlength(ft,font=f)/2-(1-a1)*60*u,H*0.40),ft,f,(120,175,255),a1)
-    if tip: txt(L,(cx-d.textlength(tip,font=fk)/2-(1-a2)*60*u,H*0.40+int(112*u)),tip,fk,(255,255,255),a2)
+    text_box(L,'marca',(cx-d.textlength(ft,font=f)/2-(1-a1)*60*u,H*0.40),ft,f,(120,175,255),a1)
+    if tip: text_box(L,'marca',(cx-d.textlength(tip,font=fk)/2-(1-a2)*60*u,H*0.40+int(112*u)),tip,fk,(255,255,255),a2)
 def logo_izq(im,u,a,dx=0):
     lw=int(240*u); logo_at(im,int(80*u)+lw/2-dx,int(95*u),lw,a,claro=True)
 def bandas_card(lt,W,H,u):
@@ -332,13 +354,13 @@ def explain(t,W,H):
             from PIL import ImageFilter; im=im.filter(ImageFilter.GaussianBlur(24*u*(1-eo((t-E0)/0.7))))
         im.alpha_composite(vertical_shadows(W,H))
         d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
-        txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)
+        text_box(L,'marca',(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),(120,175,255),1); logo_at(im,W-mx-int(110*u),int(95*u),int(220*u),1,claro=True)
         play_hint(im,W-mx,int(H*0.20),u,a,t)
         y=headline(L,d,t,mx,int(H*0.60),W-2*mx,V,u,(255,255,255),2)
         lines(L,d,t,mx,max(y+int(30*u),int(H*0.75)),W-2*mx,u,((255,255,255),(140,190,255),(255,255,255)),60)
         im.alpha_composite(L); return im
     im=background(t,W,H,'explain'); d=ImageDraw.Draw(im); L=Image.new('RGBA',(W,H))
-    txt(L,(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),RED,1)
+    text_box(L,'marca',(mx,int(50*u)),C['titulo'],F(OSW,int(72*u),700),RED,1)
     if broll_n():
         fr=bfr(t)
         if not V and vs:   # 16x9 + fuente vertical: vídeo a la derecha, a toda la altura.

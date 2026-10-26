@@ -14,6 +14,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
 from capsula_document import to_guion
+from text_positions import normalize_positions, SCHEMA as TEXT_POSITION_SCHEMA
 API = os.environ.get('STOCK_API', 'https://api.admira.store')
 UA = {'user-agent': 'Mozilla/5.0 admiranext-capsulas', 'origin': 'https://www.admira.studio'}
 PLANT = next(p for p in (os.path.join(BASE, 'tecnologia-taalas', 'v2'), BASE) if os.path.exists(os.path.join(p, 'logo.png')))
@@ -30,6 +31,7 @@ def guion_v5(job):
     pre = 2 if cart['preroll'] else 0; tot = pre + 12 + (4 if cart['postroll'] else 0)
     credito = 'Vídeo: ' + (s.get('author') or {'linkedin': 'LinkedIn', 'youtube': 'YouTube', 'tiktok': 'TikTok', 'x': 'X'}.get(s.get('kind'), s.get('kind') or 'fuente'))
     return {"fecha": hoy, "plantilla": "plantilla_guion_v5", "saga": {"tema": tema, "color": COLORES.get(tema, '#1F6FEB')},
+        "textPositions": normalize_positions(job.get("textPositions")), "textPositionSchema": TEXT_POSITION_SCHEMA,
         "tipo": f"url-{slug}", "objeto": g['objeto'], "fuente": g['fuente'],
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
@@ -227,7 +229,7 @@ def process_job(job, real=False, upload_preview=False, allow_local=False, output
     # Draft revisions at the same capsuleVersion must not reuse a stale render.
     digest = hashlib.sha256(json.dumps(job.get('capsula') or job.get('guion'), sort_keys=True).encode())
     # Renderer fixes must invalidate an earlier render of the same draft too.
-    for dependency in ('render_url.py', 'capsula_text.py', 'capsula_document.py', 'plantilla_v5.py'):
+    for dependency in ('render_url.py', 'capsula_text.py', 'capsula_document.py', 'plantilla_v5.py', 'text_positions.py'):
         with open(os.path.join(BASE, dependency), 'rb') as fh:
             digest.update(fh.read())
     fingerprint = digest.hexdigest()[:12]
@@ -245,7 +247,7 @@ def process_job(job, real=False, upload_preview=False, allow_local=False, output
                          cache_root=os.path.join(output_root or os.path.join(BASE, 'desde-url'), '.media-cache'))
     with open(os.path.join(out, 'guion.json'), 'w') as fh:
         json.dump(guion_v5(job), fh, indent=1, ensure_ascii=False)
-    for name in ('logo.png', 'plantilla_v5.py', 'render_url.py', 'capsula_text.py'):
+    for name in ('logo.png', 'plantilla_v5.py', 'render_url.py', 'capsula_text.py', 'text_positions.py'):
         shutil.copy(os.path.join(PLANT if name == 'logo.png' else BASE, name), out)
     if not any(m.get('role') == 'background' and m.get('localFile') for m in (job.get('capsula') or {}).get('media', [])):
         broll(job, out)
@@ -257,6 +259,15 @@ def process_job(job, real=False, upload_preview=False, allow_local=False, output
             fh.write(fingerprint)
     if job.get('previewOnly'):
         return preview_result(job, out, upload_preview)
+    if real:
+        from editor_preview import publish_preview
+        try:
+            preview_headers = {**UA}
+            for env_name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
+                if os.environ.get(env_name): preview_headers[header] = os.environ[env_name]
+            publish_preview(job, out, API, preview_headers)
+        except Exception as error:
+            print('  editor: vista previa pendiente:', type(error).__name__)
     publicar(job, out, real)
     return {'out': out}
 
