@@ -76,3 +76,12 @@ test('forged Studio origin or rejected/failed verifier cannot authorize generati
 test('Studio origin without bearer never calls its verifier',async()=>{
   let calls=0;const r=await authorizePaidGeneration(req({Origin:'https://admira.studio'}),{},async()=>{calls++;return Response.json({ok:true});});assert.equal(r.ok,false);assert.equal(calls,0);
 });
+test('Store and XpaceOS Assets verify the destination session at fixed trusted endpoints',async()=>{
+ for(const origin of ['https://admira.store','https://www.admira.store','https://xpaceos.com','https://www.xpaceos.com']){
+  let calls=0;const verifier=origin.includes('xpaceos')?'https://www.xpaceos.com/auth/verify':'https://www.admira.store/auth/verify';
+  const result=await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer store-session'}),{PIXERIA_SIGNING_KEY:'pixeria-key'},async(url,options)=>{calls++;assert.equal(url,verifier);assert.deepEqual(JSON.parse(options.body),{token:'store-session'});return Response.json({ok:true,email:'asset-user@example.test'});});
+  assert.equal(calls,1);assert.equal(result.ok,true);
+  assert.equal((await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer rejected'}),{},async()=>Response.json({ok:false},{status:401}))).ok,false);
+ }
+ for(const origin of ['https://admira.store.evil.test','http://admira.store','https://www.xpaceos.com.evil.test']){let calls=0;assert.equal((await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer forged'}),{PIXERIA_SIGNING_KEY:'key'},async()=>{calls++;return Response.json({ok:true});})).ok,false);assert.equal(calls,0);}
+});
