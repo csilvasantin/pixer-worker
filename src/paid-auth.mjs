@@ -93,12 +93,13 @@ export async function authorizePaidGeneration(req, env, fetchImpl = fetch) {
   // Verify only at a fixed, trusted Studio endpoint; an Origin header alone grants nothing.
   const origin=req.headers.get('Origin')||'';
   const studio=origin==='https://admira.studio'||origin==='https://www.admira.studio';
-  if (!studio && env && env.PIXERIA_SIGNING_KEY) {
+  const assetsOrigin = {'https://admira.store':'https://www.admira.store/auth/verify','https://www.admira.store':'https://www.admira.store/auth/verify','https://xpaceos.com':'https://www.xpaceos.com/auth/verify','https://www.xpaceos.com':'https://www.xpaceos.com/auth/verify'}[origin];
+  if (!studio && !assetsOrigin && env && env.PIXERIA_SIGNING_KEY) {
     const local = await verifyPixeriaApiToken(bearer, env.PIXERIA_SIGNING_KEY);
     if (local) return { ok: true, via: 'session', email: local.email };
     return { ok: false };
   }
-  const url = studio ? 'https://admira.studio/auth/verify' : (env && env.PIXERIA_AUTH_VERIFY) || 'https://www.pixeria.com/auth/verify';
+  const url = assetsOrigin || (studio ? 'https://admira.studio/auth/verify' : (env && env.PIXERIA_AUTH_VERIFY) || 'https://www.pixeria.com/auth/verify');
   try {
     // Límite de 10 s: la verificación remota nunca deja colgada la generación.
     const r = await fetchImpl(url, {
