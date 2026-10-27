@@ -1,3 +1,7 @@
+# v.27.10.2026.r2.23:49 · Assets PNG + JSON
+
+Optional PNG-bound sprite metadata survives Stock and wallet storage. Verified duplicate conflicts keep existing IDs and placement. Metadata-free legacy files retain behavior. / Datos de sprite ligados al PNG conservados en Stock y monedero; los conflictos no reemplazan IDs ni huella.
+
 # CHANGELOG · pixer-eleven (api.admira.store)
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
