@@ -1,3 +1,4 @@
+import {normalizeSprite,spritePlacement,bindSprite} from './sprite-contract.mjs';
 import {validateEditorProject} from './stock-editor-project.mjs';
 import {normalizeTextPositions,TEXT_POSITIONS_SCHEMA} from './capsule-text-positions.mjs';
 import { shotIntervalGet, shotIntervalPut } from './shot-interval.mjs';
@@ -145,7 +146,7 @@ function corsHeaders(req) {
 }
 
 // Sello de la versión publicada (norma 07: v.DD.MM.AAAA.rN.HH:MM). Se lee en GET /healthz.
-const WORKER_VERSION = 'v.22.10.2026.r5.22:09';
+const WORKER_VERSION = 'v.27.10.2026.r2.23:49';
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body), {
@@ -5662,6 +5663,8 @@ export async function stockPublishHandler(req, env, ctx) {
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
+  let spriteIn=null;
+  if(body.sprite!=null){try{if(type!=='furni'||mime!=='image/png'||!base64||base64.length>4200000)throw Error('sprite-requires-png-bytes');spritePlacement(body);spriteIn=await bindSprite(body.sprite,b64ToBytes(base64));}catch(error){return json({error:error.message||'invalid-sprite'},{status:400});}}
   const importContext = ['yt-dlp', 'local'].includes(motor) ? searchContext(body.searchContext) : null;
   let editorProject = null, editParent = null;
   if (body.editorProject != null) {
@@ -5800,10 +5803,15 @@ export async function stockPublishHandler(req, env, ctx) {
   //   un asset con ese hash, se responde reused sin bajar nada.
   // · reciente: mismo title+motor+sourceUrl dentro de la ventana → reused.
   const existingMeta = externalId ? await stockMetaById(env, id) : null;
-  const hashHint = !editorProject && !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
-  const recentInput = externalId || compositionIn || editorProject ? null : recentFingerprintInput({ title, motor, sourceUrl });
+  const hashHint = !spriteIn && !editorProject && !compositionIn && isSha256Hex(body.contentHash) ? body.contentHash : null;
+  const recentInput = externalId || compositionIn || editorProject || spriteIn ? null : recentFingerprintInput({ title, motor, sourceUrl });
   let srcKey = null; // clave de origen de importaciones por URL (se calcula más abajo)
   const reusedResponse = async (ownerId, reason, ownerMeta, verifiedContent = false) => {
+    if(spriteIn){
+      if(!verifiedContent||!ownerMeta||JSON.stringify(ownerMeta.fp)!==JSON.stringify(body.fp)||ownerMeta.ph!==body.ph)return json({error:'sprite-placement-conflict',id:ownerId},{status:409});
+      if(ownerMeta.sprite&&JSON.stringify(normalizeSprite(ownerMeta.sprite))!==JSON.stringify(spriteIn))return json({error:'sprite-metadata-conflict',id:ownerId},{status:409});
+      if(!ownerMeta.sprite){ownerMeta={...ownerMeta,sprite:spriteIn};await env.STOCK_BUCKET.put(`stock/${ownerId}/meta.json`,JSON.stringify(ownerMeta),{httpMetadata:{contentType:'application/json',cacheControl:'public, max-age=300'}});}
+    }
     // Lo que ya existía queda apuntado también por su origen: la próxima vez que
     // llegue el mismo enlace se responde «ya existe» sin descargar.
     if (srcKey && ownerId) ctx.waitUntil((async () => stockTryClaim(env, await stockClaimKey('src', srcKey), { id: ownerId, at: new Date().toISOString(), kind: 'src', key: srcKey }, { aliveOf: srcClaimAlive(env) }))().catch(() => {}));
@@ -6119,6 +6127,7 @@ export async function stockPublishHandler(req, env, ctx) {
       ? body.externalRef.trim().slice(0, 160) || null : null),
     fp,
     ph,
+    sprite:spriteIn,
     price,
     // Cápsula desde URL: fuente + tramo del b-roll para el reproductor interactivo (capsula-url.mjs).
     capsuleSource: type === 'video' ? sanitizeCapsuleSource(body.capsuleSource, typeof body.externalRef === 'string' ? body.externalRef.trim() : '') : null,
@@ -6333,6 +6342,7 @@ async function stockReassetHandler(req, env, ctx) {
   if (bytes.length > 50 * 1024 * 1024) return json({ error: 'too-big' }, { status: 413 });
   const previousHash = meta.contentHash;
   const contentHash = sha256HexOf(await crypto.subtle.digest('SHA-256', bytes));
+  let spriteNext=null;if(b.sprite!=null){try{spritePlacement(meta);spriteNext=await bindSprite(b.sprite,bytes);}catch(error){return json({error:error.message},{status:400});}}else if(previousHash===contentHash)spriteNext=meta.sprite||null;
   const newAssetKey = `stock/${id}/asset.${ext}`;
   await env.STOCK_BUCKET.put(newAssetKey, bytes, {
     httpMetadata: { contentType: mime, cacheControl: 'public, max-age=31536000, immutable' },
@@ -6340,7 +6350,7 @@ async function stockReassetHandler(req, env, ctx) {
   });
   if (meta.assetKey && meta.assetKey !== newAssetKey) { try { await env.STOCK_BUCKET.delete(meta.assetKey); } catch {} }
   meta.assetKey = newAssetKey; meta.mime = mime; meta.ext = ext; meta.size = bytes.length;
-  meta.contentHash=contentHash;
+  meta.contentHash=contentHash;meta.sprite=spriteNext;
   meta.composition=null; // A replaced raster cannot retain the old binary's exact-copy declaration.
   await env.STOCK_BUCKET.put(`stock/${id}/meta.json`, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=300' },
@@ -7988,18 +7998,21 @@ async function xpacioGetHandler(req, env, url) {
 async function xpacioBuyHandler(req, env) {
   let b; try { b = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   if (!b.id || !b.item || !b.item.url) return json({ error: 'missing-id-or-item' }, { status: 400 });
+  let sprite=null,assetId=null;
+  if(b.item.sprite){try{sprite=normalizeSprite(b.item.sprite);spritePlacement(b.item);const path=new URL(b.item.url).pathname;assetId=(/^\/stock\/asset\/([\w-]+)$/.exec(path)||/^\/stock\/([\w-]+)\/asset\.[a-z]+$/.exec(path))?.[1];const canonical=assetId?await stockMetaById(env,assetId):null;if(!canonical?.sprite||JSON.stringify(normalizeSprite(canonical.sprite))!==JSON.stringify(sprite)||JSON.stringify(canonical.fp)!==JSON.stringify(b.item.fp)||canonical.ph!==b.item.ph)throw Error('sprite-catalogue-conflict');b.item={...b.item,url:canonical.url,fp:canonical.fp,ph:canonical.ph,sprite:canonical.sprite,sourceAssetId:assetId};}catch(error){return json({error:error.message},{status:409});}}
   const now = Date.now();
   const w = await xpacioLoad(env, b.id);
-  if (w.owned.some(o => o.url === b.item.url)) return json({ ok: true, already: true, wallet: w });
+  const owned=w.owned.find(o=>o.url===b.item.url||(assetId&&(o.sourceAssetId===assetId||o.url?.includes('/'+assetId+'/')||o.url?.endsWith('/'+assetId))));
+  if(owned){if(sprite){if(owned.sprite&&JSON.stringify(normalizeSprite(owned.sprite))!==JSON.stringify(sprite))return json({error:'sprite-owned-conflict'},{status:409});owned.sprite=sprite;owned.sourceAssetId=assetId;if(!await agoraKvPut(env,xpacioKey(b.id),w,Date.now()))return kvNoEntro();}return json({ok:true,already:true,wallet:w});}
   const price = furniPrice(b.item);
   if ((w.balance || 0) < price) return json({ ok: false, error: 'insufficient', balance: w.balance || 0, price }, { status: 402 });
   w.balance = (w.balance || 0) - price;
   w.owned.unshift({
     url: b.item.url, title: String(b.item.title || 'Mueble').slice(0, 120),
-    fp: Array.isArray(b.item.fp) ? b.item.fp : [1, 1], ph: +b.item.ph || 46, price, ts: now,
+    fp: Array.isArray(b.item.fp) ? b.item.fp : [1, 1], ph: +b.item.ph || 46, ...(sprite?{sprite,sourceAssetId:assetId}:{}), price, ts: now,
   });
   w.owned = w.owned.slice(0, 300);
-  await agoraKvPut(env, xpacioKey(b.id), w, now);
+  if(!await agoraKvPut(env, xpacioKey(b.id), w, now))return kvNoEntro();
   return json({ ok: true, wallet: w, spent: price });
 }
 // EDICIÓN: aplica cambios del editor pixel-art a un mueble de Mis muebles
@@ -8012,12 +8025,13 @@ async function xpacioUpdateHandler(req, env) {
   const it = (w.owned || []).find(o => o.url === b.url);
   if (!it) return json({ error: 'not-owned' }, { status: 404 });
   const p = b.patch || {};
-  if (typeof p.img === 'string' && p.img.startsWith('data:image') && p.img.length < 800000) it.img = p.img;
-  if (p.ph != null && isFinite(+p.ph)) it.ph = Math.max(8, Math.min(400, Math.round(+p.ph)));
-  if (Array.isArray(p.fp) && p.fp.length === 2) it.fp = [Math.max(1, p.fp[0] | 0), Math.max(1, p.fp[1] | 0)];
+  if(it.sprite||p.sprite){try{const placement=spritePlacement({...it,...p});let sprite=normalizeSprite(p.sprite||it.sprite);if(p.img){if(p.img.length>=4200000)throw Error('sprite-edit-too-large');if(!p.sprite||typeof p.img!=='string'||!p.img.startsWith('data:image/png;base64,'))throw Error('sprite-edit-descriptor-required');sprite=await bindSprite(p.sprite,b64ToBytes(p.img.split(',')[1]));}Object.assign(it,placement,{sprite});}catch(error){return json({error:error.message},{status:400});}}
+  if (typeof p.img === 'string' && p.img.startsWith('data:image') && p.img.length < (it.sprite?4200000:800000)) it.img = p.img;
+  if (!it.sprite && p.ph != null && isFinite(+p.ph)) it.ph = Math.max(8, Math.min(400, Math.round(+p.ph)));
+  if (!it.sprite && Array.isArray(p.fp) && p.fp.length === 2) it.fp = [Math.max(1, p.fp[0] | 0), Math.max(1, p.fp[1] | 0)];
   if (typeof p.title === 'string' && p.title.trim()) it.title = p.title.slice(0, 120);
   it.editedAt = now;
-  await agoraKvPut(env, xpacioKey(b.id), w, now);
+  if(!await agoraKvPut(env, xpacioKey(b.id), w, now))return kvNoEntro();
   return json({ ok: true, wallet: w });
 }
 async function xpacioCreditHandler(req, env) {
