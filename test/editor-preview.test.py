@@ -12,10 +12,11 @@ class PreviewTest(unittest.TestCase):
    class Response:
     def __enter__(self):return self
     def __exit__(self,*args):pass
-    def read(self):return b'{"ok":true}'
+    def read(self):return b'{"ok":true,"sourceUrl":"https://stock.example/clean.mp4"}'
    def upload(request,timeout):captured.append(request);return Response()
    with patch.object(module.urllib.request,'urlopen',upload):
-    module.publish_preview({'ref':'capsula-url:aa519cf8a50173ad','capsuleVersion':8},path,'https://api.example',{'Origin':'https://www.admira.studio','X-Notify-Key':'test-only'})
+    result=module.publish_preview({'ref':'capsula-url:aa519cf8a50173ad','capsuleVersion':8},path,'https://api.example',{'Origin':'https://www.admira.studio','X-Notify-Key':'test-only'})
+   self.assertEqual(result['sourceUrl'],'https://stock.example/clean.mp4')
    self.assertEqual(len(captured),1)
    request=captured[0];self.assertEqual(request.method,'PUT');self.assertIn('version=8',request.full_url);self.assertEqual(request.data[4:8],b'ftyp');self.assertEqual(request.headers['X-notify-key'],'test-only')
    duration=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',path+'/editor-source.mp4'],text=True));self.assertEqual(duration,12)

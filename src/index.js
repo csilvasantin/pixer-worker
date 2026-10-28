@@ -68,6 +68,7 @@ import {
   posterUrl,
   sanitizeValidacion,
 } from './stock-poster.mjs';
+import { CAPSULA_MAX_BYTES, validateEditableCapsula, boundedJson, capsuleWriteAuthorized, stockCapsulaHandler, capsulaLegacyGuion, capsulePreviewKey, capsuleHttps, CAPSULA_REVIEW_PREFIX, capsuleReviewKey, capsuleReviewJobs } from './stock-capsula-editor.mjs';
 import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded, campanaUrlPrompt, normalizeCampanaBorrador } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
@@ -136,10 +137,11 @@ function corsHeaders(req) {
   const allow = isAllowed ? origin : ALLOWED_ORIGINS[0];
   return {
     'Access-Control-Allow-Origin': allow,
-    'Access-Control-Allow-Methods': 'POST, GET, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'POST, GET, PUT, PATCH, DELETE, OPTIONS',
     // X-AdmiraNeXT-Ingest / X-Notify-Key: sin ellas el preflight de las galerías
     // (PATCH /stock/:id/meta, DELETE con clave) fallaba en el navegador (12-sep-2026).
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AdmiraNeXT-Ingest, X-Notify-Key, X-Fleet-Key, X-Auth-Probe',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-AdmiraNeXT-Ingest, X-Notify-Key, X-Fleet-Key, X-Auth-Probe, If-Match',
+    'Access-Control-Expose-Headers': 'ETag',
     'Access-Control-Max-Age': '86400',
     'Vary': 'Origin',
   };
@@ -4956,7 +4958,7 @@ async function siteCapsulePublish(req, env, ctx, payload) {
 // ─── Cápsula «¿Sabías que?» desde URL (Creador de admira.studio, 22-oct-2026) ───
 // Ver src/capsula-url.mjs. borrador → Carlos edita → encargar → GrokBotBox renderiza con
 // plantilla v5 y publica con externalRef = ref. El estado se deduce del Stock (dedup por ref).
-const CAPSULA_URL_ORIGINS = new Set(['https://admira.studio', 'https://www.admira.studio', 'https://pixeria.com', 'https://www.pixeria.com']);
+const CAPSULA_URL_ORIGINS = new Set(['https://ainimation.studio', 'https://www.ainimation.studio', 'https://admira.studio', 'https://www.admira.studio', 'https://pixeria.com', 'https://www.pixeria.com']);
 function capsulaUrlOriginOk(req) { const o = req.headers.get('Origin') || ''; return CAPSULA_URL_ORIGINS.has(o) || LOCAL_ORIGIN_RE.test(o); }
 async function capsulaUrlSource(env, link) {
   const resolved = await resolveImportUrl(link);
@@ -5016,14 +5018,26 @@ async function capsulaSupersede(env, meta) {
   }
   return out;
 }
-async function capsulaUrlJob(env, ref) {
-  const key = capsulaUrlJobKey(ref); if (!key || !env.STOCK_BUCKET) return null;
-  try { const o = await env.STOCK_BUCKET.get(key); return o ? await o.json() : null; } catch { return null; }
+async function capsulaUrlJob(env, ref, renderId = '') {
+  if (!env.STOCK_BUCKET) return null;
+  const key = renderId ? capsuleReviewKey(ref,renderId) : capsulaUrlJobKey(ref);
+  if (!key) return null;
+  try {
+    const o = await env.STOCK_BUCKET.get(key);
+    if (o) return await o.json();
+    // Compatibility for preview jobs enqueued before per-render review storage.
+    if (renderId) {
+      const old = await env.STOCK_BUCKET.get(capsulaUrlJobKey(ref));
+      const job = old ? await old.json() : null;
+      return job?.previewOnly && job.renderId === renderId ? job : null;
+    }
+    return (await capsuleReviewJobs(env.STOCK_BUCKET,ref))[0] || null;
+  } catch { return null; }
 }
-async function capsulaUrlState(env, ref) {
-  const [job, items] = await Promise.all([capsulaUrlJob(env, ref), gridReadStockIndex(env)]);
+async function capsulaUrlState(env, ref, renderId = '') {
+  const [job, items] = await Promise.all([capsulaUrlJob(env, ref, renderId), gridReadStockIndex(env)]);
   const existing = capsulaUrlExisting(items, ref, job?.capsuleVersion || 1);
-  return { ref, status: capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, capsuleVersion: job.capsuleVersion || 1, objeto: job.guion?.objeto, sourceUrl: job.source?.url } : null };
+  return { ref, status: job?.previewOnly ? job.status : capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, capsuleVersion: job.capsuleVersion || 1, objeto: job.guion?.objeto, sourceUrl: job.source?.url, previewOnly: job.previewOnly === true, renderId: job.renderId || null, phase: job.phase || null, parentId: job.parentId || null, preview: job.preview || null, error: job.error || null } : null };
 }
 async function capsulaUrlBorradorHandler(req, env) {
   if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
@@ -5060,8 +5074,11 @@ async function capsulaUrlBorradorHandler(req, env) {
 async function capsulaUrlEncargarHandler(req, env) {
   if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
-  if (+req.headers.get('Content-Length') > 16384) return json({ error: 'body-too-large' }, { status: 413 });
-  let body; try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
+  const parsed = await boundedJson(req, CAPSULA_MAX_BYTES);
+  if (parsed.error) return json({ error: parsed.error }, { status: parsed.status });
+  const body = parsed.body;
+  if (body?.capsula) return capsulaEditorEncargarHandler(req, env, body);
+  if (new TextEncoder().encode(JSON.stringify(body)).byteLength > 16384) return json({ error: 'body-too-large' }, { status: 413 });
   const safe = siteCapsuleUrl(await resolveImportUrl(body?.url)) || siteCapsuleUrl(body?.url);
   if (!safe) return json({ error: 'unsafe-or-invalid-url' }, { status: 400 });
   const sourceKey = importSourceKey(safe.href) || importSourceKey(body.url);
@@ -5084,10 +5101,100 @@ async function capsulaUrlEncargarHandler(req, env) {
   if (!put) return json({ ok: true, reused: true, queued: false, ...(await capsulaUrlState(env, ref)) });
   return json({ ok: true, queued: true, ...(await capsulaUrlState(env, ref)) }, { status: 202 });
 }
+// The editor only enqueues previews; publication remains an explicit later action.
+async function capsulaEditorEncargarHandler(req, env, body) {
+  if (!await capsuleWriteAuthorized(req, env)) return json({ error: 'unauthorized' }, { status: 401 });
+  if (body.phase != null && (!Number.isInteger(body.phase) || body.phase < 1 || body.phase > 3)) return json({error:'invalid-preview-phase'},{status:400});
+  const checked = validateEditableCapsula(body.capsula);
+  if (!checked.ok) return json({ error: 'invalid-capsula', errors: checked.errors }, { status: 400 });
+  if (body.previewOnly !== true) return json({ error: 'preview-required', detail: 'Revisa el render antes de autorizar la publicación' }, { status: 400 });
+  const capsula = checked.capsula;
+  const parent = await stockMetaById(env, capsula.parentId);
+  if (!parent || parent.externalRef !== capsula.ref || capsula.version !== Number(parent.capsuleSource?.version || 1)) return json({ error: 'capsula-identity-mismatch' }, { status: 409 });
+  const seedObj = await env.STOCK_BUCKET.get(`stock/${capsula.parentId}/capsula.json`);
+  if (!seedObj) return json({ error: 'capsula-source-not-uploaded' }, { status: 409 });
+  const seed = await seedObj.json();
+  capsula.sourceGuion = seed.sourceGuion; capsula.origen = seed.origen;
+  if (capsula.sourceGuion == null) delete capsula.sourceGuion;
+  if (capsula.origen == null) delete capsula.origen;
+  const capsuleVersion = capsula.version + 1;
+  if (capsuleVersion > 99 || (body.capsuleVersion != null && body.capsuleVersion !== capsuleVersion)) return json({ error: 'invalid-next-version' }, { status: 409 });
+  const sourceUrl = capsula.origen?.url || parent.capsuleSource?.sourceUrl || capsula.textos.fuente.url;
+  if (!capsuleHttps(sourceUrl)) return json({ error: 'unsafe-or-invalid-url' }, { status: 400 });
+  const job = { version: 1, capsuleVersion, ref: capsula.ref, renderId: crypto.randomUUID(), status: 'en-cola', previewOnly: true,
+    phase:body.phase || 1, createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', parentId: capsula.parentId,
+    source: { url: sourceUrl, resolvedUrl: capsula.origen?.resuelta || sourceUrl, sourceKey: capsula.origen?.clave || '', kind: capsula.origen?.tipo || 'articulo', image: '' },
+    guion: capsulaLegacyGuion(capsula), capsula, cartelas: capsula.cartelas,
+    tags: [...CAPSULA_URL_TAGS, capsula.saga.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')], requestedBy: 'Editor AInimation' };
+  await env.STOCK_BUCKET.put(capsuleReviewKey(capsula.ref,job.renderId), JSON.stringify(job), { httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' }, onlyIf:{etagDoesNotMatch:'*'} });
+  return json({ ok: true, queued: true, ...(await capsulaUrlState(env, capsula.ref, job.renderId)) }, { status: 202 });
+}
+async function capsulaPreviewUploadHandler(req, env) {
+  if (!await capsuleWriteAuthorized(req, env)) return json({error:'unauthorized'}, {status:401});
+  if (!env.STOCK_BUCKET) return json({error:'r2-not-bound'}, {status:500});
+  const parsed=await boundedJson(req,24*1024*1024);if(parsed.error)return json({error:parsed.error},{status:parsed.status});
+  const b=parsed.body; const job=b?.renderId && await capsulaUrlJob(env,b?.ref,b.renderId);
+  if (!job?.previewOnly || job.capsuleVersion!==b.capsuleVersion || b.renderId!==job.renderId) return json({error:'preview-job-mismatch'},{status:409});
+  const key=capsulePreviewKey(b.ref,b.capsuleVersion,job.renderId,b.filename);
+  const mime=b.filename?.endsWith('.mp4')?'video/mp4':'image/png';
+  if(!key||b.mime!==mime||typeof b.base64!=='string'||b.base64.length>23*1024*1024)return json({error:'invalid-preview-upload'},{status:400});
+  let bytes;try{bytes=b64ToBytes(b.base64);}catch{return json({error:'invalid-preview-base64'},{status:400});}
+  const magic=mime==='image/png'? bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71 : String.fromCharCode(...bytes.slice(4,8))==='ftyp';
+  if(!magic||bytes.length<12)return json({error:'preview-content-mismatch'},{status:400});
+  await env.STOCK_BUCKET.put(key,bytes,{httpMetadata:{contentType:mime,cacheControl:'public, max-age=86400, immutable'}});
+  const path=key.slice('capsula-url/previews/'.length);
+  return json({ok:true,url:`${new URL(req.url).origin}/capsula/url/preview/${path}`,size:bytes.length});
+}
+async function capsulaPreviewAssetHandler(req, env, path) {
+  const m=/^([a-f0-9]{16})\/v(\d{1,2})\/([a-zA-Z0-9-]{1,80})\/([a-zA-Z0-9_-]{1,100}\.(?:png|mp4))$/.exec(path);
+  if(!m||!capsulePreviewKey('capsula-url:'+m[1],Number(m[2]),m[3],m[4]))return json({error:'bad-preview-path'},{status:400});
+  const obj=await env.STOCK_BUCKET?.get('capsula-url/previews/'+path,{range:req.headers});
+  if(!obj)return json({error:'preview-not-found'},{status:404});
+  const h=new Headers({'Content-Type':m[4].endsWith('.mp4')?'video/mp4':'image/png','Cache-Control':'public, max-age=86400, immutable','Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'});
+  if(obj.range){const start=obj.range.offset||0;h.set('Content-Range',`bytes ${start}-${start+obj.range.length-1}/${obj.size}`);h.set('Content-Length',String(obj.range.length));}
+  else if(obj.size!=null)h.set('Content-Length',String(obj.size));
+  return new Response(obj.body,{status:obj.range?206:200,headers:h});
+}
+async function capsulaPreviewStatusHandler(req,env) {
+  if(!await capsuleWriteAuthorized(req,env))return json({error:'unauthorized'},{status:401});
+  const parsed=await boundedJson(req,64*1024);if(parsed.error)return json({error:parsed.error},{status:parsed.status});
+  const b=parsed.body;const job=b?.renderId && await capsulaUrlJob(env,b?.ref,b.renderId);
+  if(!job?.previewOnly||job.capsuleVersion!==b.capsuleVersion||b.renderId!==job.renderId)return json({error:'preview-job-mismatch'},{status:409});
+  if(!['preview_ready','error'].includes(b.status))return json({error:'bad-status'},{status:400});
+  if(b.status==='preview_ready') {
+    const formats=b.preview?.orientaciones;
+    if(!formats||typeof formats!=='object')return json({error:'invalid-preview'},{status:400});
+    const prefix=`${new URL(req.url).origin}/capsula/url/preview/${job.ref.slice(12)}/v${job.capsuleVersion}/${job.renderId}/`;
+    const urls=[];
+    for(const orientation of job.capsula?.orientaciones||[])if(!formats[orientation])return json({error:'incomplete-preview'},{status:400});
+    for(const [o,value] of Object.entries(formats)) {
+      if(!['vertical','horizontal'].includes(o)||!value||!Array.isArray(value.stills)||!value.stills.length
+        ||typeof value.url!=='string'||!value.url.endsWith('.mp4'))return json({error:'invalid-preview'},{status:400});
+      const stills=value.stills.map(s=>typeof s==='string'?s:s?.url);
+      if(stills.some(u=>typeof u!=='string'||!u.endsWith('.png')))return json({error:'invalid-preview'},{status:400});
+      urls.push(value.url,...stills);
+    }
+    if(!urls.length||urls.some(u=>typeof u!=='string'||!u.startsWith(prefix)||!/^[-a-zA-Z0-9_]+\.(png|mp4)$/.test(u.slice(prefix.length))))return json({error:'invalid-preview-url'},{status:400});
+    for(const url of urls) {
+      const key=capsulePreviewKey(job.ref,job.capsuleVersion,job.renderId,url.slice(prefix.length));
+      if(!await env.STOCK_BUCKET.head(key))return json({error:'preview-asset-not-uploaded'},{status:409});
+    }
+    job.preview=b.preview;
+  } else job.error=clean400(b.error||'Error de render',500);
+  job.status=b.status;job.updatedAt=new Date().toISOString();
+  const reviewKey=capsuleReviewKey(job.ref,job.renderId);
+  const key=(await env.STOCK_BUCKET.get(reviewKey))?reviewKey:capsulaUrlJobKey(job.ref);
+  await env.STOCK_BUCKET.put(key,JSON.stringify(job),{httpMetadata:{contentType:'application/json',cacheControl:'no-store'}});
+  return json({ok:true,...await capsulaUrlState(env,job.ref,job.renderId)});
+}
 async function capsulaUrlEstadoHandler(req, env, url) {
   const ref = url.searchParams.get('ref') || '';
   if (!capsulaUrlJobKey(ref)) return json({ error: 'bad-ref' }, { status: 400 });
-  return json({ ok: true, ...(await capsulaUrlState(env, ref)) });
+  const renderId=url.searchParams.get('renderId')||'';
+  if(renderId && !capsuleReviewKey(ref,renderId))return json({error:'bad-render-id'},{status:400});
+  const state=await capsulaUrlState(env,ref,renderId);
+  if(renderId&&!state.job)return json({error:'preview-not-found'},{status:404});
+  return json({ ok: true, ...state });
 }
 // A separate, text-free media track enables immediate browser editing without touching Stock.
 async function capsulaPreviewHandler(req,env,url){
@@ -5158,11 +5265,26 @@ async function capsulaDirectorHandler(req, env, url) {
 // Cola para el renderizador de GrokBotBox: encargos cuya cápsula aún no está en el Stock.
 async function capsulaUrlColaHandler(req, env) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
-  const listed = await env.STOCK_BUCKET.list({ prefix: CAPSULA_URL_JOB_PREFIX, limit: 200 });
   const items = await gridReadStockIndex(env);
-  const jobs = [];
-  for (const o of listed.objects || []) {
-    try { const job = await (await env.STOCK_BUCKET.get(o.key)).json(); const existing = capsulaUrlExisting(items, job.ref, job.capsuleVersion || 1); const status = capsulaUrlStatus(job, existing); if (status !== 'publicada') jobs.push({ ...job, status, existing }); } catch {}
+  const jobs = []; const seen = new Set();
+  for (const prefix of [CAPSULA_URL_JOB_PREFIX,CAPSULA_REVIEW_PREFIX]) {
+    let cursor;
+    do {
+      const listed = await env.STOCK_BUCKET.list({prefix,limit:1000,...(cursor?{cursor}:{})});
+      for (const o of listed.objects || []) {
+        try {
+          const obj=await env.STOCK_BUCKET.get(o.key); if(!obj)continue;
+          const job=await obj.json();
+          const identity=job.previewOnly?job.renderId:job.ref;
+          if(seen.has(identity))continue;
+          seen.add(identity);
+          const existing=capsulaUrlExisting(items,job.ref,job.capsuleVersion||1);
+          const status=job.previewOnly?job.status:capsulaUrlStatus(job,existing);
+          if(status!=='publicada'&&!['preview_ready','error'].includes(status))jobs.push({...job,status,existing});
+        } catch { /* Keep one malformed job from hiding the remaining queue. */ }
+      }
+      cursor=listed.truncated?listed.cursor:undefined;
+    } while(cursor);
   }
   return json({ ok: true, jobs });
 }
@@ -5663,6 +5785,21 @@ export async function stockPublishHandler(req, env, ctx) {
   let body;
   try { body = await req.json(); } catch { return json({ error: 'bad-json' }, { status: 400 }); }
   const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
+  // A preview must never enter the publication/supersede path, even if a caller errs.
+  if (body.previewOnly === true) return json({ error: 'preview-cannot-publish' }, { status: 409 });
+  let editableCapsula = null, capsulaParent = null;
+  if (body.capsula != null) {
+    if (!await capsuleWriteAuthorized(req, env)) return json({ error: 'capsula-session-required' }, { status: 401 });
+    const checked = validateEditableCapsula(body.capsula);
+    if (!checked.ok || type !== 'video' || body.externalRef !== checked.capsula?.ref || Number(body.capsuleSource?.version) !== checked.capsula?.version) return json({ error: 'invalid-capsula', errors: checked.errors }, { status: 400 });
+    editableCapsula = checked.capsula;
+    const parent = await stockMetaById(env, editableCapsula.parentId);
+    if (parent) {
+      if (parent.externalRef !== editableCapsula.ref) return json({ error: 'capsula-parent-mismatch' }, { status: 409 });
+      capsulaParent = parent.id;
+    } else if (editableCapsula.parentId !== 'capsula-new') return json({ error: 'capsula-parent-not-found' }, { status: 404 });
+  }
+
   let spriteIn=null;
   if(body.sprite!=null){try{if(type!=='furni'||mime!=='image/png'||!base64||base64.length>4200000)throw Error('sprite-requires-png-bytes');spritePlacement(body);spriteIn=await bindSprite(body.sprite,b64ToBytes(base64));}catch(error){return json({error:error.message||'invalid-sprite'},{status:400});}}
   const importContext = ['yt-dlp', 'local'].includes(motor) ? searchContext(body.searchContext) : null;
@@ -6131,6 +6268,7 @@ export async function stockPublishHandler(req, env, ctx) {
     price,
     // Cápsula desde URL: fuente + tramo del b-roll para el reproductor interactivo (capsula-url.mjs).
     capsuleSource: type === 'video' ? sanitizeCapsuleSource(body.capsuleSource, typeof body.externalRef === 'string' ? body.externalRef.trim() : '') : null,
+    ...(editableCapsula ? { ...(capsulaParent ? {parentId: capsulaParent} : {}), capsuleVersion: editableCapsula.version, capsulaUrl: `${WORKER_PUBLIC_BASE}/stock/capsula/${id}` } : {}),
     // Catálogo al que pertenece la pieza (folleto de un cliente con fechas), o null.
     catalogo,
     // Null is intentional: replacing a binary cannot inherit the old master's copy layers.
@@ -6174,6 +6312,8 @@ export async function stockPublishHandler(req, env, ctx) {
   // Confirmar el archivo no basta: el player descubre las piezas en este índice. La escritura
   // incremental se espera y no recorre el bucket (un rebuild completo supera el waitUntil).
   const indexed = await persistPublishedStockIndex(env, meta, ctx);
+  // Keep the editable document beside the new binary; its next edit starts from this Stock id.
+  if (editableCapsula) await env.STOCK_BUCKET.put(`stock/${id}/capsula.json`, JSON.stringify({ ...editableCapsula, parentId: id }), { httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' } });
   const superseded = meta.capsuleSource ? await capsulaSupersede(env, meta) : [];
   if (!indexed.ok) return json({ ok: false, error: 'stock_index_update_failed', assetPublished: true, retryable: true, id, num: meta.num || null }, { status: 503 });
 
@@ -8681,6 +8821,14 @@ export default {
         res = await capsulaUrlBorradorHandler(req, env);
       } else if (path === '/capsula/url/encargar' && req.method === 'POST') {
         res = await capsulaUrlEncargarHandler(req, env);
+      } else if (/^\/stock\/capsula\/[^/]+$/.test(path) && ['GET','PUT'].includes(req.method)) {
+        res = await stockCapsulaHandler(req, env, path.slice('/stock/capsula/'.length), () => gridReadStockIndex(env));
+      } else if (path === '/capsula/url/preview-upload' && req.method === 'POST') {
+        res = await capsulaPreviewUploadHandler(req, env);
+      } else if (path.startsWith('/capsula/url/preview/') && req.method === 'GET') {
+        res = await capsulaPreviewAssetHandler(req, env, path.slice('/capsula/url/preview/'.length));
+      } else if (path === '/capsula/url/estado' && req.method === 'POST') {
+        res = await capsulaPreviewStatusHandler(req, env);
       } else if (path === '/capsula/url/estado' && req.method === 'GET') {
         res = await capsulaUrlEstadoHandler(req, env, url);
       } else if (path === '/capsula/url/preview' && ['GET','PUT'].includes(req.method)) {

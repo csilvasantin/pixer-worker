@@ -9,10 +9,11 @@ generalización de tecnologia-taalas/v2/render_v2.py) + payload() de publicar_sa
 Dedup: externalRef = ref del encargo; se consulta el índice del Stock por orientación antes de publicar,
 y el worker solo deja un encargo por origen. B-roll: vídeo de la fuente con yt-dlp (4 s del centro) o,
 si no es vídeo, su miniatura con zoom lento."""
-import glob, json, os, shutil, subprocess, sys, urllib.request, datetime
+import glob, json, os, shutil, subprocess, sys, urllib.request, datetime, hashlib, base64
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
+from capsula_document import from_guion, to_guion
 from text_positions import normalize_positions, SCHEMA as TEXT_POSITION_SCHEMA
 API = os.environ.get('STOCK_API', 'https://api.admira.store')
 UA = {'user-agent': 'Mozilla/5.0 admiranext-capsulas', 'origin': 'https://www.admira.studio'}
@@ -21,6 +22,8 @@ COLORES = {'tecnología': '#1F6FEB'}
 def get(url):
     with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r: return json.load(r)
 def guion_v5(job):
+    if job.get('capsula'):
+        return to_guion(job['capsula'])
     g = job['guion']; s = job['source']; tema = g.get('tema') or 'tecnología'
     hoy = datetime.date.today().isoformat(); slug = job['ref'].split(':')[1]
     cifra = g.get('cifra') or {}
@@ -112,10 +115,42 @@ def poster(png):
     from PIL import Image
     im = Image.open(png).convert('RGB'); im.thumbnail((720, 720)); b = io.BytesIO(); im.save(b, 'JPEG', quality=82)
     return 'data:image/jpeg;base64,' + base64.b64encode(b.getvalue()).decode()
-def publicar(job, out, real):
+def editable_source(job, guion, preview):
+    """A new publication must retain a durable, clean source for its next edit."""
+    source_url = (preview or {}).get('sourceUrl', '')
+    if not source_url.startswith('https://'):
+        raise ValueError('pista limpia no disponible: no se publica una cápsula sin fuente editable')
+    document = from_guion(guion, 'capsula-new', job.get('capsuleVersion') or 1)
+    source = document.pop('sourceMedia', {})
+    credit = source.get('credito') or 'Fuente: ' + (job.get('source') or {}).get('author', 'fuente original')
+    document['media'] = [{'id': 'fuente-original', 'tipo': 'video', 'role': 'background',
+                          'src': source_url, 'credito': credit,
+                          't': source['t'], 'recorte': {'x': 0, 'y': 0, 'w': 1, 'h': 1}}]
+    document.pop('nextVersion', None)
+    return document
+
+
+def renderer_headers():
+    headers = {**UA}
+    token = (os.environ.get('CAPSULA_QUEUE_KEY') or os.environ.get('ADMIRA_FLEET_KEY')
+             or os.environ.get('STOCK_ADMIN_KEY') or os.environ.get('NOTIFY_KEY'))
+    if token:
+        headers['X-Fleet-Key'] = token
+    for name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
+        if os.environ.get(name):
+            headers[header] = os.environ[name]
+    return headers
+
+
+def publicar(job, out, real, source_preview=None):
+    # A preview is never publishable, even when the unattended consumer uses --publicar.
+    if job.get('previewOnly'):
+        print('  PREVIEW: publicación y sustitución de versiones desactivadas')
+        return {}
     g = json.load(open(os.path.join(out, 'guion.json'), encoding='utf-8')); ref = job['ref']
     hp = os.path.join(out, 'publicados.json'); hechos = json.load(open(hp)) if os.path.exists(hp) else {}
     ver = job.get('capsuleVersion') or 1
+    document = job.get('capsula') or (editable_source(job, g, source_preview) if real else None)
     ya = [x for x in get(pub.INDICE)['items'] if x.get('type') == 'video' and x.get('externalRef') == ref and ((x.get('capsuleSource') or {}).get('version') or 1) >= ver]
     for orient, nombre in (('vertical', 'capsula-9x16.mp4'), ('horizontal', 'capsula-16x9.mp4')):
         prev = [x for x in ya if orient in (x.get('tags') or [])]
@@ -123,39 +158,152 @@ def publicar(job, out, real):
         p = pub.payload(g, os.path.join(out, nombre), orient, ref)
         p['prompt'] = (f"{g['locucion']['gancho']} · {g['locucion']['cifra']} · {g['locucion']['idea']} · Fuente: {job['source']['url']}")[:1000]
         br = g['capsulas'][0]['giro']['broll']
-        p['capsuleSource'] = {'sourceUrl': job['source']['url'], 'credit': br['credito'], 'broll': {'start': br['t_capsula'][0], 'end': br['t_capsula'][1]}, 'version': job.get('capsuleVersion') or 1, **(g['capsulas'][0].get('cartelas') or {})}
+        p['capsuleSource'] = {'sourceUrl': job['source']['url'], 'credit': br.get('credito', ''), 'broll': {'start': br['t_capsula'][0], 'end': br['t_capsula'][1]}, 'version': job.get('capsuleVersion') or 1, **(g['capsulas'][0].get('cartelas') or {})}
+        if document:
+            p['capsula'] = {**document, 'version': ver}
+            p['parentId'] = document.get('parentId')
         p['poster'] = poster(os.path.join(out, nombre.replace('.mp4', '-t5s.png')))
         if not real: print(f'  [ensayo] {orient}:', json.dumps({k: v for k, v in p.items() if k != 'base64'}, ensure_ascii=False)); continue
         req = urllib.request.Request(f"{pub.API}/stock/publish", data=json.dumps(p).encode(), method='POST',
-              headers={'content-type': 'application/json', 'origin': 'https://www.pixeria.com', **pub.UA})
+              headers={**renderer_headers(), 'content-type': 'application/json', 'origin': 'https://www.pixeria.com'})
         with urllib.request.urlopen(req, timeout=300) as r: d = json.load(r)
         if not d.get('ok'): sys.exit(f'{orient}: rechazado: {d}')
         hechos[orient] = {'id': d['id'], 'url': d['url'], 'num': d.get('num'), 'version': ver, 'superseded': d.get('superseded'), 'resp': d}
         json.dump(hechos, open(hp, 'w'), indent=1, ensure_ascii=False); print(f"  {orient}: publicado → #{d.get('num')} {d['id']} · sustituye {d.get('superseded')}")
+def post(path, payload):
+    headers = {'content-type': 'application/json', **renderer_headers()}
+    req = urllib.request.Request(API+path, data=json.dumps(payload).encode(), headers=headers, method='POST')
+    with urllib.request.urlopen(req, timeout=300) as r:
+        return json.load(r)
+
+def preview_result(job, out, upload=False):
+    result = {'ref': job['ref'], 'capsuleVersion': job.get('capsuleVersion', 1),
+              'previewOnly': True, 'status': 'preview_ready', 'preview': {'orientaciones': {}}}
+    if job.get('renderId'):
+        result['renderId'] = job['renderId']
+    for orient, stem in (('vertical', 'capsula-9x16'), ('horizontal', 'capsula-16x9')):
+        stills = sorted(glob.glob(os.path.join(out, stem+'-t*s.png')),
+                        key=lambda p: float(os.path.basename(p).rsplit('-t', 1)[1][:-5]))
+        files = [stem+'.mp4'] + [os.path.basename(p) for p in stills]
+        urls = []
+        for filename in files:
+            path = os.path.join(out, filename)
+            if upload:
+                with open(path, 'rb') as fh:
+                    response = post('/capsula/url/preview-upload', {'ref': job['ref'],
+                        'capsuleVersion': result['capsuleVersion'], 'renderId': job.get('renderId'), 'filename': filename,
+                        'mime': 'video/mp4' if filename.endswith('.mp4') else 'image/png',
+                        'base64': base64.b64encode(fh.read()).decode()})
+                urls.append(response['url'])
+            else:
+                urls.append(path)
+        result['preview']['orientaciones'][orient] = {'url': urls[0], 'stills': urls[1:]}
+    with open(os.path.join(out, 'preview.json'), 'w') as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
+    if upload:
+        post('/capsula/url/estado', result)
+    return result
+
+def prepare_editor_media(job, out, allow_local=False, cache_root=None):
+    """Fetch only declared media; cached filenames are hashes, never URL path fragments."""
+    doc = job.get('capsula')
+    if not doc:
+        return
+    if cache_root:
+        os.makedirs(cache_root, exist_ok=True)
+    for item in doc.get('media') or []:
+        src = item['src']
+        if src.startswith('https://'):
+            ext = '.mp4' if item['tipo'] == 'video' else '.img'
+            name = 'media-'+hashlib.sha256(src.encode()).hexdigest()[:20]+ext
+            target = os.path.join(out, name)
+            if not os.path.exists(target):
+                urllib.request.urlretrieve(src, target)
+            item['localFile'] = name
+        elif allow_local and not os.path.isabs(src) and '..' not in src.split('/') and os.path.isfile(os.path.join(out, src)):
+            item['localFile'] = src
+        elif allow_local and os.path.isfile(src):
+            name = 'media-'+hashlib.sha256(src.encode()).hexdigest()[:20]+os.path.splitext(src)[1]
+            shutil.copy(src, os.path.join(out, name))
+            item['localFile'] = name
+        else:
+            raise ValueError('media no accesible: '+src[:150])
+        if item['tipo'] == 'video':
+            frame_seconds = min(180, item['t'][1]-item['t'][0])
+            frame_key = json.dumps([src, frame_seconds], separators=(',', ':'))
+            directory = 'frames-'+hashlib.sha256(frame_key.encode()).hexdigest()[:20]
+            frames = os.path.join(out, directory)
+            cached_frames = os.path.join(cache_root, directory) if cache_root else frames
+            if not os.path.isfile(os.path.join(cached_frames, '.complete')):
+                partial = cached_frames+'.partial'
+                os.makedirs(partial, exist_ok=True)
+                subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', os.path.join(out, item['localFile']),
+                    '-t', str(frame_seconds), '-vf', 'scale=1080:-2,fps=25',
+                    os.path.join(partial, 'f%05d.png')], check=True)
+                if os.path.isdir(cached_frames):
+                    shutil.rmtree(cached_frames)
+                os.replace(partial, cached_frames)
+                with open(os.path.join(cached_frames, '.complete'), 'w') as fh:
+                    fh.write('25 fps\n')
+            if cache_root and not os.path.lexists(frames):
+                os.symlink(os.path.abspath(cached_frames), frames, target_is_directory=True)
+            item['localFrames'] = directory
+
+def process_job(job, real=False, upload_preview=False, allow_local=False, output_root=None):
+    job = json.loads(json.dumps(job))  # Local filenames must never alter the stored editable draft.
+    ver = job.get('capsuleVersion') or 1
+    suffix = '-preview' if job.get('previewOnly') else ''
+    # Draft revisions at the same capsuleVersion must not reuse a stale render.
+    digest = hashlib.sha256(json.dumps(job.get('capsula') or job.get('guion'), sort_keys=True).encode())
+    # Renderer fixes must invalidate an earlier render of the same draft too.
+    for dependency in ('render_url.py', 'capsula_text.py', 'capsula_document.py', 'plantilla_v5.py', 'text_positions.py'):
+        with open(os.path.join(BASE, dependency), 'rb') as fh:
+            digest.update(fh.read())
+    fingerprint = digest.hexdigest()[:12]
+    if job.get('previewOnly'):
+        render_id = str(job.get('renderId') or fingerprint)
+        if not all(c.isalnum() or c == '-' for c in render_id):
+            raise ValueError('renderId inválido')
+        suffix += '-'+render_id
+    out = os.path.join(output_root or os.path.join(BASE, 'desde-url'), job['ref'].split(':')[1] + ('' if ver == 1 else f'-v{ver}') + suffix)
+    os.makedirs(out, exist_ok=True)
+    print(f"· {job['ref']} · versión {ver}" + (' · SOLO PREVIEW' if job.get('previewOnly') else ''))
+    with open(os.path.join(out, 'encargo.json'), 'w') as fh:
+        json.dump(job, fh, indent=1, ensure_ascii=False)
+    prepare_editor_media(job, out, allow_local=allow_local,
+                         cache_root=os.path.join(output_root or os.path.join(BASE, 'desde-url'), '.media-cache'))
+    with open(os.path.join(out, 'guion.json'), 'w') as fh:
+        json.dump(guion_v5(job), fh, indent=1, ensure_ascii=False)
+    for name in ('logo.png', 'plantilla_v5.py', 'render_url.py', 'capsula_text.py', 'text_positions.py'):
+        shutil.copy(os.path.join(PLANT if name == 'logo.png' else BASE, name), out)
+    if not any(m.get('role') == 'background' and m.get('localFile') for m in (job.get('capsula') or {}).get('media', [])):
+        broll(job, out)
+    stamp = os.path.join(out, '.render-fingerprint')
+    cached = open(stamp).read().strip() if os.path.exists(stamp) else ''
+    if cached != fingerprint or not all(os.path.exists(os.path.join(out, f)) for f in ('capsula-9x16.mp4', 'capsula-16x9.mp4')):
+        subprocess.run([sys.executable, 'render_url.py'], cwd=out, check=True)
+        with open(stamp, 'w') as fh:
+            fh.write(fingerprint)
+    if job.get('previewOnly'):
+        return preview_result(job, out, upload_preview)
+    source_preview = None
+    if real:
+        from editor_preview import publish_preview
+        try:
+            source_preview = publish_preview(job, out, API, renderer_headers())
+        except Exception as error:
+            if not job.get('capsula'):
+                raise  # A new capsule must not lose its editable source on first publication.
+            print('  editor: vista previa pendiente:', type(error).__name__)
+    publicar(job, out, real, source_preview=source_preview)
+    return {'out': out}
+
 def main():
     real = '--publicar' in sys.argv; solo = sys.argv[sys.argv.index('--ref') + 1] if '--ref' in sys.argv else None
-    jobs = [j for j in get(f'{API}/capsula/url/cola')['jobs'] if not solo or j['ref'] == solo]
+    local = sys.argv[sys.argv.index('--job') + 1] if '--job' in sys.argv else None
+    output_root = sys.argv[sys.argv.index('--output-root') + 1] if '--output-root' in sys.argv else None
+    jobs = [json.load(open(local))] if local else [j for j in get(f'{API}/capsula/url/cola')['jobs'] if not solo or j['ref'] == solo]
     print(f'{len(jobs)} encargo(s) en cola')
     for job in jobs:
-        ver = job.get('capsuleVersion') or 1
-        out = os.path.join(BASE, 'desde-url', job['ref'].split(':')[1] + ('' if ver == 1 else f'-v{ver}')); os.makedirs(out, exist_ok=True)
-        print(f"· {job['ref']} · {job['guion']['objeto']} · {job['source']['url']}")
-        json.dump(job, open(os.path.join(out, 'encargo.json'), 'w'), indent=1, ensure_ascii=False)
-        json.dump(guion_v5(job), open(os.path.join(out, 'guion.json'), 'w'), indent=1, ensure_ascii=False)
-        shutil.copy(os.path.join(PLANT, 'logo.png'), out); shutil.copy(os.path.join(BASE, 'plantilla_v5.py'), out)
-        shutil.copy(os.path.join(BASE, 'render_url.py'), out)
-        shutil.copy(os.path.join(BASE, 'text_positions.py'), out)
-        broll(job, out)
-        if not (os.path.exists(os.path.join(out, 'capsula-9x16.mp4')) and os.path.exists(os.path.join(out, 'capsula-16x9.mp4'))):
-            subprocess.run([sys.executable, 'render_url.py'], cwd=out, check=True)
-        if real:
-            from editor_preview import publish_preview
-            try:
-                preview_headers = {**UA}
-                for env_name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
-                    if os.environ.get(env_name): preview_headers[header] = os.environ[env_name]
-                publish_preview(job, out, API, preview_headers)
-            except Exception as error:
-                print('  editor: vista previa pendiente:', type(error).__name__)
-        publicar(job, out, real)
+        process_job(job, real=real, upload_preview=not local or '--upload-preview' in sys.argv, allow_local=bool(local), output_root=output_root)
 if __name__ == '__main__': main()
