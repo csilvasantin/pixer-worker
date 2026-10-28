@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import worker from '../src/index.js';
+import {execFileSync} from 'node:child_process';
+import worker, {stockPublishHandler} from '../src/index.js';
 import { validateEditableCapsula, capsulePreviewKey, boundedJson, capsuleReviewKey } from '../src/stock-capsula-editor.mjs';
 import { capsulaUrlJobKey } from '../src/capsula-url.mjs';
 
@@ -173,4 +174,35 @@ test('v5.7 preroll and postroll use output seconds, with contiguous copy and med
  c.media[0].t=[0,18];c.cartelas.postroll=false;assert.equal(validateEditableCapsula(c).ok,false);
  c.media[0].t=[0,14];assert.equal(validateEditableCapsula(c).ok,true);
  c.cartelas={preroll:'yes',postroll:null};assert.equal(validateEditableCapsula(c).ok,false);
+});
+
+
+test('a newly published capsule reopens its clean editable source and can save its first edit', async()=>{
+ const e=env();e.STOCK_BUCKET.store.clear();
+ const document=JSON.parse(execFileSync('python3',['-c',`
+import json
+from capsula_cola import guion_v5, editable_source
+job = {'ref': '${ref}', 'capsuleVersion': 1, 'source': {'url': 'https://example.com/original', 'kind': 'articulo', 'author': 'Fuente de prueba'}, 'guion': {'objeto': 'Una cápsula nueva', 'tema': 'tecnología', 'fuente': 'Fuente de prueba', 'gancho': 'Un dato interesante', 'giro': 'La explicación del dato', 'remate': 'La idea que recordarás'}}
+guion = guion_v5(job)
+print(json.dumps(editable_source(job, guion, {'sourceUrl': 'https://stock.admira.store/capsula-url/editor/aa519cf8a50173ad/v1/source.mp4'})))
+`],{cwd:new URL('../tools/capsulas-sabiasque/',import.meta.url),encoding:'utf8'}));
+ const pending=[];const context={waitUntil:p=>pending.push(Promise.resolve(p).catch(()=>{}))};
+ const payload={type:'video',motor:'AdmiraNeXT capsule fixture',mime:'video/mp4',base64:btoa('new-capsule-video'),externalRef:ref,capsuleSource:{version:1,sourceUrl:document.origen.url,broll:{start:0,end:12}},capsula:document,tags:['capsula','vertical']};
+ const published=await stockPublishHandler(request('/stock/publish',payload),e,context);
+ assert.equal(published.status,200,await published.clone().text());
+ const receipt=await published.json();
+ const opened=await call(e,'/stock/capsula/'+receipt.id,undefined,'GET',false);
+ assert.equal(opened.status,200,await opened.clone().text());
+ const result=await opened.json();assert.equal(result.capsula.parentId,receipt.id);
+ assert.equal(result.capsula.media[0].src,document.media[0].src);
+ assert.deepEqual(result.capsula.sourceGuion,document.sourceGuion);
+ const before=e.STOCK_BUCKET.store.get(`stock/${receipt.id}/meta.json`);
+ assert.equal(JSON.parse(before).parentId,undefined);
+ result.capsula.textos.gancho='Primera edición de la cápsula nueva';
+ const edit=request('/stock/capsula/'+receipt.id,result.capsula,'PUT');edit.headers.set('If-Match',opened.headers.get('ETag'));
+ const saved=await worker.fetch(edit,e,context);assert.equal(saved.status,200,await saved.clone().text());
+ const reloaded=await call(e,'/stock/capsula/'+receipt.id,undefined,'GET',false);
+ assert.equal((await reloaded.json()).capsula.textos.gancho,result.capsula.textos.gancho);
+ assert.equal(e.STOCK_BUCKET.store.get(`stock/${receipt.id}/meta.json`),before);
+ await Promise.all(pending);
 });

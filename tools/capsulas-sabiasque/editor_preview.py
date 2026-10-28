@@ -19,3 +19,5 @@ def publish_preview(job, out, api, headers):
     if not result.get('ok'):
         raise RuntimeError('editor preview upload failed')
     print('  editor: pista limpia publicada para versión',job.get('capsuleVersion',1))
+
+    return result

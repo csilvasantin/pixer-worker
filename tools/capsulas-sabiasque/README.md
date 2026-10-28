@@ -107,3 +107,20 @@ de publicación: `python3 -m unittest test_capsula_document.py`.
 Comprobaciones: 371 tests Node, 12 tests del documento/cola, contrato de posiciones con imágenes reales en ambos formatos y recorrido del navegador con el Worker real sobre bucket en memoria. El despliegue del Worker debe coordinarse con el puente Pixeria y AInimation; instalar primero el consumidor y generar/subir fuentes verificadas. No activar la opción de edición completa para una pieza sin `capsula/1` y su media fuente.
 
 La caché de fotogramas distingue URL y duración extraída: ampliar un tramo de 3 a 12 segundos obliga a extraer los 12 segundos, sin repetir el tramo corto de la revisión anterior.
+
+
+### Cápsulas nuevas: fuente editable desde la primera publicación
+
+Al publicar un trabajo nuevo, el consumidor sube primero la pista limpia de
+12 segundos mediante `/capsula/url/preview`; el Worker conserva esa media en
+R2 con una URL por hash. El consumidor transforma el guion real a `capsula/1`
+y adjunta la fuente, los textos, tiempos y crédito a cada orientación que
+publica. El Worker guarda el documento junto al nuevo ID de Stock: crear una
+cápsula ya permite abrir y guardar su primera edición sin sembrar un JSON a
+mano. El ID provisional de creación nunca se guarda como padre en el catálogo.
+
+Si la subida de la pista limpia falla, no se publica un vídeo sin fuente
+editable. El consumidor debe disponer de `NOTIFY_KEY` o
+`ADMIRANEXT_INGEST_TOKEN` para la pista limpia, y de `CAPSULA_QUEUE_KEY`,
+`ADMIRA_FLEET_KEY` o `NOTIFY_KEY` para publicar y subir previews. Las claves
+solo se leen del entorno; no forman parte de la fuente editable.

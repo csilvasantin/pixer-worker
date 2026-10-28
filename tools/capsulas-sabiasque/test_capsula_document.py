@@ -77,6 +77,57 @@ class DocumentTests(unittest.TestCase):
                          'recorte': {'x': .8, 'y': 0, 'w': .5, 'h': 1}}]
         with self.assertRaises(ValueError): validate(doc)
 
+    def test_new_publication_retains_clean_source_and_authenticated_editable_documents(self):
+        import capsula_cola
+        ref = 'capsula-url:aa519cf8a50173ad'
+        guion = fixture()
+        guion['origen'] = {'url': 'https://example.com/original', 'encargo': ref}
+        job = {'ref': ref, 'capsuleVersion': 1, 'source': {'url': guion['origen']['url']}}
+        source = {'sourceUrl': 'https://stock.admira.store/capsula-url/editor/source.mp4'}
+        sent = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return json.dumps({'ok': True, 'id': 'new-stock-'+str(len(sent)), 'url': 'https://stock.example/render.mp4'}).encode()
+        def record(request, timeout):
+            sent.append(request)
+            return Response()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, 'guion.json'), 'w') as fh: json.dump(guion, fh)
+            with patch.object(capsula_cola, 'get', return_value={'items': []}), \
+                 patch.object(capsula_cola.pub, 'payload', return_value={'type': 'video'}), \
+                 patch.object(capsula_cola, 'poster', return_value='fixture-poster'), \
+                 patch.object(capsula_cola.urllib.request, 'urlopen', side_effect=record), \
+                 patch.dict(os.environ, {'CAPSULA_QUEUE_KEY': 'fixture-renderer-key'}):
+                capsula_cola.publicar(job, directory, True, source_preview=source)
+            self.assertEqual(len(sent), 2)
+            for request in sent:
+                document = json.loads(request.data)['capsula']
+                self.assertEqual(request.headers['X-fleet-key'], 'fixture-renderer-key')
+                self.assertEqual(document['schema'], 'capsula/1')
+                self.assertEqual(document['ref'], ref)
+                self.assertEqual(document['version'], 1)
+                self.assertEqual(document['media'][0]['src'], source['sourceUrl'])
+                self.assertEqual(document['media'][0]['role'], 'background')
+                self.assertEqual(document['sourceGuion'], guion)
+                self.assertEqual(document['tiempos']['gancho'][1], document['tiempos']['giro'][0])
+            with self.assertRaises(ValueError):
+                capsula_cola.publicar(job, directory, True)
+
+    def test_new_capsule_does_not_publish_when_clean_source_upload_fails(self):
+        import capsula_cola
+        import editor_preview
+        job = {'ref': 'capsula-url:aa519cf8a50173ad', 'capsuleVersion': 1, 'guion': {'objeto': 'Prueba'}}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(capsula_cola, 'guion_v5', return_value=fixture()), \
+             patch.object(capsula_cola, 'broll'), \
+             patch.object(capsula_cola.subprocess, 'run'), \
+             patch.object(editor_preview, 'publish_preview', side_effect=RuntimeError('upload failed')), \
+             patch.object(capsula_cola, 'publicar') as publish:
+            with self.assertRaisesRegex(RuntimeError, 'upload failed'):
+                capsula_cola.process_job(job, real=True, output_root=directory)
+            publish.assert_not_called()
+
     def test_preview_never_publishes_even_with_real_flag(self):
         import capsula_cola
         with patch.object(capsula_cola, 'get', side_effect=AssertionError('No network')):

@@ -13,7 +13,7 @@ import glob, json, os, shutil, subprocess, sys, urllib.request, datetime, hashli
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
-from capsula_document import to_guion
+from capsula_document import from_guion, to_guion
 from text_positions import normalize_positions, SCHEMA as TEXT_POSITION_SCHEMA
 API = os.environ.get('STOCK_API', 'https://api.admira.store')
 UA = {'user-agent': 'Mozilla/5.0 admiranext-capsulas', 'origin': 'https://www.admira.studio'}
@@ -115,7 +115,34 @@ def poster(png):
     from PIL import Image
     im = Image.open(png).convert('RGB'); im.thumbnail((720, 720)); b = io.BytesIO(); im.save(b, 'JPEG', quality=82)
     return 'data:image/jpeg;base64,' + base64.b64encode(b.getvalue()).decode()
-def publicar(job, out, real):
+def editable_source(job, guion, preview):
+    """A new publication must retain a durable, clean source for its next edit."""
+    source_url = (preview or {}).get('sourceUrl', '')
+    if not source_url.startswith('https://'):
+        raise ValueError('pista limpia no disponible: no se publica una cápsula sin fuente editable')
+    document = from_guion(guion, 'capsula-new', job.get('capsuleVersion') or 1)
+    source = document.pop('sourceMedia', {})
+    credit = source.get('credito') or 'Fuente: ' + (job.get('source') or {}).get('author', 'fuente original')
+    document['media'] = [{'id': 'fuente-original', 'tipo': 'video', 'role': 'background',
+                          'src': source_url, 'credito': credit,
+                          't': source['t'], 'recorte': {'x': 0, 'y': 0, 'w': 1, 'h': 1}}]
+    document.pop('nextVersion', None)
+    return document
+
+
+def renderer_headers():
+    headers = {**UA}
+    token = (os.environ.get('CAPSULA_QUEUE_KEY') or os.environ.get('ADMIRA_FLEET_KEY')
+             or os.environ.get('STOCK_ADMIN_KEY') or os.environ.get('NOTIFY_KEY'))
+    if token:
+        headers['X-Fleet-Key'] = token
+    for name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
+        if os.environ.get(name):
+            headers[header] = os.environ[name]
+    return headers
+
+
+def publicar(job, out, real, source_preview=None):
     # A preview is never publishable, even when the unattended consumer uses --publicar.
     if job.get('previewOnly'):
         print('  PREVIEW: publicación y sustitución de versiones desactivadas')
@@ -123,6 +150,7 @@ def publicar(job, out, real):
     g = json.load(open(os.path.join(out, 'guion.json'), encoding='utf-8')); ref = job['ref']
     hp = os.path.join(out, 'publicados.json'); hechos = json.load(open(hp)) if os.path.exists(hp) else {}
     ver = job.get('capsuleVersion') or 1
+    document = job.get('capsula') or (editable_source(job, g, source_preview) if real else None)
     ya = [x for x in get(pub.INDICE)['items'] if x.get('type') == 'video' and x.get('externalRef') == ref and ((x.get('capsuleSource') or {}).get('version') or 1) >= ver]
     for orient, nombre in (('vertical', 'capsula-9x16.mp4'), ('horizontal', 'capsula-16x9.mp4')):
         prev = [x for x in ya if orient in (x.get('tags') or [])]
@@ -131,22 +159,19 @@ def publicar(job, out, real):
         p['prompt'] = (f"{g['locucion']['gancho']} · {g['locucion']['cifra']} · {g['locucion']['idea']} · Fuente: {job['source']['url']}")[:1000]
         br = g['capsulas'][0]['giro']['broll']
         p['capsuleSource'] = {'sourceUrl': job['source']['url'], 'credit': br.get('credito', ''), 'broll': {'start': br['t_capsula'][0], 'end': br['t_capsula'][1]}, 'version': job.get('capsuleVersion') or 1, **(g['capsulas'][0].get('cartelas') or {})}
-        if job.get('capsula'):
-            p['capsula'] = {**job['capsula'], 'version': ver}
-            p['parentId'] = job['capsula'].get('parentId')
+        if document:
+            p['capsula'] = {**document, 'version': ver}
+            p['parentId'] = document.get('parentId')
         p['poster'] = poster(os.path.join(out, nombre.replace('.mp4', '-t5s.png')))
         if not real: print(f'  [ensayo] {orient}:', json.dumps({k: v for k, v in p.items() if k != 'base64'}, ensure_ascii=False)); continue
         req = urllib.request.Request(f"{pub.API}/stock/publish", data=json.dumps(p).encode(), method='POST',
-              headers={'content-type': 'application/json', 'origin': 'https://www.pixeria.com', **pub.UA})
+              headers={**renderer_headers(), 'content-type': 'application/json', 'origin': 'https://www.pixeria.com'})
         with urllib.request.urlopen(req, timeout=300) as r: d = json.load(r)
         if not d.get('ok'): sys.exit(f'{orient}: rechazado: {d}')
         hechos[orient] = {'id': d['id'], 'url': d['url'], 'num': d.get('num'), 'version': ver, 'superseded': d.get('superseded'), 'resp': d}
         json.dump(hechos, open(hp, 'w'), indent=1, ensure_ascii=False); print(f"  {orient}: publicado → #{d.get('num')} {d['id']} · sustituye {d.get('superseded')}")
 def post(path, payload):
-    headers = {'content-type': 'application/json', **UA}
-    token = os.environ.get('CAPSULA_QUEUE_KEY') or os.environ.get('ADMIRA_FLEET_KEY') or os.environ.get('STOCK_ADMIN_KEY')
-    if token:
-        headers['X-Fleet-Key'] = token
+    headers = {'content-type': 'application/json', **renderer_headers()}
     req = urllib.request.Request(API+path, data=json.dumps(payload).encode(), headers=headers, method='POST')
     with urllib.request.urlopen(req, timeout=300) as r:
         return json.load(r)
@@ -261,16 +286,16 @@ def process_job(job, real=False, upload_preview=False, allow_local=False, output
             fh.write(fingerprint)
     if job.get('previewOnly'):
         return preview_result(job, out, upload_preview)
+    source_preview = None
     if real:
         from editor_preview import publish_preview
         try:
-            preview_headers = {**UA}
-            for env_name, header in [('ADMIRANEXT_INGEST_TOKEN', 'X-AdmiraNeXT-Ingest'), ('NOTIFY_KEY', 'X-Notify-Key')]:
-                if os.environ.get(env_name): preview_headers[header] = os.environ[env_name]
-            publish_preview(job, out, API, preview_headers)
+            source_preview = publish_preview(job, out, API, renderer_headers())
         except Exception as error:
+            if not job.get('capsula'):
+                raise  # A new capsule must not lose its editable source on first publication.
             print('  editor: vista previa pendiente:', type(error).__name__)
-    publicar(job, out, real)
+    publicar(job, out, real, source_preview=source_preview)
     return {'out': out}
 
 def main():

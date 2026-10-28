@@ -5787,12 +5787,17 @@ export async function stockPublishHandler(req, env, ctx) {
   const { type, motor, prompt, costEst, mime, base64, sourceUrl, thumbnail, comment, title } = body;
   // A preview must never enter the publication/supersede path, even if a caller errs.
   if (body.previewOnly === true) return json({ error: 'preview-cannot-publish' }, { status: 409 });
-  let editableCapsula = null;
+  let editableCapsula = null, capsulaParent = null;
   if (body.capsula != null) {
     if (!await capsuleWriteAuthorized(req, env)) return json({ error: 'capsula-session-required' }, { status: 401 });
     const checked = validateEditableCapsula(body.capsula);
     if (!checked.ok || type !== 'video' || body.externalRef !== checked.capsula?.ref || Number(body.capsuleSource?.version) !== checked.capsula?.version) return json({ error: 'invalid-capsula', errors: checked.errors }, { status: 400 });
     editableCapsula = checked.capsula;
+    const parent = await stockMetaById(env, editableCapsula.parentId);
+    if (parent) {
+      if (parent.externalRef !== editableCapsula.ref) return json({ error: 'capsula-parent-mismatch' }, { status: 409 });
+      capsulaParent = parent.id;
+    } else if (editableCapsula.parentId !== 'capsula-new') return json({ error: 'capsula-parent-not-found' }, { status: 404 });
   }
 
   let spriteIn=null;
@@ -6263,7 +6268,7 @@ export async function stockPublishHandler(req, env, ctx) {
     price,
     // Cápsula desde URL: fuente + tramo del b-roll para el reproductor interactivo (capsula-url.mjs).
     capsuleSource: type === 'video' ? sanitizeCapsuleSource(body.capsuleSource, typeof body.externalRef === 'string' ? body.externalRef.trim() : '') : null,
-    ...(editableCapsula ? { parentId: editableCapsula.parentId, capsuleVersion: editableCapsula.version, capsulaUrl: `${WORKER_PUBLIC_BASE}/stock/capsula/${id}` } : {}),
+    ...(editableCapsula ? { ...(capsulaParent ? {parentId: capsulaParent} : {}), capsuleVersion: editableCapsula.version, capsulaUrl: `${WORKER_PUBLIC_BASE}/stock/capsula/${id}` } : {}),
     // Catálogo al que pertenece la pieza (folleto de un cliente con fechas), o null.
     catalogo,
     // Null is intentional: replacing a binary cannot inherit the old master's copy layers.
