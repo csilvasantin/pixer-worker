@@ -1,0 +1,57 @@
+{
+  "schema": "admira.sprite/1",
+  "type": "furni",
+  "title": "Sofá local · acabado 2D",
+  "image": {
+    "file": "sofa-local-acabado-2d-32x32-4-caras.png",
+    "mime": "image/png",
+    "width": 128,
+    "height": 32
+  },
+  "frames": 4,
+  "frameW": 32,
+  "frameH": 32,
+  "facing": [
+    "front-right",
+    "front-left",
+    "back-left",
+    "back-right"
+  ],
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "contentRect": {
+    "x": 0,
+    "y": 6,
+    "width": 32,
+    "height": 26
+  },
+  "fp": [
+    3,
+    2
+  ],
+  "ph": 88,
+  "source": {
+    "width": 120,
+    "height": 24,
+    "frames": 4,
+    "frameW": 30,
+    "rgbaSha256": "cb4af41136d144810c19ce58700df9f230ecb1cb53161497670d77a530e49425"
+  },
+  "palette": {
+    "mode": "auto",
+    "limit": 8,
+    "colors": [
+      "#203e2f",
+      "#473826",
+      "#3b5d45",
+      "#436a4e",
+      "#7a603c",
+      "#547f5d",
+      "#67936b",
+      "#71a276"
+    ],
+    "transparency": "preserve-alpha"
+  }
+}
