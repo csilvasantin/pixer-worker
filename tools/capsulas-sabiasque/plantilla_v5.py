@@ -42,3 +42,21 @@ def fit_line(d,s,path,size,maxw,minsize=18):
     return ImageFont.truetype(path,minsize)
 def linea_fuente(L,s,font,x,y,col,a):
     if a>0: ImageDraw.Draw(L).text((x,y),s,font=font,fill=col+(int(255*a),))
+
+# v5.8 (31-oct-2026, #capsula/#formato): orientación y formatos del encargo.
+# job['formatos'] = ['vertical'] | ['horizontal'] | ambos; admite alias v/h/-v/-h/9x16/16x9/1080x1920/1920x1080.
+ORIENT={'vertical':(1080,1920,'capsula-9x16.mp4'),'horizontal':(1920,1080,'capsula-16x9.mp4')}
+_ALIAS={'v':'vertical','-v':'vertical','9x16':'vertical','1080x1920':'vertical','portrait':'vertical','vertical':'vertical',
+        'h':'horizontal','-h':'horizontal','16x9':'horizontal','1920x1080':'horizontal','landscape':'horizontal','horizontal':'horizontal'}
+def orient_de(v): return _ALIAS.get(str(v or '').strip().lower())
+def formatos_de(src=None,orientacion=None):
+    """Lista ordenada de orientaciones pedidas (sin duplicados). Sin datos → ambas (comportamiento anterior)."""
+    if isinstance(src,dict): orientacion=orientacion or src.get('orientacion'); src=src.get('formatos')
+    if isinstance(src,str): src=src.replace('+',',').replace(' ',',').split(',')
+    out=[]
+    for x in (src or []):
+        o=orient_de(x)
+        if o and o not in out: out.append(o)
+    if not out: out=[orient_de(orientacion)] if orient_de(orientacion) else ['vertical','horizontal']
+    return out
+def resoluciones(formatos): return [f"{ORIENT[o][0]}x{ORIENT[o][1]}" for o in formatos_de(formatos)]

@@ -46,8 +46,32 @@ export function capsulaUrlPrompt(source) {
     `TIPO: ${source.kind}\nURL: ${source.url}\nTÍTULO: ${source.title}\nAUTOR: ${source.author}\nDESCRIPCIÓN: ${source.description}\n\nTEXTO:\n${String(source.text || '').slice(0, 12000)}`;
 }
 
-// Normaliza el guion (venga de Gemini o editado por Carlos). Devuelve {ok, guion, errors}.
-export function normalizeCapsulaGuion(raw) {
+// #capsula / #formato (Carlos OK vía Woz, 31-oct-2026): opciones de producción del encargo.
+// formatos[] admite 'vertical'|'horizontal', 'v'|'h', '-v'|'-h', '9x16'|'16x9', '1080x1920'|'1920x1080'.
+export const CAPSULA_BOT = 'AdmiraXPBot';
+const ORIENT_ALIAS = { vertical: 'vertical', v: 'vertical', '-v': 'vertical', '9x16': 'vertical', '1080x1920': 'vertical', portrait: 'vertical',
+  horizontal: 'horizontal', h: 'horizontal', '-h': 'horizontal', '16x9': 'horizontal', '1920x1080': 'horizontal', landscape: 'horizontal' };
+export const capsulaOrient = v => ORIENT_ALIAS[String(v ?? '').trim().toLowerCase()] || null;
+export const capsulaOpuesta = o => o === 'vertical' ? 'horizontal' : o === 'horizontal' ? 'vertical' : null;
+export function normalizeCapsulaOpciones(raw) {
+  const b = raw && typeof raw === 'object' ? raw : {};
+  const requestedBy = clean(b.requestedBy, 120);
+  const bot = requestedBy === CAPSULA_BOT;
+  // Bot #capsula: preroll+postroll+cartela ACTIVADOS por defecto; Creador: apagados (v5.7) salvo true explícito.
+  const flag = (v, def) => v === true || v === 'true' ? true : v === false || v === 'false' ? false : def;
+  const orientacion = capsulaOrient(b.orientacion);
+  let formatos = [...new Set((Array.isArray(b.formatos) ? b.formatos : typeof b.formatos === 'string' ? b.formatos.split(/[\s,+]+/) : []).map(capsulaOrient).filter(Boolean))];
+  if (!formatos.length) formatos = orientacion ? [orientacion] : ['vertical', 'horizontal'];
+  if (b.formato === true && orientacion && !formatos.includes(capsulaOpuesta(orientacion))) formatos.push(capsulaOpuesta(orientacion));
+  const idioma = /^[a-z]{2}(-[A-Za-z]{2})?$/.test(String(b.idioma || '').trim()) ? String(b.idioma).trim() : null;
+  return { preroll: flag(b.preroll, bot), postroll: flag(b.postroll, bot), cartela: flag(b.cartela, bot),
+    orientacion: orientacion || formatos[0], formatos, idioma, subtitulos: flag(b.subtitulos, bot ? true : false),
+    requestedBy, autoApprove: bot && b.autoApprove !== false };
+}
+
+// Normaliza el guion (venga de Gemini o editado por Carlos). Devuelve {ok, guion, errors, opciones}.
+// `opciones` (2º argumento: el cuerpo del encargo) = preroll/postroll/orientacion/idioma/subtitulos/formatos[].
+export function normalizeCapsulaGuion(raw, body) {
   const L = CAPSULA_URL_LIMITS, g = raw && typeof raw === 'object' ? raw : {};
   const hastaRaw = g.cifra && typeof g.cifra === 'object' ? g.cifra.hasta : g.cifraHasta;
   const hasta = hastaRaw === '' || hastaRaw == null ? null : Number(String(hastaRaw).replace(/[.\s](?=\d{3}\b)/g, '').replace(',', '.'));
@@ -62,7 +86,9 @@ export function normalizeCapsulaGuion(raw) {
   if (guion.cifra.hasta == null) guion.cifra.unidad = '';
   if (guion.fuente && !/^(fuente|source)\s*:/i.test(guion.fuente)) guion.fuente = clean('Fuente: ' + guion.fuente, L.fuente);
   const errors = ['objeto', 'gancho', 'giro', 'remate', 'fuente'].filter(k => !guion[k]).map(k => 'missing_' + k);
-  return { ok: errors.length === 0, guion, errors };
+  const opciones = normalizeCapsulaOpciones({ ...(raw && typeof raw === 'object' ? raw : {}), ...(body && typeof body === 'object' ? body : {}) });
+  if (opciones.idioma) guion.idioma = opciones.idioma;
+  return { ok: errors.length === 0, guion, errors, opciones };
 }
 
 // Assets del Stock que ya son esta cápsula (misma ref → dedup por orientación).
@@ -78,7 +104,8 @@ export function capsulaUrlExisting(items, ref, minVersion = 1) {
 }
 
 export function capsulaUrlStatus(job, existing) {
-  if (existing.vertical && existing.horizontal) return 'publicada';
+  const pedidos = Array.isArray(job?.formatos) && job.formatos.length ? job.formatos : ['vertical', 'horizontal'];
+  if (pedidos.every(o => existing[o])) return 'publicada';
   if (existing.vertical || existing.horizontal) return 'parcial';
   return job ? (job.status || 'en-cola') : 'sin-encargo';
 }

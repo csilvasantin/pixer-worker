@@ -120,7 +120,8 @@ test('v5.7: cartelas opcionales, apagadas por defecto, en el encargo y en capsul
   const ref = 'capsula-url:f2382b48829e119e';
   assert.deepEqual([sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', broll: { start: 0, end: 12 } }, ref).preroll, sanitizeCapsuleSource({ sourceUrl: 'https://a.com/x', postroll: true }, ref).postroll], [false, true]);
   const src = (await import('node:fs')).readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
-  assert.match(src, /cartelas: \{ preroll: body\.preroll === true, postroll: body\.postroll === true \}/);
+  assert.match(src, /cartelas: \{ preroll: op\.preroll, postroll: op\.postroll, cartela: op\.cartela \}/);
+  const o = normalizeCapsulaGuion(GUION, {}).opciones; assert.deepEqual([o.preroll, o.postroll, o.cartela], [false, false, false]);
 });
 
 test('Director reads exact script; revisions preserve source and require authorization and compare-and-swap', async t => {
@@ -164,4 +165,26 @@ test('clean preview media requires authorization, exact version and MP4; preserv
  assert.equal((await worker.fetch(put('preview-key',endpoint,new Uint8Array(64)),e,ctx)).status,400);
  const response=await worker.fetch(put(),e,ctx);assert.equal(response.status,200);const manifest=await response.json();assert.equal(manifest.ref,ref);assert.equal(manifest.version,1);assert.match(manifest.sourceUrl,/\/v1\/[a-f0-9]{64}\.mp4$/);
  const saved=await(await worker.fetch(new Request(endpoint),e,ctx)).json();assert.equal(saved.sourceAspect,.5625);assert.equal(saved.schema,'admira.capsule-preview.v1');assert.equal(e.STOCK_BUCKET.m.get(key),before);
+});
+
+test('#capsula/#formato (31-oct-2026): encargar usa preroll/postroll/orientacion/idioma/subtitulos/formatos y auto-aprueba AdmiraXPBot', async t => {
+  const calls = []; mockFetch(t, calls); const e = env(); const ctx = { waitUntil() {} };
+  // Contrato de buildCapsulaEncargo (pixer-worker #51, Woz): #formato sobre un contenido horizontal.
+  const r = await worker.fetch(post('/capsula/url/encargar', { url: 'https://lnkd.in/p/e9zXSPkK', guion: GUION, preroll: true, postroll: true, cartela: true,
+    orientacion: 'horizontal', formatos: ['horizontal', 'vertical'], idioma: 'en', subtitulos: true, requestedBy: 'AdmiraXPBot', autoApprove: true, origen: 'telegram' }, 'https://admira.studio'), e, ctx);
+  const d = await r.json(); assert.equal(r.status, 202, JSON.stringify(d));
+  const job = JSON.parse([...e.STOCK_BUCKET.m.values()][0]);
+  assert.deepEqual(job.cartelas, { preroll: true, postroll: true, cartela: true });
+  assert.equal(job.orientacion, 'horizontal'); assert.deepEqual(job.formatos, ['horizontal', 'vertical']);
+  assert.equal(job.idioma, 'en'); assert.equal(job.guion.idioma, 'en'); assert.equal(job.subtitulos, true);
+  assert.equal(job.aprobado, true); assert.equal(job.approvedBy, 'AdmiraXPBot'); assert.equal(job.requestedBy, 'AdmiraXPBot');
+  assert.deepEqual(d.job.formatos, ['horizontal', 'vertical']); assert.equal(d.job.aprobado, true);
+  // #capsula solo: bot sin flags → cartelas por defecto activadas y una sola orientación (alias -v).
+  const o = normalizeCapsulaGuion(GUION, { requestedBy: 'AdmiraXPBot', formatos: ['-v'] }).opciones;
+  assert.deepEqual([o.preroll, o.postroll, o.cartela, o.orientacion, o.autoApprove], [true, true, true, 'vertical', true]); assert.deepEqual(o.formatos, ['vertical']);
+  // Creador: sin cambios (apagadas, ambas orientaciones, sin auto-aprobación).
+  const c = normalizeCapsulaGuion(GUION, {}).opciones; assert.deepEqual(c.formatos, ['vertical', 'horizontal']); assert.equal(c.autoApprove, false);
+  // Publicada cuando existen las orientaciones pedidas (no siempre las dos).
+  assert.equal(capsulaUrlStatus({ formatos: ['vertical'] }, { vertical: { id: 'v' } }), 'publicada');
+  assert.equal(capsulaUrlStatus({ formatos: ['vertical', 'horizontal'] }, { vertical: { id: 'v' } }), 'parcial');
 });
