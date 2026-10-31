@@ -69,6 +69,7 @@ import {
   sanitizeValidacion,
 } from './stock-poster.mjs';
 import { CAPSULA_MAX_BYTES, validateEditableCapsula, boundedJson, capsuleWriteAuthorized, stockCapsulaHandler, capsulaLegacyGuion, capsulePreviewKey, capsuleHttps, CAPSULA_REVIEW_PREFIX, capsuleReviewKey, capsuleReviewJobs } from './stock-capsula-editor.mjs';
+import { parseImportFlags, buildCapsulaEncargo } from './telegram-capsula.mjs';
 import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, CAPSULA_BOT, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded, campanaUrlPrompt, normalizeCampanaBorrador } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
@@ -4089,6 +4090,9 @@ async function monitorTubeImport(env, chatId, base, jobId, link, meta = {}, prog
         title: status && status.title ? String(status.title) : '',
         size: status && Number(status.size) ? Number(status.size) : 0,
         assetUrl: status && status.assetUrl ? String(status.assetUrl) : '',
+        // Para #capsula: idioma/subtítulos que detecte yt-dlp en el importador (si los da).
+        idioma: status && status.language ? String(status.language) : null,
+        subtitulos: status && typeof status.subtitles === 'boolean' ? status.subtitles : undefined,
       };
     }
     const bits = [];
@@ -4133,7 +4137,10 @@ function pickTelegramMedia(msg) {
 // Límite de la Bot API para descargas: 20 MB (los vídeos grandes van por URL/yt-dlp).
 async function handleTelegramAttachment(env, ctx, req, chatId, msg, media) {
   const emoji = media.kind === 'image' ? '🖼️' : media.kind === 'video' ? '🎬' : '🎵';
-  const caption = (msg.caption || '').trim() || null;
+  const flags = parseImportFlags((msg.caption || '').trim());
+  const caption = flags.comment || null;
+  // En un adjunto la cápsula necesita una fuente legible: la URL del caption.
+  const capLink = flags.capsula ? (((msg.caption || '').match(/https?:\/\/[^\s]+/i) || [])[0] || '').replace(/[).,]+$/, '') : '';
   await tgSend(env, chatId, `📥 Importando ${media.kind === 'image' ? 'imagen' : media.kind === 'video' ? 'vídeo' : 'audio'} ${emoji} adjunto…\n<i>te aviso al publicar en Stock.</i>`);
   try {
     const token = env.TELEGRAM_BOT_TOKEN;
@@ -4175,6 +4182,10 @@ async function handleTelegramAttachment(env, ctx, req, chatId, msg, media) {
       const t = await pr.text().catch(() => '');
       await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-publish', detail: `${pr.status} ${t}` }).catch(() => null);
       await tgSend(env, chatId, `⚠️ No pude publicar el adjunto (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>`);
+    } else if (flags.capsula) {
+      const pj = await pr.clone().json().catch(() => ({}));
+      if (capLink) await tgEncolarCapsula(env, req, chatId, capLink, flags, { orientacion: pj.orientacion });
+      else await tgSend(env, chatId, '⚠️ #capsula en un adjunto necesita una URL de origen en el texto: publicado solo en Stock.');
     }
   } catch (e) {
     await saveTelegramImportFailure(env, { chatId, link: '(adjunto)', format: media.kind, comment: caption, host: 'telegram', phase: 'attach-exception', detail: String(e) }).catch(() => null);
@@ -4199,6 +4210,7 @@ function telegramHelpText(env) {
     '',
     '<b>Qué puedes escribirle</b>',
     '• Pega una URL (YouTube, TikTok, LinkedIn, imagen…) o manda una foto/vídeo → lo importa al Stock de pixeria.com.',
+    '• Añade #capsula tras la URL → además encola una cápsula de conocimiento (auto-aprobada); #formato → cápsula en vertical y horizontal.',
     '• /avisosaqui → los avisos de publicación en Stock llegan a este chat · /avisosdonde → dónde van ahora.',
     '• /help → este mensaje.',
     '',
@@ -4244,6 +4256,64 @@ async function tgImportDedup(env, chatId, link) {
     return { handled: true };
   }
   return { handled: false, release: () => stockReleaseClaim(env, tgKey, mine) };
+}
+
+// #capsula / #formato desde Telegram (Carlos, OK 31-oct-2026): tras publicar (o si ya estaba
+// en Stock) se encola la cápsula auto-aprobada y se avisa cuando /capsula/url/estado la publica.
+// Llama a los handlers internos con un Origin propio (no hay salto de red). Depende de Jobs para
+// que /capsula/url/encargar lea formatos[]/orientacion/idioma/subtitulos/autoApprove; hasta
+// entonces, los campos extra se ignoran y la cápsula sale con la orientación por defecto.
+async function tgEncolarCapsula(env, req, chatId, link, flags, info = {}) {
+  if (!flags || !flags.capsula || !link) return null;
+  try {
+    let orientacion = info.orientacion || null;
+    if (!orientacion) {
+      const srcKey = await importSourceKeyResolved(link).catch(() => null);
+      const owner = srcKey && env.STOCK_BUCKET ? await stockLiveSourceOwner(env, srcKey).catch(() => null) : null;
+      orientacion = owner?.orientacion || null;
+    }
+    const origin = 'https://admira.studio';
+    const mk = (path, body) => new Request(new URL(path, req.url).toString(), { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) });
+    const br = await capsulaUrlBorradorHandler(mk('/capsula/url/borrador', { url: link }), env);
+    const borrador = await br.json().catch(() => null);
+    if (!br.ok || !borrador?.ok) {
+      await tgSend(env, chatId, `⚠️ No pude preparar la cápsula (${escHtml(borrador?.error || String(br.status))}).\n<code>${escHtml(link)}</code>`);
+      return null;
+    }
+    const encargo = buildCapsulaEncargo({ url: link, borrador, flags, orientacion, idioma: info.idioma || borrador.guion?.idioma, subtitulos: info.subtitulos });
+    const er = await capsulaUrlEncargarHandler(mk('/capsula/url/encargar', encargo), env);
+    const ej = await er.json().catch(() => null);
+    if (!er.ok || !ej?.ok) {
+      await tgSend(env, chatId, `⚠️ No pude encolar la cápsula (${escHtml(ej?.error || String(er.status))}).`);
+      return null;
+    }
+    const ref = ej.ref || borrador.ref;
+    const fmts = encargo.formatos.join(' + ');
+    if (ej.status === 'publicada') {
+      const url = Object.values(ej.existing || {}).map(x => x && x.url).find(Boolean);
+      await tgSend(env, chatId, `🎬 La cápsula ya estaba publicada.${url ? `\n<a href="${escHtml(url)}">Verla en Stock</a>` : ''}`);
+      return ej;
+    }
+    await tgSend(env, chatId, `🎬 Cápsula en cola (${escHtml(fmts)})…\n<i>te aviso cuando se publique.</i>`);
+    const deadline = Date.now() + 12 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await sleepMs(30000);
+      const st = await capsulaUrlState(env, ref).catch(() => null);
+      if (st?.status === 'publicada') {
+        const urls = Object.entries(st.existing || {}).map(([o, x]) => x && x.url ? `<a href="${escHtml(x.url)}">${escHtml(o)}</a>` : '').filter(Boolean);
+        await tgSend(env, chatId, `✅ <b>Cápsula publicada</b>${urls.length ? `\n${urls.join(' · ')}` : ''}`);
+        return st;
+      }
+      if (st?.job?.status === 'error' || st?.status === 'error') {
+        await tgSend(env, chatId, `⚠️ La cápsula falló: <code>${escHtml(String(st.job?.error || 'sin detalle').slice(0, 180))}</code>`);
+        return st;
+      }
+    }
+    await tgSend(env, chatId, `⏳ La cápsula sigue en cola (ref <code>${escHtml(ref)}</code>). Mírala en /capsula/url/estado.`);
+  } catch (e) {
+    await tgSend(env, chatId, `🚨 Error encolando la cápsula: <code>${escHtml(String(e).slice(0, 180))}</code>`).catch(() => {});
+  }
+  return null;
 }
 
 async function telegramWebhookHandler(req, env, ctx) {
@@ -4313,7 +4383,8 @@ async function telegramWebhookHandler(req, env, ctx) {
     return json({ ok: true });
   }
   const link = m[0].replace(/[).,]+$/, '');
-  const comment = text.replace(m[0], '').replace(/\b(audio|mp3)\b/ig, '').trim() || null;
+  const flags = parseImportFlags(text);
+  const comment = flags.comment.replace(m[0], '').replace(/\b(audio|mp3)\b/ig, '').trim() || null;
   // ¿Es una URL de imagen directa? Se mira la extensión del PATH (ignorando el
   // ?query, p.ej. council-leyendas.jpg?v=…). Si lo es, se publica como
   // type:image vía /stock/publish (que baja la sourceUrl del lado servidor),
@@ -4340,7 +4411,7 @@ async function telegramWebhookHandler(req, env, ctx) {
   if (isImage) {
     ctx.waitUntil((async () => {
       const dd = await tgImportDedup(env, chatId, link);
-      if (dd.handled) return;
+      if (dd.handled) { if (dd.existing) await tgEncolarCapsula(env, req, chatId, link, flags, { orientacion: dd.existing.orientacion }); return; }
       try {
       await tgSend(env, chatId, `📥 Importando imagen 🖼️ de <b>${escHtml(host)}</b>…\n<code>${escHtml(link)}</code>\n<i>te aviso al publicar en Stock.</i>`);
       try {
@@ -4354,6 +4425,9 @@ async function telegramWebhookHandler(req, env, ctx) {
           const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-publish', detail: `${pr.status} ${t}` }).catch(() => null);
           const savedLine = saved ? `\nGuardado en Enlaces: <code>${escHtml(saved.id)}</code>` : '';
           await tgSend(env, chatId, `⚠️ No pude publicar la imagen (${pr.status}): <code>${escHtml(t.slice(0, 180))}</code>${savedLine}`);
+        } else if (flags.capsula) {
+          const pj = await pr.clone().json().catch(() => ({}));
+          await tgEncolarCapsula(env, req, chatId, link, flags, { orientacion: pj.orientacion });
         }
       } catch (e) {
         const saved = await saveTelegramImportFailure(env, { chatId, link, format: 'image', comment, host, phase: 'image-exception', detail: String(e) }).catch(() => null);
@@ -4368,7 +4442,7 @@ async function telegramWebhookHandler(req, env, ctx) {
   const fmt = /\b(audio|mp3)\b/i.test(text) ? 'audio' : 'video';
   ctx.waitUntil((async () => {
     const dd = await tgImportDedup(env, chatId, link);
-    if (dd.handled) return;
+    if (dd.handled) { if (dd.existing) await tgEncolarCapsula(env, req, chatId, link, flags, { orientacion: dd.existing.orientacion }); return; }
     try {
     // Se guarda el id de ESTE mensaje: es el que se irá reescribiendo con el progreso y,
     // al final, con el resultado. Así la promesa «te aviso» se cumple en el mismo sitio
@@ -4421,6 +4495,7 @@ async function telegramWebhookHandler(req, env, ctx) {
             ? await tgAvisoSeguro(env, chatId, progresoMsgId, final, plano)
             : await tgAvisoSeguro(env, destino, null, final, plano);
           console.log(`[tube] aviso final via=${via} msg=${progresoMsgId}`);
+          if (flags.capsula) await tgEncolarCapsula(env, req, chatId, link, flags, { idioma: res.idioma, subtitulos: res.subtitulos });
           return;
         }
         if (res && res.failed) {
@@ -4438,6 +4513,7 @@ async function telegramWebhookHandler(req, env, ctx) {
             const pr = await stockPublishHandler(pubReq, env, ctx);
             if (pr.ok) {
               await tgSend(env, chatId, `🖼️ No había vídeo en el enlace: rescatada la <b>imagen</b> del post y publicada en Stock.\n<code>${escHtml(link)}</code>`);
+              if (flags.capsula) { const pj = await pr.clone().json().catch(() => ({})); await tgEncolarCapsula(env, req, chatId, link, flags, { orientacion: pj.orientacion }); }
               return;
             }
           }
