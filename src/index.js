@@ -69,7 +69,7 @@ import {
   sanitizeValidacion,
 } from './stock-poster.mjs';
 import { CAPSULA_MAX_BYTES, validateEditableCapsula, boundedJson, capsuleWriteAuthorized, stockCapsulaHandler, capsulaLegacyGuion, capsulePreviewKey, capsuleHttps, CAPSULA_REVIEW_PREFIX, capsuleReviewKey, capsuleReviewJobs } from './stock-capsula-editor.mjs';
-import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded, campanaUrlPrompt, normalizeCampanaBorrador } from './capsula-url.mjs';
+import { CAPSULA_URL_JOB_PREFIX, CAPSULA_URL_TAGS, capsulaUrlKind, capsulaUrlRef, capsulaUrlJobKey, capsulaUrlPrompt, normalizeCapsulaGuion, CAPSULA_BOT, capsulaUrlExisting, capsulaUrlStatus, sanitizeCapsuleSource, capsulaSuperseded, campanaUrlPrompt, normalizeCampanaBorrador } from './capsula-url.mjs';
 import { LIMITES, esErrorLimite, respuestaLimite, conLimite, fetchConLimite, pedirConLimite, crearPresupuesto, conReintentos } from './fetch-limite.mjs';
 // ▤ Creación de Xpacios · «Con foto o vídeo» (DCL-ddf3203078fe9471f3796130): POST /xpacio/estimar.
 import { xpacioEstimarHandler, corsXpacio, enDesarrollo } from './xpacio-estimar.mjs';
@@ -5037,7 +5037,7 @@ async function capsulaUrlJob(env, ref, renderId = '') {
 async function capsulaUrlState(env, ref, renderId = '') {
   const [job, items] = await Promise.all([capsulaUrlJob(env, ref, renderId), gridReadStockIndex(env)]);
   const existing = capsulaUrlExisting(items, ref, job?.capsuleVersion || 1);
-  return { ref, status: job?.previewOnly ? job.status : capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, createdAt: job.createdAt, capsuleVersion: job.capsuleVersion || 1, objeto: job.guion?.objeto, sourceUrl: job.source?.url, previewOnly: job.previewOnly === true, renderId: job.renderId || null, phase: job.phase || null, parentId: job.parentId || null, preview: job.preview || null, error: job.error || null } : null };
+  return { ref, status: job?.previewOnly ? job.status : capsulaUrlStatus(job, existing), existing, job: job ? { status: job.status, formatos: job.formatos || ['vertical', 'horizontal'], orientacion: job.orientacion || null, aprobado: job.aprobado === true, cartelas: job.cartelas || null, createdAt: job.createdAt, capsuleVersion: job.capsuleVersion || 1, objeto: job.guion?.objeto, sourceUrl: job.source?.url, previewOnly: job.previewOnly === true, renderId: job.renderId || null, phase: job.phase || null, parentId: job.parentId || null, preview: job.preview || null, error: job.error || null } : null };
 }
 async function capsulaUrlBorradorHandler(req, env) {
   if (!capsulaUrlOriginOk(req)) return json({ error: 'forbidden-origin' }, { status: 403 });
@@ -5083,8 +5083,9 @@ async function capsulaUrlEncargarHandler(req, env) {
   if (!safe) return json({ error: 'unsafe-or-invalid-url' }, { status: 400 });
   const sourceKey = importSourceKey(safe.href) || importSourceKey(body.url);
   const ref = await capsulaUrlRef(sourceKey || safe.href);
-  const norm = normalizeCapsulaGuion(body?.guion);
+  const norm = normalizeCapsulaGuion(body?.guion, body);
   if (!norm.ok) return json({ ok: false, error: 'invalid-guion', errors: norm.errors }, { status: 400 });
+  const op = norm.opciones;
   const rehacer = body.rehacer === true;
   const state = await capsulaUrlState(env, ref);
   if (state.status === 'publicada' && !rehacer) return json({ ok: true, reused: true, ...state });
@@ -5094,8 +5095,11 @@ async function capsulaUrlEncargarHandler(req, env) {
   const job = { version: 1, capsuleVersion, ref, status: 'en-cola', createdAt: new Date().toISOString(), plantilla: 'plantilla_guion_v5', tags: [...CAPSULA_URL_TAGS, norm.guion.tema.normalize('NFD').replace(/[\u0300-\u036f]/g, '')],
     source: { url: String(body.url).trim().slice(0, 1000), resolvedUrl: safe.href, sourceKey, kind: capsulaUrlKind(sourceKey), image, author: clean400(body.author, 200), title: clean400(body.title, 300) },
     guion: norm.guion, requestedBy: clean400(body.requestedBy, 120) || 'Creador admira.studio',
-    // v5.7 (22-oct-2026, Carlos): cartelas opcionales, DESACTIVADAS por defecto: la cápsula empieza y acaba en el cuerpo.
-    cartelas: { preroll: body.preroll === true, postroll: body.postroll === true } };
+    // v5.7 (22-oct-2026, Carlos): cartelas opcionales, DESACTIVADAS por defecto en el Creador.
+    // v5.8 (31-oct-2026, #capsula): el bot AdmiraXPBot las pide activadas + cartela, y se auto-aprueba.
+    cartelas: { preroll: op.preroll, postroll: op.postroll, cartela: op.cartela },
+    orientacion: op.orientacion, formatos: op.formatos, idioma: op.idioma, subtitulos: op.subtitulos,
+    ...(op.autoApprove ? { aprobado: true, approvedBy: CAPSULA_BOT, approvedAt: new Date().toISOString(), origen: clean400(body.origen, 40) || 'telegram' } : {}) };
   const key = capsulaUrlJobKey(ref);
   const put = await env.STOCK_BUCKET.put(key, JSON.stringify(job), { httpMetadata: { contentType: 'application/json' }, onlyIf: rehacer ? undefined : { etagDoesNotMatch: '*' } });
   if (!put) return json({ ok: true, reused: true, queued: false, ...(await capsulaUrlState(env, ref)) });

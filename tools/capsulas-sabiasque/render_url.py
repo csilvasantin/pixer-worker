@@ -408,4 +408,6 @@ def render(W,H,out):
     if p.wait()!=0: raise RuntimeError('ffmpeg no pudo generar el MP4')
     for s in STILLS: frame(s,W,H).convert('RGB').save(out.replace('.mp4',f'-t{s:g}s.png'))  # stills en el instante exacto
 if __name__=='__main__':
-    render(1920,1080,'capsula-16x9.mp4'); render(1080,1920,'capsula-9x16.mp4')
+    # v5.8: solo las orientaciones pedidas en el guion (formatos de plantilla_v5; por defecto ambas).
+    from plantilla_v5 import ORIENT, formatos_de
+    for o in formatos_de((G.get('capsulas') or [{}])[0].get('formatos'), G.get('orientacion')): render(*ORIENT[o])

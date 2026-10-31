@@ -13,6 +13,7 @@ import glob, json, os, shutil, subprocess, sys, urllib.request, datetime, hashli
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import publicar_sabias_v5 as pub
+from plantilla_v5 import ORIENT, formatos_de, resoluciones
 from capsula_document import from_guion, to_guion
 from text_positions import normalize_positions, SCHEMA as TEXT_POSITION_SCHEMA
 API = os.environ.get('STOCK_API', 'https://api.admira.store')
@@ -36,7 +37,7 @@ def guion_v5(job):
         "origen": {"url": s['url'], "resuelta": s.get('resolvedUrl'), "clave": s.get('sourceKey'), "tipo": s.get('kind'), "encargo": job['ref']},
         "locucion": {"gancho": g['gancho'], "cifra": g['giro'], "idea": g['remate']},
         "idea_clave": g.get('idea', ''),
-        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": tot, "plantilla": "v5.7", "cartelas": cart, "formatos": ["1920x1080", "1080x1920"], "titulo": "¿Sabías que?",
+        "capsulas": [{"id": f"url-{slug}-01", "version": "v1", "duracion_s": tot, "plantilla": "v5.7", "cartelas": cart, "formatos": resoluciones(job), "orientacion": formatos_de(job)[0], "idioma": job.get('idioma'), "subtitulos": job.get('subtitulos'), "titulo": "¿Sabías que?",
             "preroll": {"t": [0, 2], "logo": "admira_oficial", "titulo": "¿Sabías que?", "tipologia": tema.capitalize(), "texto": f"¿Sabías que? {tema.capitalize()}", "subtitulo": g.get('subtitulo') or ''},
             "gancho": {"t": [2, 5.05], "linea_t": [2.65, 4.95], "linea": g['gancho'],
                        "cifra": ({"desde": 0, "hasta": cifra['hasta'], "unidad": cifra.get('unidad', ''), "easing": "easeOutExpo"} if cifra.get('hasta') else None)},
@@ -152,7 +153,8 @@ def publicar(job, out, real, source_preview=None):
     ver = job.get('capsuleVersion') or 1
     document = job.get('capsula') or (editable_source(job, g, source_preview) if real else None)
     ya = [x for x in get(pub.INDICE)['items'] if x.get('type') == 'video' and x.get('externalRef') == ref and ((x.get('capsuleSource') or {}).get('version') or 1) >= ver]
-    for orient, nombre in (('vertical', 'capsula-9x16.mp4'), ('horizontal', 'capsula-16x9.mp4')):
+    for orient in formatos_de(job):  # v5.8: solo las orientaciones pedidas (#capsula = la del contenido, #formato = ambas)
+        nombre = ORIENT[orient][2]
         prev = [x for x in ya if orient in (x.get('tags') or [])]
         if prev or (orient in hechos and hechos[orient].get('version', 1) >= ver): print(f'  {orient}: ya en el Stock → {(hechos.get(orient) or prev[0])["id"]}'); continue
         p = pub.payload(g, os.path.join(out, nombre), orient, ref)
@@ -181,7 +183,8 @@ def preview_result(job, out, upload=False):
               'previewOnly': True, 'status': 'preview_ready', 'preview': {'orientaciones': {}}}
     if job.get('renderId'):
         result['renderId'] = job['renderId']
-    for orient, stem in (('vertical', 'capsula-9x16'), ('horizontal', 'capsula-16x9')):
+    for orient in formatos_de(job):
+        stem = ORIENT[orient][2][:-4]
         stills = sorted(glob.glob(os.path.join(out, stem+'-t*s.png')),
                         key=lambda p: float(os.path.basename(p).rsplit('-t', 1)[1][:-5]))
         files = [stem+'.mp4'] + [os.path.basename(p) for p in stills]
@@ -280,7 +283,7 @@ def process_job(job, real=False, upload_preview=False, allow_local=False, output
         broll(job, out)
     stamp = os.path.join(out, '.render-fingerprint')
     cached = open(stamp).read().strip() if os.path.exists(stamp) else ''
-    if cached != fingerprint or not all(os.path.exists(os.path.join(out, f)) for f in ('capsula-9x16.mp4', 'capsula-16x9.mp4')):
+    if cached != fingerprint or not all(os.path.exists(os.path.join(out, f)) for f in (ORIENT[o][2] for o in formatos_de(job))):
         subprocess.run([sys.executable, 'render_url.py'], cwd=out, check=True)
         with open(stamp, 'w') as fh:
             fh.write(fingerprint)

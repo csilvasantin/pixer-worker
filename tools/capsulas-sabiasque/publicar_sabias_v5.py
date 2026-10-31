@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Reconstrucción (22-oct-2026) de tools/publicar_sabias.py adaptada a la plantilla v5 (15 s, barra de progreso + menos texto).
-    python3 publicar_sabias_v4.py <carpeta> [--ref-sufijo -v3] [--publicar]
+    python3 publicar_sabias_v5.py <carpeta> [--ref-sufijo -v3] [--publicar] [-v] [-h] [--formatos vertical,horizontal]
+    -v / -h (o --formatos) limitan la publicación a esa orientación; sin ellos se usan los formatos del guion (v5.8).
 Sin --publicar solo hace ensayo. NO envía «comment»: la tarjeta del Stock lo pintaba como bloque 💬 duplicado (Carlos, 22-oct-2026). POST {API}/stock/publish con origin www.pixeria.com, igual que el original."""
 import base64, json, os, sys, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from plantilla_v5 import ORIENT, formatos_de
 API = os.environ.get("STOCK_API", "https://api.admira.store")
 INDICE = os.environ.get("STOCK_INDEX", "https://pub-bf043a4daa3b43b7a0b769617729d074.r2.dev/stock/index.json")
 MOTOR = "AdmiraNeXT · cápsula «¿Sabías que?» (Python + ffmpeg, plantilla v5, audio en silencio)"
@@ -23,8 +26,11 @@ def main():
     ref = f"sabias-que:{g['fecha']}:{g['tipo']}{suf}"
     with urllib.request.urlopen(urllib.request.Request(INDICE, headers=UA), timeout=60) as r:
         ya = [x for x in json.load(r)["items"] if x.get("type") == "video" and x.get("externalRef") == ref]
-    for orient, nombre in (("vertical", "capsula-9x16.mp4"), ("horizontal", "capsula-16x9.mp4")):
-        f = os.path.join(carpeta, nombre)
+    pedidos = [o for f, o in (("-v", "vertical"), ("-h", "horizontal")) if f in sys.argv]
+    if "--formatos" in sys.argv: pedidos += formatos_de(sys.argv[sys.argv.index("--formatos") + 1])
+    formatos = formatos_de(pedidos or (g.get("capsulas") or [{}])[0].get("formatos"), g.get("orientacion"))
+    for orient in formatos:
+        f = os.path.join(carpeta, ORIENT[orient][2])
         if orient in hechos: print(f"{orient}: ya publicado → {hechos[orient]['id']}"); continue
         prev = [x for x in ya if orient in (x.get("tags") or [])]
         if prev: print(f"{orient}: ya está en el Stock → {prev[0]['id']}"); continue
