@@ -369,3 +369,6 @@ Referencia R2: https://developers.cloudflare.com/r2/api/workers/workers-api-refe
 ### Etiquetas semánticas de importación
 
 Los motores `yt-dlp` y `local` pueden enviar `searchContext:{version:1,description?:string}` y hasta3 `analysisFrames` JPEG/WebP. La clasificación usa notas, título, descripción disponible y fotogramas; no analiza la pista sonora. Se conservan manuales y años explícitos incluso sin Gemini. `tagging` declara fuentes, modelo, número de fotogramas y propuestas; los fotogramas no se guardan en el índice. `routingSource` conserva solo las etiquetas y notas deliberadas del operador; Admira TV no crea una dirección por hashtag desde etiquetas inferidas; las reglas de contenido configuradas explícitamente conservan su selección temática. En duplicados comprobados se enriquece la búsqueda preservando la dirección heredada mediante `routingSource`, identidad y comentario originales. Las pistas de hash no enriquecen metadatos. El índice principal se persiste antes de confirmar, como en cualquier publicación.
+
+### Fleet HMAC / Clave HMAC de flota
+ES/EN: paid generation endpoints also accept per-agent fleet HMAC keys (`Persona|Equipo`, see `src/identidad-flota.mjs`) when the `MCP_FLOTA_SEED` secret is set; without it, that path fails closed.

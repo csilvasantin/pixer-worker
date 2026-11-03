@@ -6,6 +6,11 @@ Optional PNG-bound sprite metadata survives Stock and wallet storage. Verified d
 
 Sello `v.DD.MM.AAAA.rN.HH:MM` (norma 07). Se lee en `GET /healthz`.
 
+## v.03.11.2026.r1 · LucasMorfeo · Generación de pago acepta clave HMAC de flota
+
+- ES: `authorizePaidGeneration` acepta la clave por agente `base64url(HMAC-SHA256(MCP_FLOTA_SEED, "Persona|Equipo")).slice(0,40)` en `X-Fleet-Key`, `X-Notify-Key` o `Bearer` → `{ok:true, via:'fleet-hmac', persona, equipo}`. Sin `MCP_FLOTA_SEED` el camino HMAC queda cerrado. FLEET_KEY/NOTIFY_KEY/sesión sin cambios. Helper vendorizado en `src/identidad-flota.mjs` (+ equipo MacStudio).
+- EN: paid generation accepts per-agent fleet HMAC keys when `MCP_FLOTA_SEED` is set. Prod needs `wrangler secret put MCP_FLOTA_SEED` (same seed as other AdmiraNeXT MCP workers, vault `s:MCP_FLOTA_SEED`).
+
 ## v.22.10.2026.r5.22:09 · WozniakGrokBot · GrokBotBox · Cápsulas v5.7: cartelas opcionales (apagadas por defecto)
 
 - `POST /capsula/url/encargar`: `preroll`/`postroll` (booleanos, `false` por defecto) → `job.cartelas`. `capsuleSource` guarda `preroll`/`postroll`.
