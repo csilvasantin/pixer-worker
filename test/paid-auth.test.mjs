@@ -85,3 +85,32 @@ test('Store and XpaceOS Assets verify the destination session at fixed trusted e
  }
  for(const origin of ['https://admira.store.evil.test','http://admira.store','https://www.xpaceos.com.evil.test']){let calls=0;assert.equal((await authorizePaidGeneration(req({Origin:origin,Authorization:'Bearer forged'}),{PIXERIA_SIGNING_KEY:'key'},async()=>{calls++;return Response.json({ok:true});})).ok,false);assert.equal(calls,0);}
 });
+
+import { claveFlota } from '../src/identidad-flota.mjs';
+const SEED = 'fixture-seed-no-real';
+
+test('clave HMAC de flota (persona|equipo) autoriza generación de pago', async () => {
+  const k = await claveFlota(SEED, 'Trinity', 'MacStudio');
+  const env = { MCP_FLOTA_SEED: SEED, FLEET_KEY: 'f-key', NOTIFY_KEY: 'n-key' };
+  for (const h of [{ 'X-Fleet-Key': k }, { 'X-Notify-Key': k }, { Authorization: `Bearer ${k}` }]) {
+    const r = await authorizePaidGeneration(req(h), env, async () => { throw new Error('no remote'); });
+    assert.deepEqual(r, { ok: true, via: 'fleet-hmac', persona: 'Trinity', equipo: 'MacStudio' });
+  }
+  const m = await authorizePaidGeneration(req({ 'X-Fleet-Key': await claveFlota(SEED, 'Morfeo', 'MacMini') }), env);
+  assert.equal(m.persona, 'Morfeo');
+});
+
+test('clave HMAC errónea o sin semilla no autoriza; FLEET/NOTIFY siguen', async () => {
+  const k = await claveFlota(SEED, 'Trinity', 'MacStudio');
+  const noRemote = async () => Response.json({ ok: false }, { status: 401 });
+  const env = { MCP_FLOTA_SEED: SEED, FLEET_KEY: 'f-key', NOTIFY_KEY: 'n-key' };
+  const wrong = k.slice(0, 39) + (k[39] === 'A' ? 'B' : 'A');
+  assert.equal((await authorizePaidGeneration(req({ 'X-Fleet-Key': wrong }), env, noRemote)).ok, false);
+  assert.equal((await authorizePaidGeneration(req({ 'X-Fleet-Key': await claveFlota('otra', 'Trinity', 'MacStudio') }), env, noRemote)).ok, false);
+  assert.equal((await authorizePaidGeneration(req({ 'X-Fleet-Key': k }), { FLEET_KEY: 'f-key' }, noRemote)).ok, false);
+  assert.equal((await authorizePaidGeneration(req({ Authorization: `Bearer ${k}` }), { FLEET_KEY: 'f-key' }, noRemote)).ok, false);
+  assert.deepEqual(await authorizePaidGeneration(req({ 'X-Fleet-Key': 'f-key' }), env), { ok: true, via: 'fleet' });
+  assert.deepEqual(await authorizePaidGeneration(req({ 'X-Notify-Key': 'n-key' }), env), { ok: true, via: 'fleet' });
+  const ok = async () => Response.json({ ok: true, email: 'a@b.c' });
+  assert.deepEqual(await authorizePaidGeneration(req({ Authorization: 'Bearer sess' }), env, ok), { ok: true, via: 'session', email: 'a@b.c' });
+});

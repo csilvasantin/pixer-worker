@@ -1,6 +1,8 @@
 // Generación de pago: sesión de Pixeria (web) o clave de flota (agentes).
 // Sin una de las dos, el worker no llama al proveedor.
 
+import { identidadPorClave } from './identidad-flota.mjs';
+
 const encoder = new TextEncoder();
 
 export function isPaidGeneration(method, path) {
@@ -85,6 +87,15 @@ export async function authorizePaidGeneration(req, env, fetchImpl = fetch) {
   for (const key of keys) {
     if (same(key, env && env.FLEET_KEY) || same(key, env && env.NOTIFY_KEY)) {
       return { ok: true, via: 'fleet' };
+    }
+  }
+  // Clave HMAC por agente (persona|equipo) derivada de MCP_FLOTA_SEED. Sin semilla: cerrado.
+  const seed = env && env.MCP_FLOTA_SEED;
+  if (seed) {
+    for (const key of keys) {
+      if (!key || key.length !== 40) continue;
+      const id = await identidadPorClave(key, seed).catch(() => null);
+      if (id) return { ok: true, via: 'fleet-hmac', persona: id.persona, equipo: id.equipo };
     }
   }
   const bearer = (/^Bearer\s+(\S+)$/i.exec(req.headers.get('Authorization') || '') || [])[1] || '';
