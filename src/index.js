@@ -1,3 +1,4 @@
+import { esParaPresentacion, reenviarPresentacion } from './presentacion-forward.mjs';
 import {normalizeSprite,spritePlacement,bindSprite} from './sprite-contract.mjs';
 import {validateEditorProject} from './stock-editor-project.mjs';
 import {normalizeTextPositions,TEXT_POSITIONS_SCHEMA} from './capsule-text-positions.mjs';
@@ -4339,6 +4340,12 @@ async function telegramWebhookHandler(req, env, ctx) {
         await env.STOCK_BUCKET.put('diag/tg-chats.json', JSON.stringify(arr.slice(-20)), { httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' } });
       } catch {}
     })());
+  }
+  // PortAventuraNeXT /enviar telegram: respuestas de Carlos a las diapositivas → el sitio (src/presentacion-forward.mjs).
+  if (esParaPresentacion(msg, env)) {
+    const respuesta = await reenviarPresentacion(update, env);
+    if (respuesta) await tgSend(env, chatId, escHtml(respuesta));
+    return json({ ok: true });
   }
   const textoMando = String((msg.text || msg.caption || '')).trim();
   const deDuenno = !env.TELEGRAM_CHAT_ID || String((msg.from && msg.from.id) || '') === String(env.TELEGRAM_CHAT_ID);
