@@ -6,7 +6,7 @@ import { shotIntervalGet, shotIntervalPut } from './shot-interval.mjs';
 import {advertisementAnalysis} from './advertisement-analysis.mjs';
 import { presenceBeat, presenceAll, presenceObservation } from './presence-clock.mjs';
 import {SEARCH_TAGS_MAX, searchContext, importRoutingSource, inferredSearchTags, visualSamples, taggingEvidence} from './stock-search-tags.mjs';
-import { upsertStockIndex, stockIndexCondition, STOCK_INDEX_KEY, STOCK_INDEX_HTTP } from './stock-index.mjs';
+import { upsertStockIndex, stockIndexItems, stockIndexCondition, STOCK_INDEX_KEY, STOCK_INDEX_HTTP } from './stock-index.mjs';
 import {validateComposition,bindComposition} from './content-composition.mjs';
 import {recoverMedia} from './xpace-media.mjs';
 import {ttsCatalog} from './tts-catalog.mjs';
@@ -6471,6 +6471,30 @@ export async function stockPublishHandler(req, env, ctx) {
   return json({ ok: true, id, ...(editorProject ? {editorProjectUrl,externalRef:meta.externalRef,versionRoot:meta.versionRoot} : {}), num: meta.num || null, index: indexed.receipt, orientacion: meta.orientacion || null, tags: meta.tags || [], ...(importContext ? {routingSource:meta.routingSource,tagging:meta.tagging} : {}), url: publicUrl, createdAt: meta.createdAt, contentHash,composition:meta.composition||null, poster: meta.poster || null, thumbnail: meta.thumbnail || null, validacion: meta.validacion || null, ...(meta.capsuleSource ? { capsuleSource: meta.capsuleSource, superseded } : {}), ...(replacing ? { replaced: true, reason: decision.reason } : {}) });
 }
 
+async function stockListFromIndex(env, req, limit) {
+  try {
+    const obj = await env.STOCK_BUCKET.get(STOCK_INDEX_KEY);
+    if (!obj) return null;
+    const lista = stockIndexItems(await obj.json());
+    if (!lista.length) return null;
+    const origin = new URL(req.url).origin;
+    const reorigen = v => (typeof v === 'string' && v.startsWith(WORKER_PUBLIC_BASE)) ? origin + v.slice(WORKER_PUBLIC_BASE.length) : v;
+    const visibles = lista.filter(m => m && m.id && !m.oculto);
+    // La MISMA selección que el camino de R2: los N primeros por clave descendente
+    // (stock/<id>/meta.json) y, de esos, orden por createdAt.
+    const clave = m => `stock/${m.id}/meta.json`;
+    const recientes = [...visibles].sort((a, b) => clave(b).localeCompare(clave(a))).slice(0, limit);
+    recientes.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    const items = recientes.map(m => ({
+      ...m,
+      url: m.assetKey ? `${origin}/stock/asset/${m.id}?v=${m.size || 0}` : m.url,
+      thumbnail: reorigen(m.thumbnail),
+      poster: m.poster == null ? null : reorigen(m.poster),
+    }));
+    return json({ items, total: visibles.length });
+  } catch { return null; }
+}
+
 async function stockListHandler(req, env, url) {
   if (!env.STOCK_BUCKET) return json({ error: 'r2-not-bound' }, { status: 500 });
   const typeFilter = url.searchParams.get('type') || '';
@@ -6485,6 +6509,17 @@ async function stockListHandler(req, env, url) {
   const conOcultos = url.searchParams.get('ocultos') === '1';
   const hasFilter = !!(typeFilter || motorFilter || catalogoFilter || clienteFilter || tagFilter || qFilter);
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
+
+  // Sin filtros (lo que piden los players: canal.html y la app nativa al entrar cada
+  // tag-<lista>): se sirve del índice stock/index.json, UN objeto que se mantiene al
+  // publicar/mutar y con el cron. Recorrer el bucket entero (miles de claves) y leer
+  // 200 meta.json costaba 6-8 s por petición y retrasaba ese tanto cada orden del
+  // mando en el Mupi (15-nov-2026). Mismo contrato: URL /stock/asset/<id>?v=size del
+  // origen, sin ocultos, orden por createdAt. Si el índice falta, el camino de siempre.
+  if (!hasFilter && !conOcultos) {
+    const rapido = await stockListFromIndex(env, req, limit);
+    if (rapido) return rapido;
+  }
 
   // List todos los meta.json bajo stock/. R2 devuelve hasta 1000/request.
   let allMetaKeys = [];
