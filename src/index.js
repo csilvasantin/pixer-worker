@@ -3640,7 +3640,9 @@ async function signageNowGetHandler(req, env, url) {
   const seen=observed&&observed.fingerprint===fingerprint&&Number.isFinite(observed.ts)?Math.max(stored.__w||0,observed.ts):stored&&stored.__w;
   return json({ ok: true, screen, item: item || null, device: (stored && stored.device) || null,
     health: (stored && stored.health) || null,
-    standby: !!(stored && stored.standby), ip: (stored && stored.__ip) || null,
+    // Sin `ip`: este GET es público y la IP del player no debe salir (regla de seguridad de Carlos, 15-nov-2026).
+    // Ningún player la lee; sólo cms.html la pintaba de adorno y sin ella no la muestra. Se sigue guardando (__ip).
+    standby: !!(stored && stored.standby),
     lastSeen: seen || null, producer: (stored && stored.__producer) || null });
 }
 
