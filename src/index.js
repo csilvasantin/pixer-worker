@@ -8548,6 +8548,7 @@ export function screenCacheSignature(ready, total, downloading, contents = []) {
   });
 }
 const SCREEN_CACHE_TTL = 600;             // 10 min sin reporte → el inventario caduca
+const SCREEN_CACHE_MIN_MS = 120 * 1000;   // tope duro: 1 escritura/pantalla cada 2 min
 const SCREEN_CACHE_REFRESH_MS = 420 * 1000; // sin cambios se reescribe como mucho cada 7 min (era 60 s)
 async function screenCacheHandler(req, env, url) {
   if (!env.SIGNAGE_KV) return json({ error: 'kv-not-bound' }, { status: 500 });
@@ -8565,6 +8566,10 @@ async function screenCacheHandler(req, env, url) {
   const now = Date.now(), sig = screenCacheSignature(ready, rec.total, downloading, contents);
   let prev = null; try { prev = JSON.parse(await env.SIGNAGE_KV.get('screen:cache:' + screen) || 'null'); } catch (e) {}
   if (prev && prev.__sig === sig && (now - (prev.at || 0)) < SCREEN_CACHE_REFRESH_MS) return json({ ok: true, screen, throttled: 'unchanged', at: prev.at });
+  // 20-nov-2026 (KV al 80 %): varias pestañas de canal por pantalla con inventarios distintos
+  // alternaban la firma y cada POST (~50/min desde 4 pantallas) era una escritura. Como mucho
+  // una escritura por pantalla cada 2 min, cambie o no la firma.
+  if (prev && (now - (prev.at || 0)) < SCREEN_CACHE_MIN_MS) return json({ ok: true, screen, throttled: 'min-interval', at: prev.at });
   rec.__sig = sig;
   if (!(await reserveKvWrite(env, now))) return json({ ok: true, screen, throttled: kvWriteDenyReason(env) });
   try { await env.SIGNAGE_KV.put('screen:cache:' + screen, JSON.stringify(rec), { expirationTtl: SCREEN_CACHE_TTL }); } catch (e) {}
